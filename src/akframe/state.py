@@ -18,6 +18,7 @@ from .features import BarReading, PauseReading, SpeedReading
 LOGICAL_FPS = 30.0    # 1 倍速 = 每秒 30 逻辑帧
 BULLET_FACTOR = 0.2   # 子弹时间无视当前倍速，把速率压到 1/5
 ZERO_RUN_LIMIT = 3    # fill 连续为 0 超过这么多帧就认为条不可读，切时钟通道
+CLOCK_ARM_FRAMES = 5  # 「条不可读 + 运行中」要连续保持这么多帧，才允许挂钟通道补帧
 DFILL_SLACK = 3.0     # 像素通道允许「比期望多」多少逻辑帧，超出判为读数异常
 STALL_SLACK = 1.5     # 比期望少这么多只告警，不改变结果（可能是采集卡顿）
 
@@ -67,6 +68,9 @@ class Counter:
         self.elapsed = 0
         self._fill_prev = 0
         self._zero_run = 0
+        self._unread_run = 0       # 「条不可读 + 运行中」连续了多少帧
+        self._need_confirm = True  # 是否刚从暂停回来（是的话挂钟通道要先确认，见 _clock_gated）
+        self._clock_wait = 0.0     # 确认之前攒下的挂钟秒数，确认时一次性补上
         self._fill_acc = 0.0       # 像素通道余量（单位：px）
         self._clock_frac = 0.0     # 时钟通道余量（单位：逻辑帧）
         self._started = False
@@ -101,9 +105,15 @@ class Counter:
             self._started = True
         elif not pause.running:
             mode, delta = 'pause', 0
+            # 暂停 -> 挂钟通道必须重新「确认」：否则暂停期间图标闪一下就会被当成在跑
+            self._unread_run = 0
+            self._clock_wait = 0.0
+            self._need_confirm = True
         elif self._zero_run >= ZERO_RUN_LIMIT or bar.state in ('MAX', 'MAX_FADE'):
-            mode, delta = self._clock(rate, dt)
+            mode, delta = self._clock_gated(rate, dt)
         else:
+            self._unread_run = 0
+            self._need_confirm = False     # 条能读到就是「游戏在跑」的直接证据
             mode, delta, warn = self._pixel(rate, dt, bar.fill)
 
         # 注意：这里**不能**在换通道时把余量清零。余量代表「不足一帧的相位」，
@@ -141,7 +151,37 @@ class Counter:
             return (float('nan'), self.probe_frames, self.probe_mt)
         return (self.probe_frames / self.probe_mt, self.probe_frames, self.probe_mt)
 
+    def _clock_gated(self, rate: float, dt: float) -> tuple:
+        """挂钟通道，但先要确认游戏真的在跑。
+
+        为什么必须确认：暂停时暂停键图标会以 2~3 帧为单位闪成「运行中」形状（实测一段
+        76 秒的暂停录像里闪了 28 次）。闪的那几帧里条正好不可读（满费），旧逻辑就照挂钟
+        补帧 —— 每次闪凭空多 1 帧、总共多 30 帧，肉眼完全看不出来。
+
+        规则：「条不可读 + 运行中」必须连续保持 CLOCK_ARM_FRAMES 帧才承认。确认之前那几帧
+        的挂钟时间先攒着（不计数），确认的一刻一次性补上，所以真实的满费/锁费一点都不会少算。
+
+        只在**刚从暂停回来**（_need_confirm）时才要求确认，这一点很关键：
+          - 闪烁一定发生在暂停期间（前面有一串暂停帧），所以它一定躲不过确认 -> 被吃掉；
+          - 正常打的时候一直在跑，条一旦变成满费就立刻照常补帧，不会因为「等确认」丢帧
+            （实测 2 倍速录像里，无条件确认会丢 8 帧，加上这条判据后不再丢）。
+
+        注意：**像素通道（条能读到）完全不经过这里**。暂停后继续时条是能读到的
+        （实测暂停中 fill 仍然正常），所以「快速暂停 / 继续 / 再暂停」的识别速度不受影响。
+        """
+        self._unread_run += 1
+        if self._need_confirm and self._unread_run < CLOCK_ARM_FRAMES:
+            self._clock_wait += rate * dt
+            return 'clock-wait', 0
+        self._need_confirm = False
+        acc = rate * dt + self._clock_wait + self._clock_frac
+        self._clock_wait = 0.0
+        delta = int(acc)
+        self._clock_frac = acc - delta
+        return 'clock', delta
+
     def _clock(self, rate: float, dt: float) -> tuple:
+        """不带确认的挂钟补帧（只给像素通道读数跳变时的兜底用）。"""
         acc = rate * dt + self._clock_frac
         delta = int(acc)
         self._clock_frac = acc - delta
@@ -170,4 +210,7 @@ class Counter:
         self._fill_acc = 0.0
         self._clock_frac = 0.0
         self._zero_run = 0
+        self._unread_run = 0
+        self._need_confirm = True
+        self._clock_wait = 0.0
         self._prev_mode = None
