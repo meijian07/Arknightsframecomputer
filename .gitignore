@@ -1,0 +1,16 @@
+# ---- 运行产物 / 缓存 ----
+# out/cache 是抽流出来的原始 ROI 帧，跑几段视频就能到几百 MB，绝对不能提交
+out/
+
+# ---- Python ----
+__pycache__/
+*.pyc
+*.pyo
+
+# ---- 根目录下从视频里裁的临时分析截图（保留在本地，不进仓库）----
+/*.png
+
+# raw frame dumps from local analysis (large)
+tools/*.raw
+tools/*.npy
+tools/*.png

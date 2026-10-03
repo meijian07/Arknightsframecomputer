@@ -1,0 +1,243 @@
+"""三个 UI 元素的 ROI 计算。
+
+坐标约定：x 向右、y 向下，矩形用 (x, y, w, h) 表示，覆盖 x..x+w-1 与 y..y+h-1。
+
+所有尺寸常数都以「单位尺度 s = 1」（即 1920x1080 的窗口）表示。
+目前的数值是把 2560x1600 的实测值除以 s = 1.3333 反推出来的，
+**只在一个窗口尺寸上验证过**；换尺寸后必须重新实测校正，不要盲目相信。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+REF_W = 1920
+REF_H = 1080
+
+# ---- 单位尺度常数（s = 1 时的像素值）----
+BAR_W_UNIT = 180.0                    # 费用条槽宽度（= 一个费用周期的填充行程）
+BAR_CENTER_FROM_BOTTOM_UNIT = 268.0   # 条中心距窗口底边
+BAR_ROI_H = 17                        # 条 ROI 高度（固定像素，容错 ±1px 足够）
+BAR_BAND_TOP = 5                      # ROI 内取第 5..12 行做逐列中位数
+BAR_BAND_BOTTOM = 13                  # （左闭右开）
+
+BTN_W_UNIT = 150.0                    # 右上角按钮宽
+BTN_H_UNIT = 120.0                    # 右上角按钮高
+BTN_TOP_UNIT = 30.0                   # 按钮顶边距窗口上边
+PAUSE_RIGHT_MARGIN_UNIT = 45.0        # 暂停键右边距
+SPEED_RIGHT_MARGIN_UNIT = 210.0       # 倍速键右边距
+
+# ---- 按钮内部条带在 ROI 中的占比（实测自 200x160 的 ROI）----
+PAUSE_SHAPE_BAND = (38 / 160, 49 / 160)     # 形状判别条带：三角顶端 / 双竖条顶端
+# 倍速数字（1X / 2X）。只取上半段：实测数字笔画在 ROI 行 20..68，而子弹时间的三条
+# 细箭头在行 52..80，截到 50 就能把两者在垂直方向分开（否则箭头会冒充数字）。
+SPEED_DIGIT_BAND = (18 / 160, 50 / 160)
+SPEED_ARROW_BAND = (70 / 160, 116 / 160)    # 倍速箭头（> / >> / >>>），备用
+SPEED_DIGIT_COLS = (0.30, 0.85)             # 数字的横向范围（占 ROI 宽度比例）
+
+# ---- 判别阈值（都用「占比」而不是像素数，这样与分辨率无关）----
+RUN_PAUSE_RATIO_MIN = 0.15   # 形状特征占比 >= 此值判为「运行中」，否则「已暂停」
+DIGIT_RATIO_MIN = 0.20       # 数字条带亮点占比 >= 此值判为「有倍速数字」
+CORR_2X_MIN = 0.60           # 与 2X 模板的相关系数阈值
+
+
+@dataclass(frozen=True)
+class Rect:
+    x: int
+    y: int
+    w: int
+    h: int
+
+    @property
+    def x2(self) -> int:
+        return self.x + self.w - 1
+
+    @property
+    def y2(self) -> int:
+        return self.y + self.h - 1
+
+    @property
+    def pixels(self) -> int:
+        return self.w * self.h
+
+    def crop_filter(self) -> str:
+        """给 ffmpeg 用的裁剪表达式。
+
+        注意：必须先 format=gray 再 crop。对 yuv420p 原始帧，色度是 2x2 下采样，
+        crop 的 x/y/w/h 会被强制取偶（本机实测 h=17 被悄悄改成 16）。转成 gray
+        后是单平面，奇数尺寸才不会被改。
+        """
+        return 'crop=%d:%d:%d:%d' % (self.w, self.h, self.x, self.y)
+
+    def band_rows(self, top_frac: float, bottom_frac: float) -> tuple:
+        """把 ROI 高度上的占比区间换算成行号闭区间。"""
+        r0 = int(round(self.h * top_frac))
+        r1 = max(r0, int(round(self.h * bottom_frac)) - 1)
+        return r0, min(r1, self.h - 1)
+
+    def cols_range(self, left_frac: float, right_frac: float) -> tuple:
+        c0 = int(round(self.w * left_frac))
+        c1 = max(c0, int(round(self.w * right_frac)) - 1)
+        return c0, min(c1, self.w - 1)
+
+    def to_dict(self) -> dict:
+        return {'x': self.x, 'y': self.y, 'w': self.w, 'h': self.h}
+
+    @staticmethod
+    def from_dict(d: dict) -> 'Rect':
+        return Rect(d['x'], d['y'], d['w'], d['h'])
+
+
+@dataclass(frozen=True)
+class Layout:
+    width: int
+    height: int
+    scale: float
+    bar: Rect
+    pause: Rect
+    speed: Rect
+
+    @property
+    def bar_w(self) -> int:
+        """条槽宽度 = 一个费用周期的填充行程（像素）。"""
+        return self.bar.w
+
+    @property
+    def px_per_frame(self) -> float:
+        """一个逻辑帧对应多少像素。核心常数：一个费用周期恒为 30 逻辑帧。"""
+        return self.bar.w / 30.0
+
+    @property
+    def bar_band(self) -> tuple:
+        return (BAR_BAND_TOP, BAR_BAND_BOTTOM - 1)
+
+    def validate(self) -> None:
+        """ROI 不能越界。
+
+        ffmpeg 的 crop 在 x+w 超出帧宽时会静默左移 x（本机踩过：2200 被改成 2160），
+        越界不会报错、只会让数据对不上，所以这里必须硬断言。
+        """
+        for name in ('bar', 'pause', 'speed'):
+            r = getattr(self, name)
+            if r.x < 0 or r.y < 0 or r.x2 >= self.width or r.y2 >= self.height:
+                raise ValueError(
+                    'ROI 越界：%s = (x=%d, y=%d, w=%d, h=%d)，帧尺寸 %dx%d'
+                    % (name, r.x, r.y, r.w, r.h, self.width, self.height))
+
+    def to_dict(self) -> dict:
+        return {
+            'width': self.width,
+            'height': self.height,
+            'scale': self.scale,
+            'bar': self.bar.to_dict(),
+            'pause': self.pause.to_dict(),
+            'speed': self.speed.to_dict(),
+        }
+
+    @staticmethod
+    def from_dict(d: dict) -> 'Layout':
+        return Layout(
+            width=d['width'],
+            height=d['height'],
+            scale=d['scale'],
+            bar=Rect.from_dict(d['bar']),
+            pause=Rect.from_dict(d['pause']),
+            speed=Rect.from_dict(d['speed']),
+        )
+
+
+def ui_scale(width: int, height: int) -> float:
+    """UI 缩放系数。宽高比 >= 16:9 时高度是限制边，否则宽度是限制边。"""
+    if width <= 0 or height <= 0:
+        raise ValueError('帧尺寸非法：%dx%d' % (width, height))
+    if width / height >= 16 / 9:
+        return height / REF_H
+    return width / REF_W
+
+
+def layout_for(width: int, height: int) -> Layout:
+    """按帧（窗口）尺寸推算三个 ROI。"""
+    s = ui_scale(width, height)
+
+    bar_w = int(round(BAR_W_UNIT * s))
+    bar_x = width - bar_w
+    bar_cy = height - int(round(BAR_CENTER_FROM_BOTTOM_UNIT * s))
+    bar = Rect(bar_x, bar_cy - BAR_ROI_H // 2, bar_w, BAR_ROI_H)
+
+    btn_w = int(round(BTN_W_UNIT * s))
+    btn_h = int(round(BTN_H_UNIT * s))
+    btn_y = int(round(BTN_TOP_UNIT * s))
+    pause = Rect(width - int(round(PAUSE_RIGHT_MARGIN_UNIT * s)) - btn_w, btn_y, btn_w, btn_h)
+    speed = Rect(width - int(round(SPEED_RIGHT_MARGIN_UNIT * s)) - btn_w, btn_y, btn_w, btn_h)
+
+    lay = Layout(width=width, height=height, scale=s, bar=bar, pause=pause, speed=speed)
+    lay.validate()
+    return lay
+
+
+# ---- 实时链路用到的补充工具：外接矩形、校准偏移、存档 ----
+
+def union_rect(rects) -> Rect:
+    """若干 ROI 的外接矩形。实时抓屏时一次抓它，再在内存里切出各个 ROI。"""
+    x0 = min(r.x for r in rects)
+    y0 = min(r.y for r in rects)
+    x1 = max(r.x2 for r in rects)
+    y1 = max(r.y2 for r in rects)
+    return Rect(x0, y0, x1 - x0 + 1, y1 - y0 + 1)
+
+
+def apply_deltas(base: Layout, deltas: dict, src_scale: float | None = None) -> Layout:
+    """在默认布局上叠加人工校准的偏移量。
+
+    deltas = {'bar': (dx, dy, dw, dh), 'pause': ..., 'speed': ...}，单位是设备像素。
+    src_scale 是记录这些偏移时的 scale：换窗口尺寸后按比例换算，这样校准结果
+    在大窗口上量、小窗口上依然大致可用（UI 是按比例缩放的）。
+
+    dw/dh 允许为负（缩小 ROI），最小保留 4 像素。
+    """
+    k = 1.0 if not src_scale or src_scale <= 0 else base.scale / src_scale
+
+    def adj(r: Rect, d) -> Rect:
+        dx, dy, dw, dh = [int(round(v * k)) for v in d]
+        return Rect(r.x + dx, r.y + dy, max(4, r.w + dw), max(4, r.h + dh))
+
+    zero = (0, 0, 0, 0)
+    lay = Layout(width=base.width, height=base.height, scale=base.scale,
+                 bar=adj(base.bar, deltas.get('bar', zero)),
+                 pause=adj(base.pause, deltas.get('pause', zero)),
+                 speed=adj(base.speed, deltas.get('speed', zero)))
+    lay.validate()
+    return lay
+
+
+def save_layout(path: str, layout: Layout) -> None:
+    """把布局存成 JSON（绝对值），供调试和复现用。"""
+    import json
+    with open(path, 'w', encoding='utf-8') as fh:
+        json.dump(layout.to_dict(), fh, ensure_ascii=False, indent=2)
+
+
+def load_layout(path: str) -> Layout:
+    import json
+    with open(path, encoding='utf-8') as fh:
+        return Layout.from_dict(json.load(fh))
+
+
+def load_calibration(path: str):
+    """读前端保存的校准文件，返回 (deltas, 记录时的 scale)。
+
+    deltas = {'bar': (dx, dy, dw, dh), ...}，单位是记录时的设备像素；换窗口尺寸后
+    由 apply_deltas 按 scale 比例换算。文件不存在或损坏返回 (None, None)。
+    """
+    import json
+    import os
+    if not path or not os.path.isfile(path):
+        return (None, None)
+    try:
+        with open(path, encoding='utf-8') as fh:
+            d = json.load(fh)
+        deltas = {k: tuple(v) for k, v in d['deltas'].items()}
+        scale = float(d.get('scale') or 0) or None
+        return (deltas, scale)
+    except (OSError, ValueError, KeyError, TypeError):
+        return (None, None)
