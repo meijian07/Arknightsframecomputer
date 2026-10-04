@@ -26,7 +26,13 @@ import numpy as np
 from .features import read_bar, read_pause, read_speed
 from .geometry import Layout, layout_for, union_rect
 from .state import CSV_HEADER, Counter, FrameResult
-from .win32 import ScreenGrabber, WindowInfo, client_rect, find_window, is_minimized, to_gray
+from .win32 import (ScreenGrabber, WindowInfo, arknights_ui_scaler, client_rect,
+                    find_window, is_minimized, to_gray)
+
+
+def _default_build_layout(w: int, h: int) -> Layout:
+    """没显式传 build_layout 时的兜底：按注册表里的「UI 缩放」算 ROI。"""
+    return layout_for(w, h, arknights_ui_scaler())
 
 
 @dataclass
@@ -67,7 +73,7 @@ class LiveMonitor:
         self.pid = pid
         self.rate = float(rate)
         self.templates = list(templates)
-        self.build_layout = build_layout or layout_for
+        self.build_layout = build_layout or _default_build_layout
         self.window: WindowInfo | None = None
         self.layout: Layout | None = None
         self.counter: Counter | None = None
@@ -96,7 +102,8 @@ class LiveMonitor:
         elapsed = self.counter.elapsed if (keep_elapsed and self.counter) else 0
         self.layout = layout
         self._union = union_rect([layout.bar, layout.pause, layout.speed])
-        self.counter = Counter(layout.bar_w, fps=max(1.0, self.rate or 60.0))
+        self.counter = Counter(layout.model_bar_w, fps=max(1.0, self.rate or 60.0),
+                               bar_width_frac=layout.bar_width_f, visible_w=layout.bar.w)
         self.counter.elapsed = elapsed
         self.counter.resync()
         # 外接矩形变了，之前按尺寸缓存的 DIB 不再需要（ScreenGrabber 自己按尺寸复用）
@@ -171,9 +178,11 @@ class LiveMonitor:
         res = self.counter.step(self._idx, t, bar, pause, speed)
 
         note = ''
-        if not pause.running:
-            note = '已暂停（未在计数）'
-        elif res.mode == 'clock':
+        if res.mode == 'pause':
+            note = '已暂停（不计数）'
+        elif not pause.running:
+            note = '暂停键=暂停，但费用条在动 —— 按费用条计数'
+        elif res.mode.startswith('clock'):
             note = '满费/条不可读，按挂钟估算'
 
         self.stats.samples += 1

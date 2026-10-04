@@ -39,6 +39,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--templates', default=DEFAULT_TEMPLATES,
                    help='倍速模板目录（默认 templates/）。文件名形如 2_bright.npy / 1_bright.npy，'
                         '开头的整数就是倍速值；匹配不上时沿用上次倍速并标记 low')
+    p.add_argument('--ui-scaler', type=float, default=None,
+                   help='游戏内「UI 缩放」0..1（默认从注册表读；读不到按 1.0）')
     p.add_argument('--print-layout', action='store_true', help='只打印算出来的 ROI 就退出')
     p.add_argument('--quiet', action='store_true', help='不打印进度')
     return p
@@ -67,6 +69,15 @@ def load_templates(dirpath: str):
     return out
 
 
+def registry_ui_scaler() -> float:
+    """从注册表读游戏内「UI 缩放」；非 Windows / 读不到都按 1.0。"""
+    try:
+        from .win32 import arknights_ui_scaler
+        return arknights_ui_scaler()
+    except Exception:
+        return 1.0
+
+
 def resolve_images(path: str):
     if os.path.isdir(path):
         files = []
@@ -85,9 +96,10 @@ def main(argv=None) -> int:
 
     templates = load_templates(args.templates)
 
+    ui_scaler = args.ui_scaler if args.ui_scaler is not None else registry_ui_scaler()
     images = resolve_images(args.input)
     if images:
-        layout, fps, frames = open_images(images, fps=args.fps or 60.0)
+        layout, fps, frames = open_images(images, fps=args.fps or 60.0, ui_scaler=ui_scaler)
         source_desc = '图片序列 %d 张' % len(images)
     else:
         size = None
@@ -99,20 +111,22 @@ def main(argv=None) -> int:
             stem = os.path.splitext(os.path.basename(args.input))[0]
             cache = os.path.join('out', 'cache', stem)
         layout, fps, frames = open_video(args.input, cache, ffmpeg=args.ffmpeg,
-                                        force=args.force, size=size)
+                                        force=args.force, size=size, ui_scaler=ui_scaler)
         source_desc = '视频 %s' % os.path.basename(args.input)
 
     print('输入      : %s' % source_desc)
     print('帧率      : %.3f fps' % fps)
     print('ROI       : bar=%s pause=%s speed=%s (scale=%.4f)'
           % (layout.bar, layout.pause, layout.speed, layout.scale))
-    print('条槽宽    : %d px，每逻辑帧 %.3f px' % (layout.bar_w, layout.px_per_frame))
+    print('条槽宽    : %d px（真实 %.2f px），每逻辑帧 %.3f px，UI 缩放 %.2f'
+          % (layout.bar_w, layout.bar_width_f, layout.px_per_frame, ui_scaler))
     print('倍速模板  : %s' % (', '.join('%s->%.0fX' % (n, v) for v, n, _ in templates)
                               if templates else '无（全部标记 low，沿用初始 2X）'))
     if args.print_layout:
         return 0
 
-    counter = Counter(layout.bar_w, fps=fps)
+    counter = Counter(layout.model_bar_w, fps=fps,
+                      bar_width_frac=layout.bar_width_f, visible_w=layout.bar.w)
     mode_count = collections.Counter()
     state_count = collections.Counter()
     warn_count = collections.Counter()

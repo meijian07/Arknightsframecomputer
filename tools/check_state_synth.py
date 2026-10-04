@@ -5,10 +5,15 @@
 「实时链路和离线链路一致不一致」；这个脚本验证的是第三件事：**状态机本身的计数有没有
 系统性偏差**。因为喂进去的信号是理想线性的，真值可以精确算出来：
 
-    采样 60Hz、2 倍速 -> 每个采样恰好 1 个逻辑帧，条走 4px（条宽 120）
+    采样 60Hz、2 倍速 -> 每个采样恰好 1 个逻辑帧
 
-期望误差 0 帧。如果这里出现成比例的误差，说明状态机在丢余量（曾经的一个真 bug：
-换通道时把余量清零，几十次换通道就少算好几帧）。
+期望误差 0 帧。合成信号必须按游戏真实的「相位 -> 可见宽度」曲线来画（synthesis.py），
+不能假设条宽是线性的：那样喂进去的就不是游戏里的条，测出来的差异说明不了任何问题
+（实测线性假设下多算 59 帧，换成本曲线后误差归零）。
+
+这里主要防两类回归：
+    1. 状态机丢余量（曾经换个通道就把余量清零，几十次换通道少算好几帧）；
+    2. 相位重同步选错 k（比如在「头两帧条还没动」的平段上把 k 选大/选小）。
 
 用法：python tools/check_state_synth.py
 """
@@ -23,9 +28,9 @@ sys.path.insert(0, os.path.join(ROOT, 'src'))
 
 from akframe.features import BarReading, PauseReading, SpeedReading   # noqa: E402
 from akframe.state import Counter                                     # noqa: E402
+from akframe.synthesis import synthesized_width                       # noqa: E402
 
 BAR_W = 120
-PX_PER_FRAME = BAR_W / 30.0
 RUN = PauseReading(ratio=0.30, running=True)
 PAUSED = PauseReading(ratio=0.05, running=False)
 SPEED = SpeedReading(digit_ratio=0.30, corr_2x=1.0, has_digit=True, m=2.0,
@@ -56,7 +61,8 @@ def simulate(segments, fps=60.0):
             if mode == 'max':
                 c.step(idx, t, bar(0, 'MAX'), RUN, SPEED)
             else:
-                fill = int((phase % 30) * PX_PER_FRAME) % BAR_W
+                # 按游戏真实渲染画条：相位 -> 可见宽度（含头两帧的死区与尾端 clamp）
+                fill = synthesized_width(BAR_W, float(BAR_W), (phase % 30.0) / 30.0)
                 c.step(idx, t, bar(fill, 'TRACK'), RUN, SPEED)
             truth += 1
     return c.elapsed, truth

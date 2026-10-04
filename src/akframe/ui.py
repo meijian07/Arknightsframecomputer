@@ -32,7 +32,8 @@ from .geometry import (PAUSE_SHAPE_BAND, SPEED_DIGIT_BAND, SPEED_DIGIT_COLS,
                        apply_deltas, layout_for, load_calibration)
 from .live import LiveMonitor
 from .timeline import Teleprompter, parse_lines
-from .win32 import (enable_dpi_awareness, set_click_through, virtual_screen_bounds)
+from .win32 import (arknights_ui_scaler, enable_dpi_awareness, set_click_through,
+                    virtual_screen_bounds)
 
 
 # 输入框里的初始提示（# 开头 = 注释，解析器会跳过，不会变成轴）
@@ -288,7 +289,7 @@ class MonitorApp:
         if win is None:
             return None
         try:
-            return layout_for(win.client[2], win.client[3])
+            return layout_for(win.client[2], win.client[3], arknights_ui_scaler())
         except ValueError:
             return None
 
@@ -401,7 +402,8 @@ class MonitorApp:
             win = wins[sel[0]]
             self.monitor.exe, self.monitor.title, self.monitor.pid = win.exe, None, win.pid
             self.monitor.window = win
-            self.monitor.set_layout(layout_for(win.client[2], win.client[3]), keep_elapsed=True)
+            self.monitor.set_layout(
+                layout_for(win.client[2], win.client[3], arknights_ui_scaler()), keep_elapsed=True)
             self._apply_deltas()
             top.destroy()
             self._set_note('已切换到 %s' % win)
@@ -565,8 +567,11 @@ class MonitorApp:
             self.lb_time.configure(text='游戏内时间 %s' % _fmt_time(res.elapsed / 30.0))
             if res.mode == 'pause':
                 self.lb_state.configure(text='状态 已暂停（不计数）', fg=WARN)
-            elif res.mode == 'clock':
+            elif res.mode.startswith('clock'):
                 self.lb_state.configure(text='状态 运行中（挂钟估算）', fg=WARN)
+            elif not res.running:
+                # 帧操：采样这一瞬图标是「暂停」，但两次采样之间游戏跑过了、条动过了
+                self.lb_state.configure(text='状态 已暂停（条在动，按像素计数）', fg=ACCENT)
             else:
                 self.lb_state.configure(text='状态 运行中（像素计数）', fg=ACCENT)
             self.lb_bar.configure(

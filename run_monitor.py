@@ -22,7 +22,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src
 from akframe.cli import DEFAULT_TEMPLATES, load_templates          # noqa: E402
 from akframe.geometry import apply_deltas, layout_for, load_calibration  # noqa: E402
 from akframe.live import LiveMonitor                                # noqa: E402
-from akframe.win32 import (enable_dpi_awareness, find_window, list_windows)  # noqa: E402
+from akframe.win32 import (arknights_ui_scaler, enable_dpi_awareness,  # noqa: E402
+                           find_window, list_windows)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -35,6 +36,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help='每秒采样次数（默认 60；0 = 不限速）')
     p.add_argument('--templates', default=DEFAULT_TEMPLATES, help='倍速模板目录')
     p.add_argument('--calib', default='layout_calib.json', help='ROI 校准文件')
+    p.add_argument('--ui-scaler', type=float, default=None,
+                   help='游戏内「UI 缩放」0..1（默认从注册表读；读不到按 1.0）')
     p.add_argument('--csv', default=None, help='把逐帧读数记录到这个 CSV')
     p.add_argument('--list', action='store_true', help='列出可见窗口后退出')
     p.add_argument('--no-ui', action='store_true', help='不开图形界面，控制台打印')
@@ -47,18 +50,22 @@ def build_parser() -> argparse.ArgumentParser:
 def build_monitor(args) -> LiveMonitor:
     templates = load_templates(args.templates)
     deltas, calib_scale = load_calibration(args.calib)
+    ui_scaler = args.ui_scaler if args.ui_scaler is not None else arknights_ui_scaler()
 
     def build_layout(w: int, h: int):
-        base = layout_for(w, h)
+        # ROI 只和窗口尺寸 + 游戏内「UI 缩放」有关（后者只乘在距右/距底上）
+        base = layout_for(w, h, ui_scaler)
         if deltas:
             return apply_deltas(base, deltas, calib_scale)
         return base
 
     win = find_window(exe=args.exe, title=args.title, pid=args.pid)
     layout = build_layout(*win.client_size) if win else None
-    return LiveMonitor(layout, exe=args.exe, title=args.title, pid=args.pid,
-                       rate=args.rate, templates=templates, csv_path=args.csv,
-                       build_layout=build_layout)
+    mon = LiveMonitor(layout, exe=args.exe, title=args.title, pid=args.pid,
+                      rate=args.rate, templates=templates, csv_path=args.csv,
+                      build_layout=build_layout)
+    mon.ui_scaler = ui_scaler          # 给 main() 打印用（不是 LiveMonitor 的必需字段）
+    return mon
 
 
 def run_console(mon: LiveMonitor, duration: float = 0.0) -> int:
@@ -124,6 +131,7 @@ def main(argv=None) -> int:
         print('目标窗口: %s' % mon.window)
         print('ROI     : bar=%s pause=%s speed=%s (scale=%.4f)'
               % (mon.layout.bar, mon.layout.pause, mon.layout.speed, mon.layout.scale))
+        print('条槽真实宽: %.2f px，UI 缩放 %.2f' % (mon.layout.bar_width_f, mon.ui_scaler))
     print('DPI 感知: %s' % dpi)
 
     if args.no_ui:

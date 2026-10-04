@@ -304,3 +304,63 @@ _kernel32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
 _kernel32.QueryFullProcessImageNameW.argtypes = [wt.HANDLE, wt.DWORD, wt.LPWSTR,
                                                  ctypes.POINTER(wt.DWORD)]
 _kernel32.CloseHandle.argtypes = [wt.HANDLE]
+
+
+# ---- 游戏设置（注册表）----
+#
+# 明日方舟 PC 端把画质设置存成注册表里的一个 UTF-8 JSON 字节数组，键名固定前缀是
+# common_setting，后面跟一个随安装变化的哈希 —— 所以只能按前缀找，不能写死键名。
+# 里面有两个我们关心的字段：
+#     resolutionSetting.{width,height,isFullScreen,isBorderless}   窗口/分辨率
+#     uiScaler                                                     游戏内「UI 缩放」0..1
+
+ARK_REG_PATH = r'Software\Hypergryph\Arknights'
+ARK_SETTING_PREFIX = 'common_setting'
+
+
+def arknights_settings() -> dict:
+    """读游戏设置 JSON。读不到（没装、换机器、无权限）返回空 dict，调用方必须容错。"""
+    import json
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, ARK_REG_PATH) as key:
+            index = 0
+            while True:
+                try:
+                    name, value, _ = winreg.EnumValue(key, index)
+                except OSError:
+                    return {}
+                index += 1
+                if not name.startswith(ARK_SETTING_PREFIX):
+                    continue
+                if isinstance(value, bytes):
+                    text = value.decode('utf-8', 'ignore').rstrip('\x00')
+                elif isinstance(value, str):
+                    text = value
+                else:
+                    continue
+                try:
+                    data = json.loads(text)
+                except ValueError:
+                    continue
+                if isinstance(data, dict) and 'resolutionSetting' in data:
+                    return data
+    except OSError:
+        return {}
+    return {}
+
+
+def arknights_ui_scaler() -> float:
+    """游戏内「UI 缩放」（0..1）。读不到就按 1.0（= 不影响 ROI 距离）。
+
+    为什么需要它：UI 缩放只改变 HUD 元素到右边缘/下边缘的距离，元素本身大小不变，
+    所以它只该乘在「距右/距底」上（见 geometry.ui_edge_scale）。
+    """
+    value = arknights_settings().get('uiScaler')
+    try:
+        scaler = float(value)
+    except (TypeError, ValueError):
+        return 1.0
+    if scaler != scaler:      # nan
+        return 1.0
+    return min(1.0, max(0.0, scaler))

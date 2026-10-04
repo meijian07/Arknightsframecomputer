@@ -175,8 +175,12 @@ def iter_cached(outdir: str) -> Iterator[Frame]:
 
 
 def open_video(path: str, outdir: str, ffmpeg: str | None = None,
-               force: bool = False, size: tuple | None = None) -> tuple:
-    """准备视频输入，返回 (layout, fps, 帧迭代器)。"""
+               force: bool = False, size: tuple | None = None,
+               ui_scaler: float | None = None) -> tuple:
+    """准备视频输入，返回 (layout, fps, 帧迭代器)。
+
+    ui_scaler 是游戏内「UI 缩放」；None = 用默认档 1.0（不改变 ROI）。
+    """
     # 缓存命中时连 ffmpeg 都不需要（抽流是一次性成本，之后只读 .raw）
     if not force and size is None:
         cached = _valid_cache(outdir, path)
@@ -189,7 +193,7 @@ def open_video(path: str, outdir: str, ffmpeg: str | None = None,
         if info.size is None:
             raise RuntimeError('无法从视频里读出分辨率，请用 --size WxH 手动指定')
         size = info.size
-    layout = layout_for(size[0], size[1])
+    layout = layout_for(size[0], size[1], ui_scaler if ui_scaler is not None else 1.0)
     meta = extract(exe, path, layout, outdir, force=force)
     return layout, float(meta['fps']), iter_cached(outdir)
 
@@ -211,13 +215,14 @@ def _valid_cache(outdir: str, video: str) -> dict | None:
     return meta
 
 
-def open_images(paths, fps: float = 60.0) -> tuple:
+def open_images(paths, fps: float = 60.0, ui_scaler: float | None = None) -> tuple:
     """准备图片序列输入，返回 (layout, fps, 帧迭代器)。第一张图决定 ROI。"""
     if not paths:
         raise ValueError('图片列表为空')
     from PIL import Image
     first = np.asarray(Image.open(paths[0]).convert('L'))
-    layout = layout_for(int(first.shape[1]), int(first.shape[0]))
+    layout = layout_for(int(first.shape[1]), int(first.shape[0]),
+                        ui_scaler if ui_scaler is not None else 1.0)
     return layout, float(fps), _iter_images(paths, layout, float(fps))
 
 

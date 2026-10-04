@@ -36,9 +36,13 @@ SPEED_ARROW_BAND = (70 / 160, 116 / 160)    # 倍速箭头（> / >> / >>>），�
 SPEED_DIGIT_COLS = (0.30, 0.85)             # 数字的横向范围（占 ROI 宽度比例）
 
 # ---- 判别阈值（都用「占比」而不是像素数，这样与分辨率无关）----
+UI_SCALER_DEFAULT = 1.0      # 游戏设置里「UI 缩放」的默认档（1.0 = 不缩小）
+
 RUN_PAUSE_RATIO_MIN = 0.15   # 形状特征占比 >= 此值判为「运行中」，否则「已暂停」
 DIGIT_RATIO_MIN = 0.20       # 数字条带亮点占比 >= 此值判为「有倍速数字」
 CORR_2X_MIN = 0.60           # 与 2X 模板的相关系数阈值
+ARROW_BRIGHT = 200           # 箭头/数字是锐利的 UI 白（实测 255），淡出的按钮达不到
+ARROW_RATIO_MIN = 0.02       # 箭头带里亮点占比达到这个数，才算「画着箭头」（子弹时间）
 
 
 @dataclass(frozen=True)
@@ -96,11 +100,28 @@ class Layout:
     bar: Rect
     pause: Rect
     speed: Rect
+    # 真实条槽宽（亚像素、未被裁）。0 表示未知，按 bar.w 处理（兼容旧缓存/旧校准文件）。
+    bar_width_frac: float = 0.0
 
     @property
     def bar_w(self) -> int:
         """条槽宽度 = 一个费用周期的填充行程（像素）。"""
         return self.bar.w
+
+    @property
+    def bar_width_f(self) -> float:
+        """真实条槽宽（亚像素、未被裁）。
+
+        合成模型（synthesis.py）必须用它算条长：bar.w 是取过整、还可能被屏幕裁掉的
+        ROI 宽度，用它当条长会让每个周期差几帧（实时链路实测过「一费只记 28 帧」）。
+        bar_width_frac 为 0（旧缓存文件）时回退到 bar.w。
+        """
+        return self.bar_width_frac if self.bar_width_frac > 0 else float(self.bar.w)
+
+    @property
+    def model_bar_w(self) -> int:
+        """合成模型里的条槽宽（整数版）。ROI 被裁时它比 bar.w 大。"""
+        return int(round(self.bar_width_f))
 
     @property
     def px_per_frame(self) -> float:
@@ -132,6 +153,7 @@ class Layout:
             'bar': self.bar.to_dict(),
             'pause': self.pause.to_dict(),
             'speed': self.speed.to_dict(),
+            'bar_width_frac': self.bar_width_frac,
         }
 
     @staticmethod
@@ -143,6 +165,7 @@ class Layout:
             bar=Rect.from_dict(d['bar']),
             pause=Rect.from_dict(d['pause']),
             speed=Rect.from_dict(d['speed']),
+            bar_width_frac=float(d.get('bar_width_frac') or 0.0),
         )
 
 
@@ -155,22 +178,49 @@ def ui_scale(width: int, height: int) -> float:
     return width / REF_W
 
 
-def layout_for(width: int, height: int) -> Layout:
-    """按帧（窗口）尺寸推算三个 ROI。"""
-    s = ui_scale(width, height)
+def ui_edge_scale(ui_scaler: float) -> float:
+    """游戏内「UI 缩放」对「离右边/下边多远」的系数。
 
-    bar_w = int(round(BAR_W_UNIT * s))
+    游戏设置里的 UI 缩放（uiScaler，0..1）只改 HUD 元素**离锚点的距离**，不改元素本身
+    大小 —— 所以它只能乘在「距右/距底」上，不能乘在长宽上（乘了就把条本身也缩放错了）。
+    系数取自前人项目 ArknightsCostBarRuler（roi.rs）在同款引擎上标出来的结论：
+        edge_scale = 0.9 + 0.1 * uiScaler
+    uiScaler = 1.0（默认档）时等于 1.0，即完全不影响下面的坐标。
+    """
+    if ui_scaler != ui_scaler:            # nan
+        ui_scaler = UI_SCALER_DEFAULT
+    if ui_scaler < 0.0:
+        ui_scaler = 0.0
+    elif ui_scaler > 1.0:
+        ui_scaler = 1.0
+    return 0.9 + 0.1 * ui_scaler
+
+
+def layout_for(width: int, height: int, ui_scaler: float = UI_SCALER_DEFAULT) -> Layout:
+    """按帧（窗口）尺寸推算三个 ROI。
+
+    ui_scaler 是游戏设置里的「UI 缩放」（PC 端能从注册表读到，见 win32.arknights_ui_scaler）。
+    默认 1.0，此时结果和以前逐像素一致。
+    """
+    s = ui_scale(width, height)
+    edge = ui_edge_scale(ui_scaler)
+
+    bar_frac = BAR_W_UNIT * s * edge          # 真实条槽宽（保留小数，合成模型要用）
+    bar_w = int(round(bar_frac))
     bar_x = width - bar_w
-    bar_cy = height - int(round(BAR_CENTER_FROM_BOTTOM_UNIT * s))
+    bar_cy = height - int(round(BAR_CENTER_FROM_BOTTOM_UNIT * s * edge))
     bar = Rect(bar_x, bar_cy - BAR_ROI_H // 2, bar_w, BAR_ROI_H)
 
     btn_w = int(round(BTN_W_UNIT * s))
     btn_h = int(round(BTN_H_UNIT * s))
-    btn_y = int(round(BTN_TOP_UNIT * s))
-    pause = Rect(width - int(round(PAUSE_RIGHT_MARGIN_UNIT * s)) - btn_w, btn_y, btn_w, btn_h)
-    speed = Rect(width - int(round(SPEED_RIGHT_MARGIN_UNIT * s)) - btn_w, btn_y, btn_w, btn_h)
+    btn_y = int(round(BTN_TOP_UNIT * s * edge))
+    pause = Rect(width - int(round(PAUSE_RIGHT_MARGIN_UNIT * s * edge)) - btn_w,
+                 btn_y, btn_w, btn_h)
+    speed = Rect(width - int(round(SPEED_RIGHT_MARGIN_UNIT * s * edge)) - btn_w,
+                 btn_y, btn_w, btn_h)
 
-    lay = Layout(width=width, height=height, scale=s, bar=bar, pause=pause, speed=speed)
+    lay = Layout(width=width, height=height, scale=s, bar=bar, pause=pause, speed=speed,
+                 bar_width_frac=bar_frac)
     lay.validate()
     return lay
 
@@ -202,10 +252,16 @@ def apply_deltas(base: Layout, deltas: dict, src_scale: float | None = None) -> 
         return Rect(r.x + dx, r.y + dy, max(4, r.w + dw), max(4, r.h + dh))
 
     zero = (0, 0, 0, 0)
+    bar = adj(base.bar, deltas.get('bar', zero))
+    # ROI 被人工改小时，真实条槽宽按同样比例跟着变（纯平移 dw=0 时不变）
+    frac = base.bar_width_frac
+    if frac > 0 and base.bar.w > 0:
+        frac = frac * (bar.w / float(base.bar.w))
     lay = Layout(width=base.width, height=base.height, scale=base.scale,
-                 bar=adj(base.bar, deltas.get('bar', zero)),
+                 bar=bar,
                  pause=adj(base.pause, deltas.get('pause', zero)),
-                 speed=adj(base.speed, deltas.get('speed', zero)))
+                 speed=adj(base.speed, deltas.get('speed', zero)),
+                 bar_width_frac=frac)
     lay.validate()
     return lay
 
@@ -241,3 +297,52 @@ def load_calibration(path: str):
         return (deltas, scale)
     except (OSError, ValueError, KeyError, TypeError):
         return (None, None)
+
+
+# ---- 常见分辨率表 ----
+#
+# layout_for() 对任意尺寸都能算出一套 ROI，但「算得出」不等于「算得对」：
+# 单位常数只在 2560x1600 上实测标定过，其它尺寸都是按 ui_scale() 的规则推的。
+# 这里把「哪些尺寸可以直接信、哪些必须先实测校准」写进代码，配合 resolution_status()
+# 让前端和 CLI 能明确提示，而不是静默给出错误读数。
+#
+# verified  在真实游戏窗口上实测标定过
+# safe      16:9：ui_scale() 的两条规则给出同一个 s，纯粹等比缩放，可以放心用
+# risky     非 16:9：缩放/锚定规则是推的，换机器前必须先实测
+
+VERIFIED_SIZES = ((2560, 1600), (1152, 720))
+
+COMMON_RESOLUTIONS = (
+    (1280, 720, '16:9'),
+    (1366, 768, '16:9'),
+    (1600, 900, '16:9'),
+    (1920, 1080, '16:9'),
+    (2560, 1440, '16:9'),
+    (3840, 2160, '16:9'),
+    (2560, 1600, '16:10'),
+    (1920, 1200, '16:10'),
+    (1680, 1050, '16:10'),
+    (2560, 1080, '21:9'),
+    (3440, 1440, '21:9'),
+)
+
+ASPECT_TOL = 0.01                 # 宽高比容差：和 16:9 的差在这个范围内就算纯等比
+
+# 低于这个客户区尺寸就别指望了：条槽只剩 90px、每逻辑帧 3px，
+# 再小的话条边缘 1px 的抖动就等于 1/3 个逻辑帧。
+MIN_CLIENT_W = 960
+MIN_CLIENT_H = 540
+
+
+def resolution_status(width: int, height: int) -> tuple:
+    """这个客户区尺寸的布局可不可信。返回 (status, 给人看的说明)。"""
+    if (width, height) in VERIFIED_SIZES:
+        return ('verified', '实测标定过')
+    ar = width / height
+    if abs(ar - REF_W / REF_H) <= ASPECT_TOL:
+        return ('safe', '16:9 等比缩放，两条规则一致')
+    if abs(ar - 16 / 10) <= ASPECT_TOL:
+        return ('likely', '16:10 的「按宽度缩放」已被 2560x1600 实测确定')
+    if ar < REF_W / REF_H:
+        return ('risky', '比 16:9 高且不是 16:10：按宽度缩放是推的')
+    return ('risky', '比 16:9 宽：超宽屏的缩放/锚定规则还没验证过')
