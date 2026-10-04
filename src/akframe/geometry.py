@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 REF_W = 1920
 REF_H = 1080
@@ -41,8 +41,16 @@ UI_SCALER_DEFAULT = 1.0      # 游戏设置里「UI 缩放」的默认档（1.0 
 RUN_PAUSE_RATIO_MIN = 0.15   # 形状特征占比 >= 此值判为「运行中」，否则「已暂停」
 DIGIT_RATIO_MIN = 0.20       # 数字条带亮点占比 >= 此值判为「有倍速数字」
 CORR_2X_MIN = 0.60           # 与 2X 模板的相关系数阈值
-ARROW_BRIGHT = 200           # 箭头/数字是锐利的 UI 白（实测 255），淡出的按钮达不到
-ARROW_RATIO_MIN = 0.02       # 箭头带里亮点占比达到这个数，才算「画着箭头」（子弹时间）
+ARROW_MIN_CONTRAST = 25      # 箭头带最亮处要比中位数亮这么多，才算「真的画了东西」；
+                             # HDR 录像里 UI 白只有 122、箭头带 p99 只有 91，绝对阈值全废
+ARROW_REL = 0.60             # 「亮点」判据：median + ARROW_REL * (p99 - median)
+ARROW_RATIO_MIN = 0.02       # 箭头带里亮点占比达到这个数，才算「画着箭头」（0.2 倍速）
+
+# 暂停键形状占比带滞回：中间那条带里保持上一拍的状态。
+# 实测三个录像：已暂停 0.078 / 运行中 0.245，中间带里只是按钮淡入淡出的过渡。
+PAUSE_RUN_RATIO = 0.20       # 占比 >= 此值判「运行中」
+PAUSE_STOP_RATIO = 0.11      # 占比 <= 此值判「已暂停」
+RUN_PAUSE_RATIO_MIN = 0.15   # read_pause 里给界面看的原始判据（不带滞回）
 
 
 @dataclass(frozen=True)
@@ -125,8 +133,12 @@ class Layout:
 
     @property
     def px_per_frame(self) -> float:
-        """一个逻辑帧对应多少像素。核心常数：一个费用周期恒为 30 逻辑帧。"""
-        return self.bar.w / 30.0
+        """一个逻辑帧对应多少像素。核心常数：一个费用周期恒为 30 逻辑帧。
+
+        用真实条宽（bar_width_f）而不是 ROI 宽：ROI 被屏幕裁掉时 bar.w 会小几像素，
+        拿它当分母会把「每逻辑帧几像素」算小，报出来的数就不对了。
+        """
+        return self.bar_width_f / 30.0
 
     @property
     def bar_band(self) -> tuple:
@@ -226,6 +238,30 @@ def layout_for(width: int, height: int, ui_scaler: float = UI_SCALER_DEFAULT) ->
 
 
 # ---- 实时链路用到的补充工具：外接矩形、校准偏移、存档 ----
+
+def reframe_layout(layout: Layout, dx: int, dy: int, width: int, height: int) -> Layout:
+    """把三个 ROI 整体平移 (dx, dy)，并把画面尺寸换成 width x height，越界处裁掉。
+
+    用途：录屏里含桌面或窗口边框时，客户区原点不在视频原点 ——
+    先按客户区尺寸用 layout_for() 算出 ROI，再整体平移到视频坐标（dx, dy 就是客户区
+    原点在视频里的位置），最后按视频尺寸裁掉被录屏截掉的部分。
+
+    裁过之后 bar.w 会比真实条槽窄，这正是 Counter(visible_w=...) 存在的理由：
+    合成模型按真实宽度算，画出来的宽度截到看得见的那一段。
+    """
+    def shift(r: Rect) -> Rect:
+        x0 = max(0, r.x + dx)
+        y0 = max(0, r.y + dy)
+        x1 = min(width, r.x + dx + r.w)
+        y1 = min(height, r.y + dy + r.h)
+        return Rect(x0, y0, max(0, x1 - x0), max(0, y1 - y0))
+
+    out = replace(layout, width=width, height=height,
+                              bar=shift(layout.bar), pause=shift(layout.pause),
+                              speed=shift(layout.speed))
+    out.validate()
+    return out
+
 
 def union_rect(rects) -> Rect:
     """若干 ROI 的外接矩形。实时抓屏时一次抓它，再在内存里切出各个 ROI。"""

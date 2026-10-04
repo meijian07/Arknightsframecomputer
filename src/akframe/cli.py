@@ -36,6 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--fps', type=float, default=None,
                    help='图片序列的帧率，或覆盖探测到的视频帧率')
     p.add_argument('--size', default=None, help='手动指定视频分辨率，如 2560x1600')
+    p.add_argument('--client', default=None,
+                   help='游戏客户区尺寸，如 2558x1440。录整个桌面（画面里有任务栏/标题栏）时用')
+    p.add_argument('--roi-offset', default=None,
+                   help='客户区原点在视频里的位置，如 16,45；填 auto 则自动探测。'
+                        '配合 --client 用（录桌面/窗口时）')
     p.add_argument('--templates', default=DEFAULT_TEMPLATES,
                    help='倍速模板目录（默认 templates/）。文件名形如 2_bright.npy / 1_bright.npy，'
                         '开头的整数就是倍速值；匹配不上时沿用上次倍速并标记 low')
@@ -106,12 +111,36 @@ def main(argv=None) -> int:
         if args.size:
             w, h = args.size.lower().split('x')
             size = (int(w), int(h))
+        client_size = None
+        if args.client:
+            w, h = args.client.lower().split('x')
+            client_size = (int(w), int(h))
+        roi_offset = None
+        if args.roi_offset:
+            spec = args.roi_offset.strip().lower()
+            if spec == 'auto':
+                # 自动对齐：见 align.py。录屏里客户区原点未知，靠人肉试很容易错一整段。
+                from .align import detect_offset
+                found = detect_offset(args.input, find_ffmpeg(args.ffmpeg),
+                                      client_size=client_size, ui_scaler=ui_scaler,
+                                      size=size)
+                if found is None:
+                    print('自动对齐  : 失败 —— 没在画面里找到费用条。'
+                          '请用 --roi-offset X,Y 手动指定。')
+                    return 2
+                roi_offset = (found[0], found[1])
+                print('自动对齐  : offset=%d,%d（频率阶跃 %.3f，填充出现频率 %.3f）'
+                      % found)
+            else:
+                ox, oy = spec.split(',')
+                roi_offset = (int(ox), int(oy))
         cache = args.cache
         if cache is None:
             stem = os.path.splitext(os.path.basename(args.input))[0]
             cache = os.path.join('out', 'cache', stem)
         layout, fps, frames = open_video(args.input, cache, ffmpeg=args.ffmpeg,
-                                        force=args.force, size=size, ui_scaler=ui_scaler)
+                                        force=args.force, size=size, ui_scaler=ui_scaler,
+                                        client_size=client_size, offset=roi_offset)
         source_desc = '视频 %s' % os.path.basename(args.input)
 
     print('输入      : %s' % source_desc)

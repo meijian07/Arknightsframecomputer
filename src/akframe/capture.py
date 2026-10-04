@@ -20,7 +20,7 @@ from typing import Iterator
 
 import numpy as np
 
-from .geometry import Layout, layout_for
+from .geometry import Layout, layout_for, reframe_layout
 
 ROI_NAMES = ('bar', 'pause', 'speed')
 FFMPEG_LABELS = {'bar': 'b', 'pause': 'p', 'speed': 's'}
@@ -104,8 +104,11 @@ def extract(ffmpeg: str, video: str, layout: Layout, outdir: str, force: bool = 
     graph = ';'.join(
         '[0:v]format=gray,%s[%s]' % (getattr(layout, n).crop_filter(), FFMPEG_LABELS[n])
         for n in ROI_NAMES)
+    # -vsync 0（passthrough）绝不能省：原生 120 tbr 的 HEVC 录像（NVIDIA HDR 采集）
+    # 在默认的 cfr 模式下会被 ffmpeg 按「输出帧率 = tbr」补帧，1197 帧的 19.95 秒
+    # 录像被抽成 2393 帧 —— 帧数翻倍、时间轴减半，挂钟通道直接按 2 倍速走。
     cmd = [ffmpeg, '-hide_banner', '-loglevel', 'error', '-i', video,
-           '-filter_complex', graph]
+           '-filter_complex', graph, '-vsync', '0']
     for n in ROI_NAMES:
         cmd += ['-map', '[%s]' % FFMPEG_LABELS[n], '-f', 'rawvideo', '-pix_fmt', 'gray',
                 '-y', os.path.join(outdir, n + '.raw')]
@@ -176,13 +179,20 @@ def iter_cached(outdir: str) -> Iterator[Frame]:
 
 def open_video(path: str, outdir: str, ffmpeg: str | None = None,
                force: bool = False, size: tuple | None = None,
-               ui_scaler: float | None = None) -> tuple:
+               ui_scaler: float | None = None,
+               client_size: tuple | None = None,
+               offset: tuple | None = None) -> tuple:
     """准备视频输入，返回 (layout, fps, 帧迭代器)。
 
-    ui_scaler 是游戏内「UI 缩放」；None = 用默认档 1.0（不改变 ROI）。
+    ui_scaler   游戏内「UI 缩放」；None = 用默认档 1.0（不改变 ROI）。
+    client_size 客户区尺寸。录制整个桌面（画面里含任务栏 / 窗口标题栏）时，ROI 要按
+                客户区尺寸算，而不是按视频尺寸 —— 否则条的位置整个偏掉。
+    offset      客户区原点在视频坐标里的位置 (x, y)，配合 client_size 用。
     """
     # 缓存命中时连 ffmpeg 都不需要（抽流是一次性成本，之后只读 .raw）
-    if not force and size is None:
+    # 缓存命中时连 ffmpeg 都不需要 —— 但只有「按视频尺寸算 ROI」这一路才敢直接复用
+    # （给了 client_size / offset 说明画面里有别的东西，layout 得重新算）
+    if not force and size is None and client_size is None and offset is None:
         cached = _valid_cache(outdir, path)
         if cached is not None:
             return Layout.from_dict(cached['layout']), float(cached['fps']), iter_cached(outdir)
@@ -193,7 +203,10 @@ def open_video(path: str, outdir: str, ffmpeg: str | None = None,
         if info.size is None:
             raise RuntimeError('无法从视频里读出分辨率，请用 --size WxH 手动指定')
         size = info.size
-    layout = layout_for(size[0], size[1], ui_scaler if ui_scaler is not None else 1.0)
+    cw, ch = client_size if client_size else size
+    layout = layout_for(cw, ch, ui_scaler if ui_scaler is not None else 1.0)
+    if offset:
+        layout = reframe_layout(layout, int(offset[0]), int(offset[1]), size[0], size[1])
     meta = extract(exe, path, layout, outdir, force=force)
     return layout, float(meta['fps']), iter_cached(outdir)
 

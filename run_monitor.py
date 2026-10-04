@@ -64,6 +64,9 @@ def build_monitor(args) -> LiveMonitor:
     mon = LiveMonitor(layout, exe=args.exe, title=args.title, pid=args.pid,
                       rate=args.rate, templates=templates, csv_path=args.csv,
                       build_layout=build_layout)
+    # 把刚找到的窗口交给监视器：不然 main() 里判 mon.window 永远是 None，
+    # 明明找到了也会打印「找不到窗口」，白白吓人一跳
+    mon.window = win
     mon.ui_scaler = ui_scaler          # 给 main() 打印用（不是 LiveMonitor 的必需字段）
     return mon
 

@@ -10,9 +10,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .geometry import (ARROW_BRIGHT, ARROW_RATIO_MIN, CORR_2X_MIN, DIGIT_RATIO_MIN,
-                       PAUSE_SHAPE_BAND, RUN_PAUSE_RATIO_MIN, SPEED_ARROW_BAND,
-                       SPEED_DIGIT_BAND, SPEED_DIGIT_COLS, Layout)
+from .geometry import (ARROW_MIN_CONTRAST, ARROW_RATIO_MIN, ARROW_REL, CORR_2X_MIN,
+                       DIGIT_RATIO_MIN, PAUSE_SHAPE_BAND, RUN_PAUSE_RATIO_MIN,
+                       SPEED_ARROW_BAND, SPEED_DIGIT_BAND, SPEED_DIGIT_COLS, Layout)
 
 # ---- 阈值 ----
 # 纯白下限：实测填充恒为 255，用 250 而不是 240（240 会把接近白的场景像素也算进去）
@@ -29,6 +29,30 @@ GREY_TOL = 10
 # 换到 120 宽的窗口上，如果还用 150 就永远判不出满费（实时链路实测踩到了这个坑）。
 BAR_MIN_FRAC = 0.625
 REL_THR = 0.35       # 相对阈值：median + REL_THR * (max - median)
+
+# ---- 亮度自适应（HDR / 整体压暗）----
+# PC 端打开 HDR 之后，视频/抓屏的像素是 PQ 编码的，UI 白会从 255 掉到 ~122
+# （实测用户两段 NVIDIA 录屏：白填充 122、轨道 51..68；同一天 SDR 录像里是 255 / 55..68）。
+# 暂停键、倍速键读得到（它们本来就用相对阈值），只有费用条永远 EMPTY ——
+# 因为费用条的判据全是绝对阈值（250 / 150..165 / 146 / 88）。费用条一 EMPTY，
+# 状态机就退回挂钟通道，画面上的表现就是「不看条了，按 1 秒 30 帧瞎涨」。
+# 处理办法：主路径（绝对阈值）完全读不到东西时，再按这一行自己的白电平抬回 255 试一次。
+# 只在主路径读不到时才走这一步，所以已经标定过的 SDR 画面逐像素不变。
+DIM_HI_PCTL = 99.0     # 白电平取 99 分位而不是 max：单个噪点不该把估计抬飞
+DIM_LO_PCTL = 5.0
+DIM_HI_MIN = 100       # 行里没有这个亮度以上的高光，就不可能是被压暗的游戏 HUD
+DIM_HI_MAX = MASKED_WHITE_MIN   # = 150。到这一档就当成 SDR 的半透明渲染（蒙遮罩/渐变），
+                                # 不做 HDR 还原：实测 SDR 满费退出过渡那一行的亮点是 154，
+                                # 只看「没有 255 的纯白」会把它误当成 HDR 去还原
+DIM_MIN_CONTRAST = 25  # 还原之前要求行内本来就有这个对比度，否则是在放大噪声
+WHITE_REF = 255.0
+# HDR10 / PQ（SMPTE ST 2084）常数：把「被 PQ 压暗的码值」反变换回亮度要用
+PQ_M1 = 0.1593017578125
+PQ_M2 = 78.84375
+PQ_C1 = 0.8359375
+PQ_C2 = 18.8515625
+PQ_C3 = 18.6875
+SDR_BREAK = 0.0031308  # sRGB 编码的分段点
 GRAY_TOL = 20        # 灰度校验：R/G/B 两两之差超过它就不算灰度像素
 VALIDITY_LEFT_INSET = 1   # 判「条还在不在」时跳过最左 1px（HUD 高光高发区）
 
@@ -43,6 +67,7 @@ class BarReading:
     row: np.ndarray  # 逐列中位数（调试用）
     masked: bool = False   # 是不是按「整体压暗」那一遍扫出来的
     gray_ok: bool = True   # 彩色输入时的灰度校验有没有通过
+    dim: bool = False      # 是不是靠「亮度自适应」那一遍读出来的（HDR / 压暗画面）
 
 
 @dataclass
@@ -131,6 +156,89 @@ def _scan_fill(row: np.ndarray) -> tuple:
     return 0, False
 
 
+def _row_is_step(row: np.ndarray, fill: int) -> bool:
+    """条的形状检查：必须是「左亮右暗」的一个台阶。
+
+    fill 左边（跳过最左 1px）至少 70% 是亮点、右边至少 70% 是暗点。
+    阈值取自己的 p5/p95 的中点 —— 不能用中位数：填充超过半条时，中位数本身就
+    变成填充值了，台阶判据会自己把自己判掉。
+    为什么必须有这道闸：亮度自适应把整行抬亮的同时，也把 UI 杂色抬成了假填充 ——
+    实测一段暂停菜单录像被误判成「整条 TRACK」，于是那些帧进了像素通道。
+    台阶形状是费用条独有的：场景再亮，也不会有 200px 宽的一整条台阶。
+    """
+    n = row.size
+    lo = float(np.percentile(row, 5))
+    hi = float(np.percentile(row, 95))
+    thr = lo + 0.5 * (hi - lo)
+    left = min(VALIDITY_LEFT_INSET, n - 1)
+    lseg = row[left:fill]
+    if lseg.size and float((lseg > thr).sum()) / lseg.size < 0.7:
+        return False
+    rseg = row[fill:]
+    if rseg.size and float((rseg <= thr).sum()) / rseg.size < 0.7:
+        return False
+    return True
+
+
+def _dim_anchor(row: np.ndarray):
+    """判断这一行是不是「整体被压暗」，是就返回白电平（0..255），不是就返回 None。
+
+    SDR 白是 255（不需要还原），HDR10 的白实测 ~122。两个都要先要求行里本来就有
+    对比度：关卡外的暗场景（实测整行 9..24）如果只看「白电平低」就抬亮，
+    整行会被抬到 88 —— 正好落进满费退出灰底的判据，于是关卡外也一秒 30 帧地涨。
+    所以「有高光」本身就是必要条件：没有 >= DIM_HI_MIN 的高光，就不是被压暗的游戏 HUD。
+    """
+    hi = float(np.percentile(row, DIM_HI_PCTL))
+    lo = float(np.percentile(row, DIM_LO_PCTL))
+    if not (DIM_HI_MIN <= hi < DIM_HI_MAX) or hi - lo < DIM_MIN_CONTRAST:
+        return None
+    return hi
+
+
+def brighten_row(row: np.ndarray):
+    """按白电平等比抬亮一行（只抬不压）；判断为不需要时返回 None。
+
+    只给「填充」判据用：填充就是白电平附近的一整块，等比抬亮之后阈值等价于
+    0.965×白，比 PQ 还原稳 —— PQ 在白色附近斜率极大，编码上 122±2 的抖动
+    还原出来是 214..255，填充边界会碎掉。
+    """
+    hi = _dim_anchor(row)
+    if hi is None:
+        return None
+    return np.clip(row.astype(np.float32) * (WHITE_REF / hi), 0, 255).astype(np.int16)
+
+
+def _pq_eotf(code):
+    """PQ 码值(0..1) → 相对亮度(0..1，1.0 = 10000 cd/m²)。SMPTE ST 2084 反变换。"""
+    p = np.power(np.clip(code, 0.0, 1.0), 1.0 / PQ_M2)
+    return np.power(np.maximum(p - PQ_C1, 0.0) / (PQ_C2 - PQ_C3 * p), 1.0 / PQ_M1)
+
+
+def _sdr_oetf(lum):
+    """线性亮度(0..1) → sRGB 码值(0..1)。"""
+    x = np.clip(lum, 0.0, 1.0)
+    return np.where(x <= SDR_BREAK, x * 12.92,
+                    1.055 * np.power(np.maximum(x, 1e-8), 1.0 / 2.4) - 0.055)
+
+
+def restore_pq_row(row: np.ndarray):
+    """把被 PQ 压暗的一行还原回 SDR 码值；判断为不需要时返回 None。
+
+    只给「灰底」判据用。做法：白电平 hi 对应的亮度当作 SDR 白，逐像素先 PQ 反变换
+    成亮度、除以白电平、再走 sRGB 编码。实测（HDR 白 122）：满费灰底 94 → ~146、
+    满费退出过渡 70 → ~88，正好落回原来的绝对判据。
+    等比抬亮做不到这件事：它会把 94 抬成 197，两个灰底判据都命中不了。
+    """
+    hi = _dim_anchor(row)
+    if hi is None:
+        return None
+    white = float(_pq_eotf(hi / 255.0))
+    if white <= 0.0:
+        return None
+    lum = _pq_eotf(row.astype(np.float64) / 255.0) / white
+    return np.clip(_sdr_oetf(lum) * 255.0, 0, 255).astype(np.int16)
+
+
 def read_bar(roi: np.ndarray, layout: Layout) -> BarReading:
     """读费用条。
 
@@ -155,6 +263,30 @@ def read_bar(roi: np.ndarray, layout: Layout) -> BarReading:
     grey88 = int((np.abs(row - GREY_FADE) <= GREY_TOL).sum())
 
     min_count = max(8, int(round(BAR_MIN_FRAC * row.size)))
+    dim = False
+    if gray_ok and _dim_anchor(row) is not None:
+        # 整幅画面被压暗（HDR / PQ 采集）时 146 / 88 这些绝对阈值没有意义：
+        # 实测 HDR 下满费灰底是 94，正好落进「满费退出过渡 88±10」区间，
+        # 真正的满费会被读成过渡态。先清零，交给下面的还原通道重读。
+        grey146 = grey88 = 0
+    if fill <= 4 and grey146 < min_count and grey88 < min_count and not masked:
+        # 主路径一点东西都没读到：可能整幅画面被压暗（HDR / PQ 采集）。
+        # 填充按白电平等比抬亮再扫一遍；灰底按 PQ 曲线还原再数一遍；
+        # 两边都读不到就维持原判（EMPTY）。
+        bright = brighten_row(row)
+        if bright is not None:
+            f2, m2 = _scan_fill(bright)
+            f2 = f2 if _row_is_step(bright, f2) else 0
+            fixed = restore_pq_row(row)
+            if fixed is None:
+                g146 = g88 = 0
+            else:
+                g146 = int((np.abs(fixed - GREY_MAX) <= GREY_TOL).sum())
+                g88 = int((np.abs(fixed - GREY_FADE) <= GREY_TOL).sum())
+            if f2 > 4 or g146 >= min_count or g88 >= min_count:
+                fill, masked = f2, m2
+                grey146, grey88 = g146, g88
+                dim = True
     # 灰底判定必须放在前面，而且要压过白像素读数：
     # 满费时条槽会被整条换成灰底，同时**在条槽里画出白色的费用数字（99）**——
     # 从右往左扫会把这个数字当成填充（实测读到 145px，而参考值是 0）。
@@ -169,7 +301,7 @@ def read_bar(roi: np.ndarray, layout: Layout) -> BarReading:
     else:
         state = 'TRACK'
     return BarReading(fill=fill, grey146=grey146, grey88=grey88, state=state, row=row,
-                      masked=masked, gray_ok=gray_ok)
+                      masked=masked, gray_ok=gray_ok, dim=dim)
 
 
 def read_pause(roi: np.ndarray, layout: Layout) -> PauseReading:
@@ -214,9 +346,19 @@ def read_speed(roi: np.ndarray, layout: Layout, templates=()) -> SpeedReading:
         #   (b) 按钮淡出/整块变暗（过场、部署慢动作、暂停遮罩）：什么都有没画。
         # 旧逻辑一律当成 (a)，于是挂钟通道按 1/5 速率算 —— 实测一段 2 倍速录像里
         # 有 713 拍被这样误判，白白少记 140 帧（56 秒里差了 2.3 秒）。
+        # 箭头带里「亮」的判据必须是相对的：绝对阈值 200 在 HDR 录像上命中率 0.0000
+        # （实测 UI 白只有 122、箭头带 p99 只有 91），子弹时间永远认不出来。
+        # 相对判据 = 这一帧自己的白电平，换 HDR 亮度档 / 换 SDR 白电平都不用改常数。
         ar0, ar1 = layout.speed.band_rows(*SPEED_ARROW_BAND)
         arrow = roi[ar0:ar1 + 1, :]
-        arrow_ratio = float((arrow > ARROW_BRIGHT).sum()) / float(arrow.size)
+        hi = float(np.percentile(roi, 99.0))
+        med = float(np.median(roi))
+        if hi - med >= ARROW_MIN_CONTRAST:
+            thr_arrow = med + ARROW_REL * (hi - med)
+            arrow_ratio = float((arrow >= thr_arrow).sum()) / float(arrow.size)
+        else:
+            # 整块 ROI 没有对比度（按钮淡出 / 被遮罩糊平）：画面上根本没画东西
+            arrow_ratio = 0.0
         if arrow_ratio >= ARROW_RATIO_MIN:
             return SpeedReading(digit_ratio=digit_ratio, corr_2x=corr, has_digit=False,
                                 m=float('nan'), bullet=True, conf='ok')

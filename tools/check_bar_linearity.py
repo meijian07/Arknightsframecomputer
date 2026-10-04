@@ -1,98 +1,90 @@
 #!/usr/bin/env python
-"""费用条线性自洽检查：用「内部一致性」证明逐帧读数没有错。
+"""费用条「像素行程 vs 记了多少帧」的自洽检查（不需要知道倍速）。
 
-思路（不需要任何外部真值）：
-    条正常走动时（TRACK + 运行中），每视频帧推进的逻辑帧数 = 30*m/fps，
-    换算成像素就是 30*m/fps*px_per_frame。fill 是整数像素，所以：
+思路（最关键的一点：**不需要知道倍速**）：
 
-      单帧   只能验证「推进量是整数像素」        —— 弱
-      一段 N 帧的累计推进量 vs N*30*m/fps*px_per_frame，误差应 < 1px  —— 强
+    费用条每往前走 8px（= 一个逻辑帧的行程）就是 1 个逻辑帧，
+    这个事实和 1X / 2X / 0.2X / 暂停 都无关。
 
-    因为数错一帧就是 8px 的误差，所以只要整段累计误差 < 1px，
-    就说明**这一整段里没有任何一帧被数错**。这正好回答「细微的帧数变化看不出
-    对不对」这个问题：不用眼睛看，用累计误差卡。
+    所以对每一段「条画着填充」的连续帧：
 
-用法：python tools/check_bar_linearity.py out/frames.csv --fps 60.01
+        真值下界 = 这一段里 fill 的正增量之和 / 每逻辑帧像素
+        上界     = 下界 + 每绕一圈补 3 帧（一费开头 1~2 帧条还没画出来，像素里看不见）
+
+    然后拿状态机实际记的帧数去卡这个区间：
+
+        记多了 -> 说明有「不看条、凭空补帧」的地方（倍速读错就会这样，一费 30 帧变 62 帧）
+        记少了 -> 说明有该记没记的地方
+
+    这个检查是**绝对**的：它不信任倍速、不信任帧率、不信任挂钟，只信费用条自己的像素。
+
+用法：
+    python tools/check_bar_linearity.py out/frames.csv --bar-w 240
 """
 
 import argparse
 import csv
 import sys
 
-import numpy as np
-
 
 def load(path):
-    rows = list(csv.DictReader(open(path, encoding='utf-8')))
-    return rows
+    with open(path, encoding='utf-8') as fh:
+        return list(csv.DictReader(fh))
 
 
-def main(argv=None):
+def runs(rows, state='TRACK', min_len=20):
+    out = []
+    for i, r in enumerate(rows):
+        if r['bar_state'] != state:
+            continue
+        if out and i == out[-1][1] + 1:
+            out[-1][1] = i
+        else:
+            out.append([i, i])
+    return [(a, b) for a, b in out if b - a + 1 >= min_len]
+
+
+def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument('csv_path', nargs='?', default='out/frames.csv')
-    ap.add_argument('--fps', type=float, default=None, help='视频帧率（默认取 CSV 的 t 差分）')
-    ap.add_argument('--bar-w', type=int, default=None, help='条宽（默认取 fill 的最大值推）')
-    args = ap.parse_args(argv)
+    ap.add_argument('csv')
+    ap.add_argument('--bar-w', type=float, default=240.0,
+                    help='条槽宽（像素）。只有绕圈判定和每帧像素用到，误差影响很小')
+    ap.add_argument('--min-len', type=int, default=20, help='只检查长度 >= 这么多的连续段')
+    args = ap.parse_args()
 
-    rows = load(args.csv_path)
-    n = len(rows)
-    fill = np.array([int(r['fill']) for r in rows])
-    state = [r['bar_state'] for r in rows]
-    run = np.array([int(r['running']) for r in rows])
-    m = np.array([float(r['m']) if r['m'] else float('nan') for r in rows])
-    # 子弹时间不显示倍速，用前一个已知值补上
-    last = 2.0
-    for i in range(n):
-        if m[i] == m[i]:
-            last = m[i]
-        else:
-            m[i] = last
-    t = np.array([float(r['t']) for r in rows])
-    fps = args.fps or (1.0 / np.median(np.diff(t)))
-    bar_w = args.bar_w or 240
-    px_per_frame = bar_w / 30.0
+    rows = load(args.csv)
+    ppf = 1.03892 * args.bar_w / 30.0
+    segs = runs(rows, 'TRACK', args.min_len)
+    print('文件      : %s' % args.csv)
+    print('条槽宽    : %.1f px   每逻辑帧 %.3f px' % (args.bar_w, ppf))
+    print('TRACK 连续段（>=%d 帧）: %d 段' % (args.min_len, len(segs)))
+    print()
+    print('    起帧     止帧     帧数     正行程   绕圈      记为     应记(下界~上界)   判定')
 
-    # 找 TRACK 且运行中、且不处于子弹时间（速度恒定的连续段）
-    segs = []
-    i = 0
-    while i < n:
-        if state[i] == 'TRACK' and run[i] == 1:
-            j = i
-            while (j + 1 < n and state[j + 1] == 'TRACK' and run[j + 1] == 1
-                   and abs(m[j + 1] - m[i]) < 1e-6):
-                j += 1
-            if j - i >= 20:
-                segs.append((i, j))
-            i = j + 1
-        else:
-            i += 1
-
-    print('文件      : %s' % args.csv_path)
-    print('帧率      : %.4f fps   条宽 %d px   每逻辑帧 %.1f px' % (fps, bar_w, px_per_frame))
-    print('TRACK 连续段（>=20 帧）: %d 段' % len(segs))
+    bad = 0
+    for a, b in segs:
+        px = 0.0
+        wraps = 0
+        for i in range(a + 1, b + 1):
+            d = int(rows[i]['fill']) - int(rows[i - 1]['fill'])
+            if d > 0:
+                px += d
+            elif d < -args.bar_w / 2:
+                wraps += 1
+        got = sum(int(rows[i]['delta']) for i in range(a, b + 1))
+        lo = px / ppf
+        hi = lo + 3.0 * wraps + 3.0
+        ok = (lo - 1.0) <= got <= hi
+        if not ok:
+            bad += 1
+        print('  %6d  %6d  %6d  %9.0f  %5d  %7d   %7.1f ~ %-7.1f  %s'
+              % (a, b, b - a + 1, px, wraps, got, lo, hi, 'OK' if ok else '❌ 记多了' if got > hi else '❌ 记少了'))
     print()
-    print('%6s %6s %6s %8s %9s %9s %9s  %s' % (
-        '起帧', '止帧', '帧数', '倍速', '应走(px)', '实走(px)', '误差(px)', '误差(逻辑帧)'))
-    bad = []
-    for (i, j) in segs:
-        d = (fill[i + 1:j + 1] - fill[i:j]) % bar_w
-        obs = float(d.sum())
-        exp = (j - i) * 30.0 * m[i] / fps * px_per_frame
-        err = obs - exp
-        track = '%6d %6d %6d %8.0fX %9.0f %9.0f %+9.2f  %+.3f' % (
-            i, j, j - i, m[i], exp, obs, err, err / px_per_frame)
-        print(track)
-        if abs(err) >= px_per_frame:
-            bad.append((i, j, err))
-    print()
-    total_err = sum(abs(e) for _, _, e in bad)
-    print('累计误差 >= 1 逻辑帧的段: %d 段' % len(bad))
-    for i, j, e in bad:
-        print('  帧 %d..%d  误差 %+.2f px = %+.3f 逻辑帧' % (i, j, e, e / px_per_frame))
-    print()
-    print('结论: %s' % ('✅ 每一段都精确到 <1 逻辑帧（说明没有数错帧）' if not bad
-                       else '⚠️ 有 %d 段需要人工看帧' % len(bad)))
-    return 0
+    if bad:
+        print('结论：❌ %d 段和费用条的像素行程对不上' % bad)
+    else:
+        print('结论：✅ 每一段记的帧数都落在费用条像素行程给出的区间里')
+    return 1 if bad else 0
 
 
 if __name__ == '__main__':

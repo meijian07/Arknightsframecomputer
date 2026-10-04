@@ -81,6 +81,7 @@ class LiveMonitor:
         self.stats = LiveStats()
         self.rows: list = []
         self.keep_rows = False     # True 时把每帧结果留在内存里（导出用）
+        self.manual_pause = False  # 「暂停计数」开关（手动，给测试用）
         self._csv_path = csv_path
         self._stop = threading.Event()
         self._thread = None
@@ -106,8 +107,19 @@ class LiveMonitor:
                                bar_width_frac=layout.bar_width_f, visible_w=layout.bar.w)
         self.counter.elapsed = elapsed
         self.counter.resync()
+        self.counter.set_manual_pause(self.manual_pause)
         # 外接矩形变了，之前按尺寸缓存的 DIB 不再需要（ScreenGrabber 自己按尺寸复用）
         self._grabber = None
+
+    def set_manual_pause(self, on: bool) -> None:
+        """开关「暂停计数」：数字按住不动，方便对着游戏逐段核对。"""
+        self.manual_pause = bool(on)
+        if self.counter is not None:
+            self.counter.set_manual_pause(self.manual_pause)
+
+    def toggle_manual_pause(self) -> bool:
+        self.set_manual_pause(not self.manual_pause)
+        return self.manual_pause
 
     def reset(self) -> None:
         """清零计数（不清空已写出的 CSV）。"""
@@ -178,12 +190,17 @@ class LiveMonitor:
         res = self.counter.step(self._idx, t, bar, pause, speed)
 
         note = ''
-        if res.mode == 'pause':
+        if res.mode == 'manual-pause':
+            note = '计数已暂停（手动，数字按住不动）'
+        elif res.mode == 'pause':
             note = '已暂停（不计数）'
-        elif not pause.running:
+        elif not res.running:
+            # 帧操：采样这一瞬图标是「暂停」，但两次采样之间游戏跑过了、条动过了
             note = '暂停键=暂停，但费用条在动 —— 按费用条计数'
         elif res.mode.startswith('clock'):
-            note = '满费/条不可读，按挂钟估算'
+            note = '满费中，按挂钟 × 倍速估算'
+        elif res.warn == 'speed-unknown':
+            note = '满费中，但倍速键上没画数字 —— 冻结不猜'
 
         self.stats.samples += 1
         self._hz_window.append(t)

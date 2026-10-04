@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as wt
+import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -127,7 +128,8 @@ def find_window(exe: str = None, title: str = None, pid: int = None,
                 min_size: tuple = (320, 240)) -> WindowInfo | None:
     """按 进程名 / 标题子串 / pid 找窗口，返回面积最大的那个。
 
-    exe 和 title 都是「包含」匹配，大小写不敏感。找不到返回 None。
+    exe 和 title 都是「包含」匹配，大小写不敏感；exe 的 `.exe` 后缀可写可不写
+    （进程名是 `Arknights`，写 `Arknights.exe` 也要能找到）。找不到返回 None。
     """
     best = None
     for w in list_windows():
@@ -139,8 +141,12 @@ def find_window(exe: str = None, title: str = None, pid: int = None,
             if w.pid != int(pid):
                 continue
         else:
-            if exe and exe.lower() not in w.exe.lower():
-                continue
+            if exe:
+                # 进程名不带 .exe（任务管理器里是 Arknights），所以两边都剥掉后缀再比
+                want = os.path.splitext(exe.lower())[0]
+                have = os.path.splitext(w.exe.lower())[0]
+                if want and want not in have:
+                    continue
             if title and title.lower() not in w.title.lower():
                 continue
         if w.client[2] < min_size[0] or w.client[3] < min_size[1]:

@@ -10,7 +10,8 @@
 操作：
     Tab 切换要校准的 ROI   方向键 移动   Shift+方向键 改大小
     K 显示/隐藏屏幕上的 ROI 框    S 保存校准   R 恢复默认
-    C 清零计数    L 开始/停止记录 CSV    T 导入 md 轴文件    Esc 退出
+    C 清零计数    L 开始/停止记录 CSV    P 暂停/继续计数（手动）
+    T 导入 md 轴文件    Esc 退出
 
 打轴器（提词器）：导入一个 md 轴文件，或直接在下面的输入框里写（Ctrl+Enter 应用），
 计数器走到对应帧号时，面板上就把那条说明放大显示出来。轴文件格式见 timeline.py 顶部注释
@@ -198,6 +199,11 @@ class MonitorApp:
 
         btns = tk.Frame(self.root, bg=UI_BG)
         btns.pack(fill='x', **pad)
+        # 「暂停计数」单独建：文案/颜色要跟开关状态变，其余按钮不用
+        self.btn_manual = tk.Button(btns, text='暂停计数 (P)', command=self.toggle_manual_pause,
+                                    font=('Microsoft YaHei UI', 9), bg='#262a33', fg=UI_FG,
+                                    activebackground='#333947', relief='flat', padx=8, pady=3)
+        self.btn_manual.pack(side='left', padx=3)
         for text, cmd in (('清零计数', self.clear_count),
                           ('开始记录', self.toggle_csv),
                           ('校准模式', self.toggle_overlay),
@@ -215,7 +221,7 @@ class MonitorApp:
         self.lb_help = self._label(
             self.root,
             'Tab 切 ROI ｜ 方向键移动/Shift 缩放 ｜ K ROI 框 ｜ S 保存 ｜ R 默认 ｜ C 清零 ｜ '
-            'L 记录 ｜ T 导入轴 ｜ 下框可直接写轴（Ctrl+Enter 应用）',
+            'L 记录 ｜ P 暂停计数 ｜ T 导入轴 ｜ 下框可直接写轴（Ctrl+Enter 应用）',
             9, UI_DIM, wraplength=694, justify='left')
         self.lb_help.pack(fill='x', padx=10, pady=(2, 8))
 
@@ -241,6 +247,7 @@ class MonitorApp:
                         ('r', self.reset_calib), ('R', self.reset_calib),
                         ('c', self.clear_count), ('C', self.clear_count),
                         ('l', self.toggle_csv), ('L', self.toggle_csv),
+                        ('p', self.toggle_manual_pause), ('P', self.toggle_manual_pause),
                         ('t', self.import_timeline), ('T', self.import_timeline)):
             r.bind(seq, self._guard(lambda _e, f=fn: f()))
         for seq in ('<Left>', '<Right>', '<Up>', '<Down>',
@@ -370,6 +377,20 @@ class MonitorApp:
     def clear_count(self):
         self.monitor.reset()
         self._set_note('已清零')
+
+    def toggle_manual_pause(self):
+        """手动「暂停计数」：数字按住不动，方便对着游戏/录像逐段核对。
+
+        和游戏自己的暂停无关 —— 那条路一直按费用条算。这里只是让计数器不再往
+        total 上加：读数、预览照常刷新，只是数字不动。再按一次恢复（恢复时重新起锚，
+        按住的那一段既不会事后补进来、数字也不会跳）。符号画面变了的话是因为这个
+        开关只管计数，不管特征提取。
+        """
+        on = self.monitor.toggle_manual_pause()
+        self.btn_manual.configure(text='继续计数 (P)' if on else '暂停计数 (P)',
+                                  fg=WARN if on else UI_FG)
+        self._set_note('已暂停计数（手动）：数字按住不动，再按 P 继续'
+                       if on else '已收开关：继续计数（重新起锚）')
 
     def toggle_csv(self):
         if self.monitor._csv_path:
@@ -565,10 +586,14 @@ class MonitorApp:
             res = upd.result
             self.lb_frames.configure(text=str(res.elapsed))
             self.lb_time.configure(text='游戏内时间 %s' % _fmt_time(res.elapsed / 30.0))
-            if res.mode == 'pause':
+            if res.mode == 'manual-pause':
+                self.lb_state.configure(text='状态 计数已暂停（手动，按住不动）', fg=WARN)
+            elif res.mode == 'pause':
                 self.lb_state.configure(text='状态 已暂停（不计数）', fg=WARN)
             elif res.mode.startswith('clock'):
-                self.lb_state.configure(text='状态 运行中（挂钟估算）', fg=WARN)
+                self.lb_state.configure(text='状态 运行中（满费，挂钟估算）', fg=WARN)
+            elif res.mode == 'bar-reject' and res.warn == 'speed-unknown':
+                self.lb_state.configure(text='状态 运行中（满费，倍速未知：冻结）', fg=WARN)
             elif not res.running:
                 # 帧操：采样这一瞬图标是「暂停」，但两次采样之间游戏跑过了、条动过了
                 self.lb_state.configure(text='状态 已暂停（条在动，按像素计数）', fg=ACCENT)
