@@ -50,7 +50,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help='游戏内「UI 缩放」0..1（默认从注册表读；读不到按 1.0）')
     p.add_argument('--cost-rate', default=None,
                    help='回费速率 = 一费几个逻辑帧。不填就读设置文件（--settings），'
-                        '30 = 正常（1 秒 1 费）；60 = 回费速度 -50%；120 = -75%。'
+                        # argparse 会对 help 文本做 % 格式化，裸的 % 必须写成 %%
+                        '30 = 正常（1 秒 1 费）；60 = 回费速度 -50%%；120 = -75%%。'
                         'auto = 开自动识别（可选功能：从费用条一个周期里出现过多少种'
                         '宽度自己认，认错档会让绝对帧号整段漂移，所以默认不用）')
     p.add_argument('--settings', default='cost_rate.json',

@@ -12,10 +12,9 @@ import sys
 
 import numpy as np
 
-from .capture import find_ffmpeg, open_images, open_video, probe_video
+from .capture import find_ffmpeg, open_images, open_video
 from .features import read_bar, read_pause, read_speed
 from .cost_rate import collect_cycles, infer_rate
-from .geometry import layout_for
 from .settings import DEFAULT_FRAMES_PER_COST
 from .state import CSV_HEADER, PROBE_MIN_SECONDS, Counter
 
@@ -53,7 +52,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help='游戏内「UI 缩放」0..1（默认从注册表读；读不到按 1.0）')
     p.add_argument('--cost-rate', default=None,
                    help='回费速率 = 一费几个逻辑帧。不填 = 30（普通关卡，1 秒 1 费）；'
-                        '60 = 回费速度 -50%；120 = -75%。'
+                        # argparse 会对 help 文本做 % 格式化，裸的 % 必须写成 %%
+                        '60 = 回费速度 -50%%；120 = -75%%。'
                         'auto = 可选：从费用条一个周期里出现过多少种宽度自动认'
                         '（认错档会让绝对帧号整段漂移，所以默认不用）')
     p.add_argument('--print-layout', action='store_true', help='只打印算出来的 ROI 就退出')
