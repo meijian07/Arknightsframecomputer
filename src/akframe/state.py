@@ -88,7 +88,8 @@ BATTLE_HOLD_FRAMES = 120     # 1..2 秒 @60Hz 采样：足够覆盖关卡内的�
 #   * 读得到 -> 只认条的格数差，这一拍**完全不看挂钟**（两套一起加会重复计帧）；
 #   * 读到过、这一刻读不到（被计数器窗口挡住 / 条退到看不见的地方）-> 冻结等它回来，
 #     回来的那一拍会把缺的格数一次补齐；
-#   * 连续 TOPBAR_HOLD_SECONDS 读不到 -> 认栽，退回挂钟通道。
+#   * 连续 TOPBAR_HOLD_SECONDS 读不到 -> 认栽，退回挂钟通道，并且把「等它的时候
+#     攒下的墙钟时间」一次交给挂钟通道（见 _take_tb_wait）。
 # 冻结而不是挂钟兜底，是因为条是**绝对刻度**：猜出来的帧和随后补上的帧会重复。
 TOPBAR_HOLD_SECONDS = 0.6
 # 一次读数跳这么多格就认为不是「条在退」而是读错了（场景冒充 / 条被重置），按当前
@@ -214,6 +215,17 @@ class Counter:
         self._tb_cells = None      # 上一拍读到的格数（None = 这一轮还没取到基准）
         self._tb_frac = 0.0        # 顶部条的余量（不足一帧的部分）
         self._tb_lost_s = 0.0      # 连续读不到顶部条多久了（秒）
+        # 读不到但**游戏在跑**的那几拍攒下的墙钟秒数（暂停的那些拍不算）。
+        # 用途只有一个：等超时、彻底放弃顶部条的那一刻，把这段时间交给挂钟通道，
+        # 否则「条退到计数器窗口底下看不见了」之后每段短跑都白丢（实测丢了 3.7 帧）。
+        # 条要是在超时前回来了，这段就不作数 —— 格数差是精确值，两套一起加会重复。
+        self._tb_wait_s = 0.0
+        # 但「读不到 + 在跑」这件事本身也要先确认过才敢信：暂停时暂停键图标会以
+        # 2~3 帧为单位闪成「运行中」，闪的那几下也会掉进等待分支、也会攒时间。
+        # 所以只把**连续 CLOCK_ARM_FRAMES 拍以上**的那段算数（和挂钟通道同一个门限、
+        # 同一个理由，见 _clock_gated）。实测那段暂停录像里闪烁一次凭空多记 30 帧。
+        self._tb_streak = 0        # 本段连续「读不到 + 在跑」多少拍了
+        self._tb_streak_s = 0.0    # 本段攒的秒数（还没确认的那部分）
         self.probe_frames = 0
         self.probe_mt = 0.0
         # 距离上一次「被采纳的像素读数」过去了多久（秒）。
@@ -328,6 +340,9 @@ class Counter:
                 mode, delta = 'pause', 0
             elif topbar is not None and topbar.present and topbar.cells is not None:
                 self._tb_lost_s = 0.0
+                self._tb_wait_s = 0.0
+                self._tb_streak = 0
+                self._tb_streak_s = 0.0
                 if self._tb_cells is None:
                     # 第一次读到：只取基准，这一拍不补帧 —— 满费开始到现在的这一段
                     # 是挂钟通道兜的，这里再补就是重复计帧。
@@ -348,24 +363,34 @@ class Counter:
                         k = int(self._tb_frac + 1e-9)
                         self._tb_frac -= k
                         mode, delta = 'topbar', k
-            elif self._tb_cells is not None and self._tb_lost_s < TOPBAR_HOLD_SECONDS:
+            elif self._tb_cells is not None and self._tb_lost_s + dt <= TOPBAR_HOLD_SECONDS:
                 # 读到过、这一刻读不到（被计数器窗口挡住 / 条退到看不见的地方了）：
                 # 冻结等它回来。条是绝对刻度，下一拍读到就把缺的格数一次补齐 ——
                 # 这里若用挂钟去猜，猜的帧和随后补的帧会重复计。
+                # 顺手把这段时间记下来：真等超时了要还给挂钟通道（只认确认过的那段）。
                 self._tb_lost_s += dt
+                self._tb_streak += 1
+                self._tb_streak_s += dt
+                if self._tb_streak >= CLOCK_ARM_FRAMES:
+                    self._tb_wait_s += self._tb_streak_s
+                    self._tb_streak_s = 0.0
                 mode, delta = 'topbar-wait', 0
             elif speed.bullet:
                 # 挂钟开始自己加帧了：顶部条的基准必须扔掉。留着它，条回来时算出的
                 # 格数差会把这段已经由挂钟记过的帧再记一遍（重复计帧）。
                 self._tb_cells = None
-                mode, delta = self._clock_gated(BULLET_FPS, dt)
+                mode, delta = self._clock_gated(BULLET_FPS, dt, self._take_tb_wait())
             elif m_now is None or not speed.has_digit:
                 # 倍速键上这一刻没画数字、也不是子弹时间：不知道速率，冻结。
+                # 攒下的那段也没法换算成帧，只能丢掉（延续「不知道就不猜」）。
+                self._tb_cells = None
+                self._take_tb_wait()
                 mode, delta = 'bar-reject', 0
                 warn = 'speed-unknown'
             else:
                 self._tb_cells = None      # 同上：挂钟自己加帧，基准必须扔掉
-                mode, delta = self._clock_gated(LOGICAL_FPS * m_now, dt)
+                mode, delta = self._clock_gated(LOGICAL_FPS * m_now, dt,
+                                                self._take_tb_wait())
         elif empty and not wrap_pending:
             # (b)：条这一拍压根没画出来。冻结，等条重新出现时相位重同步自己接上。
             # 这里**不再**要求「运行中」连续确认（原来那道理由上面 wrap_pending 接管了）：
@@ -395,12 +420,17 @@ class Counter:
             # 拿旧基准去减会算出一个巨大的假增量）
             self._tb_cells = None
             self._tb_lost_s = 0.0
+            self._tb_wait_s = 0.0
+            self._tb_streak = 0
+            self._tb_streak_s = 0.0
 
         if paused:
             # 暂停 -> 挂钟通道必须重新「确认」：否则暂停期间图标闪一下就会被当成在跑
             self._unread_run = 0
             self._clock_wait = 0.0
             self._need_confirm = True
+            self._tb_streak = 0       # 顶部条那段的连续计数也断掉
+            self._tb_streak_s = 0.0
 
         # 注意：这里**不能**在换通道时把余量清零。余量代表「不足一帧的相位」，
         # 每次换通道丢一次，几十次换通道就会累积成几帧的系统性少算（实时链路实测）。
@@ -540,6 +570,9 @@ class Counter:
         self._tb_cells = None
         self._tb_frac = 0.0
         self._tb_lost_s = 0.0
+        self._tb_wait_s = 0.0
+        self._tb_streak = 0
+        self._tb_streak_s = 0.0
         # 重新起锚 = 中间有一段没读到，周期基准也作废（否则会记出一个超长的假周期）
         self._cycle_ref = None
         self._since_accept = 0.0
@@ -761,7 +794,20 @@ class Counter:
             self._cycle_seen = timing.cycles
         return 'pixel', k, ('phase-resync' if stale else '')
 
-    def _clock_gated(self, rate: float, dt: float) -> tuple:
+    def _take_tb_wait(self) -> float:
+        '''取走「等顶部条回来时攒下的墙钟秒数」。取一次就清零。
+
+        只包含**连续 CLOCK_ARM_FRAMES 拍以上**的那几段 —— 没确认的尾巴（暂停键闪烁
+        那种两三拍）不算数，见 _tb_streak_s。
+        '''
+        s = self._tb_wait_s
+        self._tb_wait_s = 0.0
+        self._tb_streak = 0
+        self._tb_streak_s = 0.0
+        self._tb_lost_s = 0.0
+        return s
+
+    def _clock_gated(self, rate: float, dt: float, pending_s: float = 0.0) -> tuple:
         """挂钟通道，但先要确认游戏真的在跑。
 
         为什么必须确认：暂停时暂停键图标会以 2~3 帧为单位闪成「运行中」形状（实测一段
@@ -780,11 +826,15 @@ class Counter:
         （实测暂停中 fill 仍然正常），所以「快速暂停 / 继续 / 再暂停」的识别速度不受影响。
         """
         self._unread_run += 1
+        # pending_s 是顶部条通道「等回来」那段时间（秒）。
+        # 走确认这条路是有意的：暂停时暂停键图标会闪成「运行中」，闪的那几下也会
+        # 进等待分支、也会攒时间 —— 但它们凑不满 CLOCK_ARM_FRAMES 帧，过不了确认。
+        pend = max(0.0, pending_s) * rate
         if self._need_confirm and self._unread_run < CLOCK_ARM_FRAMES:
-            self._clock_wait += rate * dt
+            self._clock_wait += rate * dt + pend
             return 'clock-wait', 0
         self._need_confirm = False
-        acc = rate * dt + self._clock_wait + self._clock_frac
+        acc = rate * dt + pend + self._clock_wait + self._clock_frac
         self._clock_wait = 0.0
         delta = int(acc)
         self._clock_frac = acc - delta

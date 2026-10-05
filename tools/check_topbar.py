@@ -12,6 +12,9 @@
     2. 不该报的地方不许报：条出现之前（f < 82）与条退完消失之后（f = 1757）必须读不到；
     3. 走完整状态机后「顶部条计入的帧数」= 最大格数 - 1。
 
+另外两条**合成信号**自检（不需要录像，永远跑）：条被挡住看不见之后，等它的那段时间
+要还给挂钟通道（不能白丢）；但暂停键闪烁那种「两三拍假运行」一分一秒都不许算进去。
+
 缓存 out/cache/<录像名>_tb_<指纹>/ 是抽流的一次性产物（topbar.raw + meta.json），
 目录被 .gitignore 掉了、不会跟着仓库走 —— 没有缓存就跳过（会打印跳过原因）。
 
@@ -22,13 +25,17 @@ import glob
 import os
 import sys
 
+import numpy as np
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'src'))
 
 from akframe.capture import iter_cached, load_meta            # noqa: E402
 from akframe.geometry import Layout                           # noqa: E402
-from akframe.features import read_bar, read_pause, read_speed, read_topbar   # noqa: E402
-from akframe.state import Counter                            # noqa: E402
+from akframe.features import (BarReading, PauseReading, SpeedReading,  # noqa: E402
+                              TopBarReading, read_bar, read_pause, read_speed,
+                              read_topbar)
+from akframe.state import Counter                             # noqa: E402
 
 # 基准：哪一帧退到第几格。这 25 个数不是程序跑出来的，是用另一套完全不同的算法
 # （在 x>=900 里找最陡的那一步）在 raw 上独立数出来的，两边逐点一致才算通过。
@@ -44,6 +51,65 @@ BAR_LAST = 1620                # 条退完之后只剩场景，往后任何读�
 # 基准录像：2026-10-05 21:43 那段（25 个退格点就是从这里数出来的）
 REF_VIDEO = 'Desktop 2026.10.05 - 21.43.13.03'
 
+
+BAR_W = 120
+RUN = PauseReading(ratio=0.30, running=True)
+PAUSED = PauseReading(ratio=0.05, running=False)
+# 子弹时间：速率是确定的 6 逻辑帧/秒，和倍速设置无关（见 docs 3.1）
+BULLET = SpeedReading(digit_ratio=0.30, corr_2x=0.2, has_digit=False, m=1.0,
+                      bullet=True, conf='ok')
+MAXBAR = BarReading(fill=0, grey146=BAR_W, grey88=0, state='MAX',
+                    row=np.zeros(BAR_W, np.int16))
+NOTB = TopBarReading(present=False, cells=None, edge=-1, level=0.0, look=0.0)
+
+
+def _tb(cells):
+    return TopBarReading(present=True, cells=cells, edge=0, level=190.0, look=30.0)
+
+
+def _feed(c, t, idx, running, topbar):
+    return c.step(idx, t, MAXBAR, RUN if running else PAUSED, BULLET, topbar=topbar)
+
+
+def wait_timeout_refunded():
+    """条读不到超过 TOPBAR_HOLD_SECONDS 之后，那段等待时间要还给挂钟通道。
+
+    真值怎么算：全程子弹时间 = 6 逻辑帧/秒，60Hz 采样下每拍 0.1 逻辑帧。
+    修之前只记 5 帧：挂钟自己只补了「确认完之后」的那 54 拍，等条的 35 拍
+    （0.583 秒 = 3.5 逻辑帧）整段白丢。
+    """
+    c = Counter(BAR_W, fps=60.0)
+    t = 0.0
+    for i in range(5):                      # 前 5 拍读得到条，先把基准取上
+        t += 1 / 60.0
+        _feed(c, t, i + 1, True, _tb(3))
+    base = c.elapsed
+    n = 90                                  # 之后读不到，游戏一直在跑
+    for i in range(n):
+        t += 1 / 60.0
+        _feed(c, t, 6 + i, True, NOTB)
+    return c.elapsed - base, n / 60.0 * 6.0
+
+
+def pause_flicker_not_counted():
+    """暂停时暂停键图标闪成「运行中」的那两三拍，一分一秒都不许算进挂钟。
+
+    实测出处：一段 76 秒的暂停录像里闪了 28 次，旧逻辑每次凭空多 1 帧、总共多 30 帧
+    （见 _clock_gated 的说明）。顶部条这条新路必须同样挡住它。
+    """
+    c = Counter(BAR_W, fps=60.0)
+    t = 0.0
+    idx = 0
+    for _ in range(60):                     # 60 轮：闪 2 拍，再暂停 60 拍
+        for _ in range(2):
+            idx += 1
+            t += 1 / 60.0
+            _feed(c, t, idx, True, NOTB)
+        for _ in range(60):
+            idx += 1
+            t += 1 / 60.0
+            _feed(c, t, idx, False, NOTB)
+    return c.elapsed
 
 def find_cache():
     """找基准录像的抽流缓存。没有就返回 None（跳过，不报错）。"""
@@ -93,12 +159,30 @@ def run_state_machine(cache):
 
 
 def main():
+    got, want = wait_timeout_refunded()
+    # 累计帧是 floor 取整，末尾不足 1 帧的相位留在余量里（这里剩 0.8 帧），
+    # 所以允许比真值少 1 帧；**多**出来不许 —— 多 = 两套通道把同一段时间记了两遍。
+    # 修之前只有 5 帧（挂钟自己补的那 54 拍），等条的 35 拍白丢，落在区间外面。
+    ok0 = got > 0 and want - 1.5 <= got <= want + 0.5
+    print('  等条回来超时后还给挂钟：%d 帧（真值 %.1f 帧，floor 取整；修之前只有 5 帧）'
+          % (got, want))
+    print('  %s 等待那段时间没有被白丢' % ('✅' if ok0 else '❌'))
+
+    flick = pause_flicker_not_counted()
+    ok0b = flick == 0
+    print('  暂停键闪烁 60 轮（每轮闪 2 拍）：多记 %d 帧' % flick)
+    print('  %s 闪烁的假运行没有凭空补帧' % ('✅' if ok0b else '❌'))
+    print()
+
     cache = find_cache()
     if cache is None:
         print('  ⏭  跳过（没有基准录像 %s 的抽流缓存；先跑\n'
           '     run_reader.py "<那段录像.mp4>" --client 2558x1494 --roi-offset=2,45 '
           '--topbar）' % REF_VIDEO)
-        return 0
+        print()
+        print('结论：%s' % ('✅ 合成自检通过（录像那部分跳过）' if (ok0 and ok0b)
+                            else '❌ 有回归'))
+        return 0 if (ok0 and ok0b) else 1
     print('缓存：out/cache/%s' % os.path.basename(cache))
 
     lay = layout_of(cache)
@@ -128,7 +212,7 @@ def main():
           % ('✅' if ok3 else '❌', len(TRUTH) - 1))
 
     print()
-    ok = ok1 and ok2 and ok3
+    ok = ok0 and ok0b and ok1 and ok2 and ok3
     print('结论：%s' % ('✅ 全部通过' if ok else '❌ 有回归'))
     return 0 if ok else 1
 
