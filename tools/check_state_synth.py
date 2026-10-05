@@ -193,29 +193,32 @@ def clear_zero_start(fps=60.0):
     第 2 帧（fill=7），老逻辑照「起锚补帧」把周期开头那 1~2 帧补上，于是数字从 0
     变成 1 并卡在 1 不动（录像 2026-10-05 11:01 的面板实测显示 1 卡了 6 秒）。
 
-    两种情形都必须从 0 起步：
-        A 清零时游戏是暂停的（条一直不动）—— 数字必须一直是 0；
-        B 清零时游戏在跑 —— 清零那一拍 delta=0（不补先前的帧），之后正常 +1。
+    三种情形：
+        A 清零时界面没读到画面（条宽未知）—— 保守起见一律不补，数字一直 0；
+        B 清零时条已经有像素（fill=第一个像素）—— 清零那一拍 delta=0
+          （那 1 帧清零前就数过了），之后正常 +1；
+        C 清零时条是空的（本费第 0 帧，fill=0）—— 清零之后走到「第一个像素」
+          那 1 帧必须记（用户报的「第零帧到第一帧记不到」就是这里被吃掉的）。
 
     返回失败项列表（每项：(场景, 拍号, (mode, delta), 期望 delta, elapsed, 期望 elapsed)）。
     """
     bad = []
     dt = 1.0 / fps
+    first_px = synthesized_width(BAR_W, float(BAR_W), phase_frac(2))
 
     c = Counter(BAR_W, fps=fps)
-    c.mark_zero_start()                      # 等价于界面上的「清零计数」
+    c.mark_zero_start()                      # 等价于界面上的「清零计数」；条宽未知
     t, idx = 0.0, 0
     for k in range(20):
         idx += 1
         t += dt
-        fill = synthesized_width(BAR_W, float(BAR_W), phase_frac(2))
-        r = c.step(idx, t, bar(fill, 'TRACK' if fill > 4 else 'EMPTY'), PAUSED, SPEED)
+        r = c.step(idx, t, bar(first_px, 'TRACK'), PAUSED, SPEED)
         if r.delta != 0 or c.elapsed != 0:
-            bad.append(('A 暂停中清零', k, (r.mode, r.delta), 0, c.elapsed, 0))
+            bad.append(('A 暂停中清零（条宽未知）', k, (r.mode, r.delta), 0, c.elapsed, 0))
             break
 
     c = Counter(BAR_W, fps=fps)
-    c.mark_zero_start()
+    c.mark_zero_start(first_px)              # 清零时条已经在第一个像素上
     t, idx = 0.0, 0
     for k in range(40):
         idx += 1
@@ -224,7 +227,21 @@ def clear_zero_start(fps=60.0):
         r = c.step(idx, t, bar(fill, 'TRACK' if fill > 4 else 'EMPTY'), RUN, SPEED)
         want_d = 0 if k == 0 else 1
         if r.delta != want_d or c.elapsed != k:
-            bad.append(('B 跑动中清零', k, (r.mode, r.delta), want_d, c.elapsed, k))
+            bad.append(('B 跑动中清零（条已在第一个像素）', k, (r.mode, r.delta),
+                        want_d, c.elapsed, k))
+            break
+
+    c = Counter(BAR_W, fps=fps)
+    c.mark_zero_start(0)                     # 清零时条是空的（本费第 0 帧）
+    t, idx = 0.0, 0
+    for k in range(40):
+        idx += 1
+        t += dt
+        fill = synthesized_width(BAR_W, float(BAR_W), phase_frac(2 + k))
+        r = c.step(idx, t, bar(fill, 'TRACK' if fill > 4 else 'EMPTY'), RUN, SPEED)
+        want_e = k + 1                       # 第一个像素那一拍就要有 1 帧
+        if r.delta != 1 or c.elapsed != want_e:
+            bad.append(('C 清零时条空', k, (r.mode, r.delta), 1, c.elapsed, want_e))
             break
     return bad
 
@@ -474,14 +491,14 @@ def main():
 
     bad_clear = clear_zero_start()
     print()
-    print('清零起步（清零后第一拍不许把清零前那几帧补回来）：')
+    print('清零起步（只补清零之后才走的帧）：')
     if bad_clear:
         for b in bad_clear:
             print('  ❌ %s：第 %d 拍 (mode, delta)=%s，期望 delta=%s；elapsed=%s '
                   '期望 %s' % b)
     else:
-        print('  ✅ 通过（暂停中清零 -> 一直是 0；跑动中清零 -> 那一拍 0、'
-              '之后每拍 +1）')
+        print('  ✅ 通过（条宽未知 -> 一直 0；条已在第一个像素 -> 那一拍 0、之后 +1；'
+              '条空时清零 -> 第一个像素那拍就 +1）')
     ok10 = not bad_clear
 
     bad_stale = stale_phase_reanchor()

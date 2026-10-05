@@ -224,9 +224,13 @@ class LiveMonitor:
         if self.layout:
             self.set_layout(self.layout, keep_elapsed=False)
         if self.counter is not None:
-            # 清零 = 「从这一刻起从 0 开始数」。下一次起锚不许把清零**之前**数过的
-            # 那几帧（当前费用周期开头那 1~2 帧）补回来 —— 补了数字就会停在 1/2。
-            self.counter.mark_zero_start()
+            # 清零 = 「从这一刻起从 0 开始数」。下一次起锚只补清零**之后**才走的帧，
+            # 所以要把「清零这一刻条画到第几帧」交给计数器：万一清零时条还是空的
+            # （本费第 0 帧），清零之后走到「第一个像素」那 1 帧就必须记，
+            # 否则整段帧号从此差 1（用户报的「第零帧到第一帧记不到」）。
+            last = self.latest.result
+            fill = int(last.fill) if last is not None else None
+            self.counter.mark_zero_start(fill)
 
     # ---------- 采样 ----------
 

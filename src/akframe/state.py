@@ -159,10 +159,14 @@ class Counter:
         self._clock_frac = 0.0     # 挂钟通道余量（单位：逻辑帧）
         self._battle_hold = 0      # 还要多少拍之内算「在关卡里」（见 BAR_PRESENT_STATES）
         self._started = False
-        # 清零之后的第一拍「起锚」不许补帧：要补的那几帧属于**清零之前**的周期，
-        # 清零的语义是「从这一刻起从 0 开始数」。不拦的话数字会停在 1/2 上不动
+        # 清零之后的第一拍「起锚」不许把清零**之前**数过的帧补回来：清零的语义是
+        # 「从这一刻起从 0 开始数」。不拦的话数字会停在 1/2 上不动
         # （实测回放 2026-10-05 11:01：清零后游戏暂停，数字停在 1，用户报的就是这个）。
+        # 但**不能一律不补**：清零时条是空的（本费第 0 帧）的话，清零之后走到
+        # 「第一个像素」那 1 帧必须记（用户报的「第零帧到第一帧记不到」）。
+        # 所以还要记住清零那一刻条已经画到第几帧：见 _zero_phase / mark_zero_start。
         self._no_catchup = False
+        self._zero_phase = None
         self._prev_t = None
         self._prev_mode = None
         # 「暂停计数」开关（手动，给测试用）：按住时数字一动不动，其它读数照常刷新。
@@ -447,6 +451,10 @@ class Counter:
         self._cycle_ref = None
         self._since_accept = 0.0
         self._reject_s = 0.0
+        # 重新起锚意味着「跨了一段没读到的画面 / 进了新周期」：清零时记下的那个相位
+        # 只对当时的那个费用周期成立。这里复位成 1（本费刚开始），
+        # 真正的清零（mark_zero_start 在 set_layout 之后调用）会再写一遍。
+        self._zero_phase = 1
         if not keep_battle:
             self._battle_hold = 0
         self._prev_mode = None
@@ -489,14 +497,31 @@ class Counter:
         self._reject_s = 0.0
         return k
 
-    def mark_zero_start(self) -> None:
-        """清零：下一次起锚不许补帧。
+    def _phase_index(self, observed: int) -> int:
+        """把一次条宽读数反推成「本费第几帧」（相位号，1 起）。
+
+        和 _start() 用的是同一条曲线，只是这里只取相位号、不动状态机。
+        读不准（误差超容差）或落在空条上时按 1 算 —— 也就是「本费刚开始」。
+        """
+        k, err, _ = self._resync(int(observed), allow_wrap=False,
+                                 base=CostTiming(self.required))
+        if err > MATCH_TOLERANCE_PX:
+            return 1
+        return max(1, int(k))
+
+    def mark_zero_start(self, bar_fill=None) -> None:
+        """清零：下一次起锚只补「清零那一刻之后」才走的帧。
 
         和 resync() 的区别：resync() 只是「中间丢了一段、按当前读数重新对齐」，
-        起锚时的补帧仍然成立；清零是「从这里开始数」，清零**之前**已经数出来的
-        那些帧（包括当前费用周期开头那 1~2 帧）不能再被补回来。
+        起锚时的补帧仍然成立；清零是「从这里开始数」。
+
+        bar_fill 是清零那一刻读到的条宽。它决定「本费第 1..几帧」算清零之前：
+          - 条是空的（0 宽）-> 本费第 0 帧，第 1 帧还没走，起锚时那 1 帧要补上；
+          - 条已经有像素   -> 补帧只能从清零时的相位往后算，不能倒回去补。
+        bar_fill=None（界面没读到画面）时保守处理：一律不补（宁可少记也不猜）。
         """
         self._no_catchup = True
+        self._zero_phase = self._phase_index(bar_fill) if bar_fill is not None else None
 
     def _anchor_result(self, k: int) -> tuple:
         """起锚这一拍该记几帧（返回 mode, delta, warn）。
@@ -515,11 +540,14 @@ class Counter:
         """
         head = int(k) - 1        # 从周期第 1 帧数到这一拍，已经过去了这么多帧
         if self._no_catchup:
-            # 清零之后的第一拍：补的那几帧是清零之前数过的，不能重复记。
+            # 清零之后第一次起锚：只补「清零那一刻之后」才走的帧。
+            # _zero_phase = 清零时条已经画到第几帧；None = 当时没读到画面，不猜。
             self._no_catchup = False
-            if head > ANCHOR_MAX_CATCHUP:
-                return 'anchor', 0, 'anchor-late'
-            return 'anchor', 0, ''
+            base_k = self._zero_phase
+            self._zero_phase = None
+            if base_k is None:
+                return 'anchor', 0, ('anchor-late' if head > ANCHOR_MAX_CATCHUP else '')
+            head = int(k) - int(base_k)
         if 0 < head <= ANCHOR_MAX_CATCHUP:
             return 'anchor-head', head, ''
         if head > ANCHOR_MAX_CATCHUP:
