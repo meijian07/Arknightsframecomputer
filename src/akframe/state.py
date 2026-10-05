@@ -444,17 +444,15 @@ class Counter:
         self._unread_run = 0
         self._need_confirm = True
         self._clock_wait = 0.0
-        # 注意：这里**不清** _no_catchup —— 清零（mark_zero_start）刚刚设上的那个标志，
-        # 必须活到「下一拍真正起锚」为止，而 set_layout / set_frames_per_cost 都会
-        # 走一遍 resync。见 mark_zero_start。
         # 重新起锚 = 中间有一段没读到，周期基准也作废（否则会记出一个超长的假周期）
         self._cycle_ref = None
         self._since_accept = 0.0
         self._reject_s = 0.0
-        # 重新起锚意味着「跨了一段没读到的画面 / 进了新周期」：清零时记下的那个相位
-        # 只对当时的那个费用周期成立。这里复位成 1（本费刚开始），
-        # 真正的清零（mark_zero_start 在 set_layout 之后调用）会再写一遍。
-        self._zero_phase = 1
+        # 注意：清零那对状态（_no_catchup / _zero_phase）这里**故意不动**。
+        # set_layout / set_frames_per_cost 都会走一遍 resync，而真正的清零是在
+        # set_layout 之后才调 mark_zero_start —— 清了的话标志就活不到下一拍起锚。
+        # 相位本身也不需要作废：它记的是「条画到本费第几帧」，跨不跨一段没读到的
+        # 画面都成立，_anchor_result 自己会用 ANCHOR_MAX_CATCHUP 把跳太远的挡掉。
         if not keep_battle:
             self._battle_hold = 0
         self._prev_mode = None
