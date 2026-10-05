@@ -13,10 +13,11 @@ import sys
 import numpy as np
 
 from .capture import find_ffmpeg, open_images, open_video
-from .features import read_bar, read_pause, read_speed
+from .features import read_bar, read_pause, read_speed, read_topbar
 from .cost_rate import collect_cycles, infer_rate
+from .geometry import with_topbar
 from .settings import DEFAULT_FRAMES_PER_COST
-from .state import CSV_HEADER, PROBE_MIN_SECONDS, Counter
+from .state import (CSV_HEADER, PROBE_MIN_SECONDS, TOPBAR_FRAMES_PER_CELL, Counter)
 
 IMAGE_EXT = ('.png', '.jpg', '.jpeg', '.bmp')
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -56,6 +57,8 @@ def build_parser() -> argparse.ArgumentParser:
                         '60 = 回费速度 -50%%；120 = -75%%。'
                         'auto = 可选：从费用条一个周期里出现过多少种宽度自动认'
                         '（认错档会让绝对帧号整段漂移，所以默认不用）')
+    p.add_argument('--topbar', action='store_true',
+                   help='额外读顶部「逐帧退格」条（满费时用它数帧；只有少数关卡有这条）')
     p.add_argument('--print-layout', action='store_true', help='只打印算出来的 ROI 就退出')
     p.add_argument('--quiet', action='store_true', help='不打印进度')
     return p
@@ -84,7 +87,7 @@ def load_templates(dirpath: str):
     return out
 
 
-def cache_suffix(bar_box, client_size, offset) -> str:
+def cache_suffix(bar_box, client_size, offset, topbar: bool = False) -> str:
     """抽流缓存目录的后缀：把「决定 ROI 的那几项」编进目录名。
 
     为什么必须编进去：缓存里存的是三路 ROI 裁出来的灰度流，换一组 ROI 就是另一套
@@ -95,8 +98,10 @@ def cache_suffix(bar_box, client_size, offset) -> str:
     if bar_box:
         return '_barbox'
     if not client_size and not offset:
-        return ''
+        return '_tb' if topbar else ''
     bits = []
+    if topbar:
+        bits.append('tb')
     if client_size:
         bits.append('c%dx%d' % (client_size[0], client_size[1]))
     if offset:
@@ -135,6 +140,8 @@ def main(argv=None) -> int:
     images = resolve_images(args.input)
     if images:
         layout, fps, frames = open_images(images, fps=args.fps or 60.0, ui_scaler=ui_scaler)
+        if args.topbar:
+            layout = with_topbar(layout, ui_scaler=ui_scaler)
         source_desc = '图片序列 %d 张' % len(images)
     else:
         size = None
@@ -177,11 +184,12 @@ def main(argv=None) -> int:
             # 决定 ROI 的参数（手工条框 / 客户区尺寸 / 原点偏移）都编进目录名，
             # 免得两套 ROI 互相覆盖缓存（见 cache_suffix）
             cache = os.path.join('out', 'cache',
-                                 stem + cache_suffix(bar_box, client_size, roi_offset))
+                                 stem + cache_suffix(bar_box, client_size, roi_offset,
+                                                     args.topbar))
         layout, fps, frames = open_video(args.input, cache, ffmpeg=args.ffmpeg,
                                         force=args.force, size=size, ui_scaler=ui_scaler,
                                         client_size=client_size, offset=roi_offset,
-                                        bar_box=bar_box)
+                                        bar_box=bar_box, topbar=args.topbar)
         source_desc = '视频 %s' % os.path.basename(args.input)
         if bar_box:
             print('费用条框  : x=%d y=%d w=%d h=%d  <- 手工指定（暂停/倍速通道关闭）'
@@ -191,6 +199,9 @@ def main(argv=None) -> int:
     print('帧率      : %.3f fps' % fps)
     print('ROI       : bar=%s pause=%s speed=%s (scale=%.4f)'
           % (layout.bar, layout.pause, layout.speed, layout.scale))
+    if layout.topbar is not None:
+        print('顶部条 ROI: %s  一格 %.2f px（一格 = %.1f 逻辑帧）'
+              % (layout.topbar, layout.topbar_cell_px, TOPBAR_FRAMES_PER_CELL))
     print('条槽宽    : %d px（真实 %.2f px），每逻辑帧 %.3f px，UI 缩放 %.2f'
           % (layout.bar_w, layout.bar_width_f, layout.px_per_frame, ui_scaler))
     if not layout.buttons_visible:
@@ -254,7 +265,9 @@ def main(argv=None) -> int:
         print('回费速率  : %.0f 帧/费  <- --cost-rate 手工指定' % frames_per_cost)
 
     counter = Counter(layout.model_bar_w, fps=fps, frames_per_cost=frames_per_cost,
-                      bar_width_frac=layout.bar_width_f, visible_w=layout.bar.w)
+                      bar_width_frac=layout.bar_width_f, visible_w=layout.bar.w,
+                      topbar_frames_per_cell=TOPBAR_FRAMES_PER_CELL)
+    tb_frames = 0
     mode_count = collections.Counter()
     state_count = collections.Counter()
     warn_count = collections.Counter()
@@ -278,7 +291,10 @@ def main(argv=None) -> int:
                 fr, bar = item, read_bar(item.bar, layout)
             pause = read_pause(fr.pause, layout)
             speed = read_speed(fr.speed, layout, templates)
-            res = counter.step(fr.index, fr.t, bar, pause, speed)
+            tb = read_topbar(fr.topbar, layout) if getattr(fr, 'topbar', None) is not None else None
+            res = counter.step(fr.index, fr.t, bar, pause, speed, topbar=tb)
+            if res.topbar_delta:
+                tb_frames += res.topbar_delta
             writer.writerow(res.as_row())
 
             n += 1
@@ -329,6 +345,8 @@ def main(argv=None) -> int:
         elif probe_mt > 0:
             print('实测帧率  : 样本不足（条在动且未暂停的时间只有 %.2f 秒，不到 %.1f 秒），'
                   '不报数' % (probe_mt, PROBE_MIN_SECONDS))
+    if layout.topbar is not None:
+        print('顶部条    : 计入 %d 帧' % tb_frames)
     print('计数通道  : ' + '  '.join('%s=%d' % kv for kv in sorted(mode_count.items())))
     print('条状态帧数: ' + '  '.join('%s=%d' % kv for kv in sorted(state_count.items())))
     print('分段数    : ' + '  '.join('%s=%d' % kv for kv in sorted(runs.items())))

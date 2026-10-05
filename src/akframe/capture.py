@@ -20,10 +20,21 @@ from typing import Iterator
 
 import numpy as np
 
-from .geometry import Layout, Rect, bar_only_layout, layout_for, reframe_layout
+from .geometry import (Layout, Rect, bar_only_layout, layout_for, reframe_layout,
+                       with_topbar)
 
 ROI_NAMES = ('bar', 'pause', 'speed')
-FFMPEG_LABELS = {'bar': 'b', 'pause': 'p', 'speed': 's'}
+FFMPEG_LABELS = {'bar': 'b', 'pause': 'p', 'speed': 's', 'topbar': 't'}
+
+
+def roi_names(layout) -> tuple:
+    """这套 layout 实际要抽哪几路 ROI。
+
+    顶部条（topbar）只有少数关卡才有，layout.topbar 是 None 时**不抽** —— 一是省一路
+    解码/存储，二是这样一来旧缓存（没有 topbar.raw）依然命中，不会因为加了这个功能
+    就把所有历史录像的缓存整批作废。
+    """
+    return ROI_NAMES + (('topbar',) if layout.topbar is not None else ())
 
 _FPS_RE = re.compile(r'(\d+(?:\.\d+)?)\s*fps')
 _SIZE_RE = re.compile(r'Video:.*?(\d{2,5})x(\d{2,5})')
@@ -32,12 +43,13 @@ _DUR_RE = re.compile(r'Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)')
 
 @dataclass
 class Frame:
-    """一帧的三个 ROI 灰度图。"""
+    """一帧的几个 ROI 灰度图（topbar 只有开了顶部条通道时才有）。"""
     index: int
     t: float
     bar: np.ndarray
     pause: np.ndarray
     speed: np.ndarray
+    topbar: np.ndarray | None = None
 
 
 @dataclass
@@ -94,29 +106,31 @@ def extract(ffmpeg: str, video: str, layout: Layout, outdir: str, force: bool = 
             with open(meta_path, encoding='utf-8') as fh:
                 old = json.load(fh)
             same_roi = old.get('layout') == layout.to_dict()
-            have_all = all(os.path.isfile(os.path.join(outdir, n + '.raw')) for n in ROI_NAMES)
+            have_all = all(os.path.isfile(os.path.join(outdir, n + '.raw'))
+                           for n in roi_names(layout))
             if same_roi and have_all:
                 return old
         except (OSError, ValueError):
             pass  # 缓存坏了就重抽
 
     # 先 format=gray 再 crop：见 Rect.crop_filter 的说明（奇数尺寸会被 yuv420p 取偶改掉）
+    names = roi_names(layout)
     graph = ';'.join(
         '[0:v]format=gray,%s[%s]' % (getattr(layout, n).crop_filter(), FFMPEG_LABELS[n])
-        for n in ROI_NAMES)
+        for n in names)
     # -vsync 0（passthrough）绝不能省：原生 120 tbr 的 HEVC 录像（NVIDIA HDR 采集）
     # 在默认的 cfr 模式下会被 ffmpeg 按「输出帧率 = tbr」补帧，1197 帧的 19.95 秒
     # 录像被抽成 2393 帧 —— 帧数翻倍、时间轴减半，挂钟通道直接按 2 倍速走。
     cmd = [ffmpeg, '-hide_banner', '-loglevel', 'error', '-i', video,
            '-filter_complex', graph, '-vsync', '0']
-    for n in ROI_NAMES:
+    for n in names:
         cmd += ['-map', '[%s]' % FFMPEG_LABELS[n], '-f', 'rawvideo', '-pix_fmt', 'gray',
                 '-y', os.path.join(outdir, n + '.raw')]
     subprocess.run(cmd, check=True)
 
-    frame_bytes = {n: getattr(layout, n).pixels for n in ROI_NAMES}
+    frame_bytes = {n: getattr(layout, n).pixels for n in names}
     counts = {}
-    for n in ROI_NAMES:
+    for n in names:
         size = os.path.getsize(os.path.join(outdir, n + '.raw'))
         fsize = frame_bytes[n]
         if size % fsize != 0:
@@ -125,7 +139,7 @@ def extract(ffmpeg: str, video: str, layout: Layout, outdir: str, force: bool = 
         counts[n] = size // fsize
     n_frames = min(counts.values())
     if len(set(counts.values())) > 1:
-        raise RuntimeError('三路 ROI 帧数不一致：%s' % counts)
+        raise RuntimeError('各 ROI 帧数不一致：%s' % counts)
 
     meta = {
         'video': os.path.abspath(video),
@@ -156,12 +170,13 @@ def iter_cached(outdir: str) -> Iterator[Frame]:
     meta = load_meta(outdir)
     layout = Layout.from_dict(meta['layout'])
     fps = float(meta['fps'])
-    handles = {n: open(os.path.join(outdir, n + '.raw'), 'rb') for n in ROI_NAMES}
+    names = roi_names(layout)
+    handles = {n: open(os.path.join(outdir, n + '.raw'), 'rb') for n in names}
     try:
         for i in range(int(meta['frames'])):
             imgs = {}
             truncated = False
-            for n in ROI_NAMES:
+            for n in names:
                 rect = getattr(layout, n)
                 buf = handles[n].read(rect.pixels)
                 if len(buf) < rect.pixels:
@@ -171,7 +186,8 @@ def iter_cached(outdir: str) -> Iterator[Frame]:
             if truncated:
                 break
             yield Frame(index=i, t=i / fps,
-                        bar=imgs['bar'], pause=imgs['pause'], speed=imgs['speed'])
+                        bar=imgs['bar'], pause=imgs['pause'], speed=imgs['speed'],
+                        topbar=imgs.get('topbar'))
     finally:
         for h in handles.values():
             h.close()
@@ -183,7 +199,8 @@ def open_video(path: str, outdir: str, ffmpeg: str | None = None,
                client_size: tuple | None = None,
                offset: tuple | None = None,
                bar_box: tuple | None = None,
-               layout: Layout | None = None) -> tuple:
+               layout: Layout | None = None,
+               topbar: bool = False) -> tuple:
     """准备视频输入，返回 (layout, fps, 帧迭代器)。
 
     ui_scaler   游戏内「UI 缩放」；None = 用默认档 1.0（不改变 ROI）。
@@ -193,12 +210,13 @@ def open_video(path: str, outdir: str, ffmpeg: str | None = None,
     bar_box     直接给出费用条槽在画面里的像素框 (x, y, w, h)。画面被放大 / 裁剪过、
                 几何推不出来时用，见 geometry.bar_only_layout。
     layout      整套 ROI 直接给全（比 bar_box 更底层，主要给测试用）。
+    topbar      True 时额外加一路顶部「逐帧退格」条 ROI（少数关卡才有，见 geometry）。
     """
     # 缓存命中时连 ffmpeg 都不需要（抽流是一次性成本，之后只读 .raw）
     # 缓存命中时连 ffmpeg 都不需要 —— 但只有「按视频尺寸算 ROI」这一路才敢直接复用
     # （给了 client_size / offset 说明画面里有别的东西，layout 得重新算）
     if (not force and size is None and client_size is None and offset is None
-            and bar_box is None and layout is None):
+            and bar_box is None and layout is None and not topbar):
         cached = _valid_cache(outdir, path)
         if cached is not None:
             return Layout.from_dict(cached['layout']), float(cached['fps']), iter_cached(outdir)
@@ -209,13 +227,21 @@ def open_video(path: str, outdir: str, ffmpeg: str | None = None,
         if info.size is None:
             raise RuntimeError('无法从视频里读出分辨率，请用 --size WxH 手动指定')
         size = info.size
+    scaler = ui_scaler if ui_scaler is not None else 1.0
     if bar_box is not None:
         layout = bar_only_layout(size[0], size[1], Rect(*[int(v) for v in bar_box]))
     elif layout is None:
         cw, ch = client_size if client_size else size
-        layout = layout_for(cw, ch, ui_scaler if ui_scaler is not None else 1.0)
+        layout = layout_for(cw, ch, scaler)
+        if topbar:
+            # 必须在 reframe **之前**加：topbar_rect 是按客户区尺寸算出来的，
+            # 先加再整体平移才是视频坐标。顺序反了的话 y 会少一个 offset
+            # （实测：条 ROI 落在 y=175 而不是 220，读数全是空）。
+            layout = with_topbar(layout, ui_scaler=scaler)
         if offset:
             layout = reframe_layout(layout, int(offset[0]), int(offset[1]), size[0], size[1])
+    elif topbar:
+        layout = with_topbar(layout, ui_scaler=scaler)
     meta = extract(exe, path, layout, outdir, force=force)
     return layout, float(meta['fps']), iter_cached(outdir)
 
@@ -232,7 +258,9 @@ def _valid_cache(outdir: str, video: str) -> dict | None:
         return None
     if meta.get('video') != os.path.abspath(video):
         return None
-    if not all(os.path.isfile(os.path.join(outdir, n + '.raw')) for n in ROI_NAMES):
+    cached_layout = Layout.from_dict(meta['layout'])
+    if not all(os.path.isfile(os.path.join(outdir, n + '.raw'))
+               for n in roi_names(cached_layout)):
         return None
     return meta
 
@@ -258,4 +286,5 @@ def _iter_images(paths, layout: Layout, fps: float) -> Iterator[Frame]:
         def cut(r):
             return img[r.y:r.y2 + 1, r.x:r.x2 + 1].copy()
         yield Frame(index=i, t=i / fps,
-                    bar=cut(layout.bar), pause=cut(layout.pause), speed=cut(layout.speed))
+                    bar=cut(layout.bar), pause=cut(layout.pause), speed=cut(layout.speed),
+                    topbar=cut(layout.topbar) if layout.topbar is not None else None)

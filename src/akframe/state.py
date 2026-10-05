@@ -31,7 +31,7 @@ from dataclasses import dataclass
 
 from .fp24 import (SCALE, SPEED_NORMAL, CostTiming,
                     frames_from_required, required_from_frames)
-from .features import BarReading, PauseReading, SpeedReading
+from .features import BarReading, PauseReading, SpeedReading, TopBarReading
 from .geometry import PAUSE_RUN_RATIO, PAUSE_STOP_RATIO
 from .synthesis import synthesized_width
 
@@ -79,6 +79,24 @@ BAR_PRESENT_STATES = ('TRACK', 'MAX', 'MAX_FADE')
 # 否则它会把「整段没在看条的时间」算进上限（见 _pixel 里那段说明）。
 PIXEL_TRACK_MODES = ('pixel', 'pixel-jump', 'bar-reject', 'wrap', 'wrap-missed')
 BATTLE_HOLD_FRAMES = 120     # 1..2 秒 @60Hz 采样：足够覆盖关卡内的短暂读不到
+
+# ---- 顶部「逐帧退格」条通道（满费那段用）----
+# 少数关卡在 HUD 下面画一条每退一格 = 1 个逻辑帧的细条（实测见 docs 第 16 节）。
+# 它比挂钟强的地方：**游戏自己暂停时它也不动** —— 不用去猜暂停键、也不用猜倍速，
+# 条走到哪就是哪，读到的格数差就是这一段真实走过的逻辑帧。
+# 但它只有连续读到才可靠，所以：
+#   * 读得到 -> 只认条的格数差，这一拍**完全不看挂钟**（两套一起加会重复计帧）；
+#   * 读到过、这一刻读不到（被计数器窗口挡住 / 条退到看不见的地方）-> 冻结等它回来，
+#     回来的那一拍会把缺的格数一次补齐；
+#   * 连续 TOPBAR_HOLD_SECONDS 读不到 -> 认栽，退回挂钟通道。
+# 冻结而不是挂钟兜底，是因为条是**绝对刻度**：猜出来的帧和随后补上的帧会重复。
+TOPBAR_HOLD_SECONDS = 0.6
+# 一次读数跳这么多格就认为不是「条在退」而是读错了（场景冒充 / 条被重置），按当前
+# 画面重新取基准。正常一拍的间隔在 120Hz 采样、2 倍速下也只有 ~1 格。
+TOPBAR_MAX_JUMP = 90
+# 顶部条一格折合几个逻辑帧。实测这段录像里 22 格 = 22 帧（逐点对齐，误差 0.03 格），
+# 所以是 1。换关卡若发现条是按固定帧数分格的，改这一个数就行。
+TOPBAR_FRAMES_PER_CELL = 1.0
 PROBE_MIN_SECONDS = 2.0      # 实测帧率探针至少要攒这么多「未暂停」等效秒才敢报数
 
 
@@ -103,6 +121,9 @@ class FrameResult:
     warn: str
     phase: float = 0.0   # 本帧相位（调试用，不进 CSV）
     err: int = 0         # 相位重同步的匹配误差 px（调试用，不进 CSV）
+    topbar_present: bool = False   # 这一拍读到顶部「逐帧退格」条了吗
+    topbar_cells: int = -1         # 条从右端算起退了几格（-1 = 没读到）
+    topbar_delta: int = 0          # 这一拍由顶部条计入的逻辑帧
 
     def as_row(self) -> list:
         return [self.idx, '%.4f' % self.t, self.fill, self.bar_state,
@@ -111,12 +132,14 @@ class FrameResult:
                 '%.4f' % self.digit_ratio,
                 ('%.4f' % self.corr_2x) if self.corr_2x == self.corr_2x else '',
                 int(self.has_digit), '%.1f' % self.m, int(self.bullet),
-                self.mode, self.delta, self.elapsed, self.warn]
+                self.mode, self.delta, self.elapsed, self.warn,
+                int(self.topbar_present), self.topbar_cells, self.topbar_delta]
 
 
 CSV_HEADER = ['idx', 't', 'fill', 'bar_state', 'grey146', 'grey88',
               'pause_ratio', 'running', 'digit_ratio', 'corr_2x', 'has_digit',
-              'm', 'bullet', 'mode', 'delta', 'elapsed', 'warn']
+              'm', 'bullet', 'mode', 'delta', 'elapsed', 'warn',
+              'topbar_present', 'topbar_cells', 'topbar_delta']
 
 
 class Counter:
@@ -134,7 +157,7 @@ class Counter:
 
     def __init__(self, bar_w: int, fps: float = 60.0, bar_width_frac: float = None,
                  visible_w: int = None, required: int = None,
-                 frames_per_cost: float = 30.0):
+                 frames_per_cost: float = 30.0, topbar_frames_per_cell: float = 1.0):
         self.bar_w = int(bar_w)
         self.visible_w = int(visible_w) if visible_w else self.bar_w
         self.model_w = self.bar_w
@@ -183,6 +206,14 @@ class Counter:
         # 反推游戏真实的逻辑帧率。为什么必须这么做：视频的帧率不可信（采集掉帧后
         # 仍按标称帧率打时间戳，实测某录像快了 4.17%），只有挂钟可信。
         # 只统计「条在动、且不在子弹时间」的样本。
+        # 顶部条通道：一格记几个逻辑帧。实测这段录像里 22 格 = 22 帧（逐点对齐，
+        # 误差 0.03 格），所以默认 1。哪天发现别的关卡是按固定帧数分格，改这个就行。
+        self.topbar_frames_per_cell = (float(topbar_frames_per_cell)
+                                       if topbar_frames_per_cell and topbar_frames_per_cell > 0
+                                       else 1.0)
+        self._tb_cells = None      # 上一拍读到的格数（None = 这一轮还没取到基准）
+        self._tb_frac = 0.0        # 顶部条的余量（不足一帧的部分）
+        self._tb_lost_s = 0.0      # 连续读不到顶部条多久了（秒）
         self.probe_frames = 0
         self.probe_mt = 0.0
         # 距离上一次「被采纳的像素读数」过去了多久（秒）。
@@ -203,7 +234,8 @@ class Counter:
     # ---------- 对外 ----------
 
     def step(self, idx: int, t: float, bar: BarReading,
-             pause: PauseReading, speed: SpeedReading) -> FrameResult:
+             pause: PauseReading, speed: SpeedReading,
+             topbar: TopBarReading = None) -> FrameResult:
         dt = 1.0 / self.fps if self._prev_t is None else (t - self._prev_t)
         if dt <= 0:
             dt = 1.0 / self.fps
@@ -260,7 +292,8 @@ class Counter:
                 digit_ratio=speed.digit_ratio, corr_2x=speed.corr_2x,
                 has_digit=speed.has_digit, m=m, bullet=speed.bullet,
                 mode='manual-pause', delta=0, elapsed=self.elapsed, warn='',
-                phase=(self.timing.phase() if self.timing else 0.0), err=0)
+                phase=(self.timing.phase() if self.timing else 0.0), err=0,
+                topbar_present=bool(topbar and topbar.present))
 
         # ---- 关卡判定 ----
         # 只有「费用条被画出来」才算在关卡里。关卡外一帧都不记（见 BAR_PRESENT_STATES）。
@@ -288,15 +321,50 @@ class Counter:
             #      2X 下算成 12 就是整段多记一倍。见 BULLET_FPS。
             #   2) 倍速键上画着数字：30 × 数字。
             #   3) 两者都没有（按钮淡出 / 被部署遮罩糊掉）：不知道速率，**冻结**绝不猜。
+            # 顶部条优先：它一格 = 1 个逻辑帧，而且**游戏暂停时它自己也不动** ——
+            # 也就是不用猜暂停键、不用猜倍速，比下面那套挂钟强一个量级。
+            # 只有「这一关没这条 / 还没读过 / 连续读不到太久」才退回挂钟。
             if paused:
                 mode, delta = 'pause', 0
+            elif topbar is not None and topbar.present and topbar.cells is not None:
+                self._tb_lost_s = 0.0
+                if self._tb_cells is None:
+                    # 第一次读到：只取基准，这一拍不补帧 —— 满费开始到现在的这一段
+                    # 是挂钟通道兜的，这里再补就是重复计帧。
+                    self._tb_cells = topbar.cells
+                    mode, delta = 'topbar', 0
+                else:
+                    d = topbar.cells - self._tb_cells
+                    if d < 0 or d > TOPBAR_MAX_JUMP:
+                        # 跳这么多不可能是「条在退」：场景冒充成条、或条被重置了。
+                        # 按当前画面重新取基准，不猜中间那段。
+                        self._tb_cells = topbar.cells
+                        self._tb_frac = 0.0
+                        mode, delta = 'topbar', 0
+                        warn = 'topbar-jump'
+                    else:
+                        self._tb_cells = topbar.cells
+                        self._tb_frac += d * self.topbar_frames_per_cell
+                        k = int(self._tb_frac + 1e-9)
+                        self._tb_frac -= k
+                        mode, delta = 'topbar', k
+            elif self._tb_cells is not None and self._tb_lost_s < TOPBAR_HOLD_SECONDS:
+                # 读到过、这一刻读不到（被计数器窗口挡住 / 条退到看不见的地方了）：
+                # 冻结等它回来。条是绝对刻度，下一拍读到就把缺的格数一次补齐 ——
+                # 这里若用挂钟去猜，猜的帧和随后补的帧会重复计。
+                self._tb_lost_s += dt
+                mode, delta = 'topbar-wait', 0
             elif speed.bullet:
+                # 挂钟开始自己加帧了：顶部条的基准必须扔掉。留着它，条回来时算出的
+                # 格数差会把这段已经由挂钟记过的帧再记一遍（重复计帧）。
+                self._tb_cells = None
                 mode, delta = self._clock_gated(BULLET_FPS, dt)
             elif m_now is None or not speed.has_digit:
                 # 倍速键上这一刻没画数字、也不是子弹时间：不知道速率，冻结。
                 mode, delta = 'bar-reject', 0
                 warn = 'speed-unknown'
             else:
+                self._tb_cells = None      # 同上：挂钟自己加帧，基准必须扔掉
                 mode, delta = self._clock_gated(LOGICAL_FPS * m_now, dt)
         elif empty and not wrap_pending:
             # (b)：条这一拍压根没画出来。冻结，等条重新出现时相位重同步自己接上。
@@ -322,6 +390,12 @@ class Counter:
                 mode = 'wrap-missed'
                 warn = warn or 'wrap-missed'
 
+        if bar.state not in ('MAX', 'MAX_FADE'):
+            # 离开满费：顶部条的基准作废（重新满费时条可能已经被游戏重置回满格，
+            # 拿旧基准去减会算出一个巨大的假增量）
+            self._tb_cells = None
+            self._tb_lost_s = 0.0
+
         if paused:
             # 暂停 -> 挂钟通道必须重新「确认」：否则暂停期间图标闪一下就会被当成在跑
             self._unread_run = 0
@@ -340,7 +414,9 @@ class Counter:
         if mode not in PIXEL_TRACK_MODES:
             self._since_accept = 0.0
 
-        if mode.startswith('clock'):
+        if mode.startswith('clock') or mode.startswith('topbar'):
+            # 顶部条和挂钟一样，数的是**绝对逻辑帧**：不能跟着回费速率的换算走
+            # （set_frames_per_cost 只该换算「按费用条像素」推出来的那部分）。
             self.clock_frames += delta
         else:
             self.pixel_frames += delta
@@ -370,7 +446,11 @@ class Counter:
             has_digit=speed.has_digit, m=m, bullet=speed.bullet,
             mode=mode, delta=delta, elapsed=self.elapsed, warn=warn,
             phase=(self.timing.phase() if self.timing else 0.0),
-            err=self.last_k)
+            err=self.last_k,
+            topbar_present=bool(topbar and topbar.present),
+            topbar_cells=(topbar.cells if (topbar and topbar.present
+                                           and topbar.cells is not None) else -1),
+            topbar_delta=(delta if mode.startswith('topbar') else 0))
 
     def probe(self) -> tuple:
         """实测逻辑帧率探针。
@@ -457,6 +537,9 @@ class Counter:
         self._unread_run = 0
         self._need_confirm = True
         self._clock_wait = 0.0
+        self._tb_cells = None
+        self._tb_frac = 0.0
+        self._tb_lost_s = 0.0
         # 重新起锚 = 中间有一段没读到，周期基准也作废（否则会记出一个超长的假周期）
         self._cycle_ref = None
         self._since_accept = 0.0

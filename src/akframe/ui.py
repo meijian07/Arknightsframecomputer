@@ -9,6 +9,7 @@
 
 操作：
     Tab 切换要校准的 ROI   方向键 移动   Shift+方向键 改大小
+    P 暂停计数（数字按住不动）   O 顶部逐帧条（少数关卡才有，见 docs 第 16 节）
     K 显示/隐藏屏幕上的 ROI 框    S 保存校准   R 恢复默认
     C 清零计数    L 开始/停止记录 CSV    P 暂停/继续计数（手动）
     T 导入 md 轴文件    Esc 退出
@@ -56,7 +57,11 @@ UI_FG = '#e6e6e6'
 UI_DIM = '#8b93a1'
 ACCENT = '#39d98a'
 WARN = '#ffb020'
-ROI_COLORS = {'bar': '#39d98a', 'pause': '#4da3ff', 'speed': '#ff9f43'}
+ROI_COLORS = {'bar': '#39d98a', 'pause': '#4da3ff', 'speed': '#ff9f43',
+              'topbar': '#ff5c8a'}
+# 校准目标 / ROI 框 / 预览按这个顺序走。'topbar'（顶部逐帧退格条，少数关卡才有）
+# 只有开了开关、layout.topbar 不是 None 的时候才在名单里。
+ROI_ORDER = ('bar', 'pause', 'speed', 'topbar')
 
 
 # 「自己填一个数」的那个下拉项。选中它不切档，只把光标丢进输入框。
@@ -105,7 +110,7 @@ class MonitorApp:
         self.calib_path = calib_path
         self.settings_path = settings_path      # 回费速率设置文件（改档时写回这里）
         self.poll_ms = poll_ms
-        self.deltas = {'bar': [0, 0, 0, 0], 'pause': [0, 0, 0, 0], 'speed': [0, 0, 0, 0]}
+        self.deltas = {k: [0, 0, 0, 0] for k in ROI_ORDER}
         self.calib_scale = None
         self.target = 'bar'
         self._tick_times = []      # 面板重绘的实测速率（见 _tick 开头）
@@ -198,10 +203,15 @@ class MonitorApp:
         prev.pack(fill='x', **pad)
         self.cv_bar = tk.Canvas(prev, width=704, height=46, bg='#0b0c0f', highlightthickness=0)
         self.cv_bar.grid(row=0, column=0, columnspan=2, pady=(0, 4))
+        # 顶部「逐帧退格」条：1800 多像素宽、9 像素高，等比缩放根本看不见那条边，
+        # 所以这条预览是**铺满**画的（横向压缩、纵向拉伸），红色竖线 = 程序认到的边缘。
+        self.cv_topbar = tk.Canvas(prev, width=704, height=22, bg='#0b0c0f',
+                                   highlightthickness=0)
+        self.cv_topbar.grid(row=1, column=0, columnspan=2, pady=(0, 4))
         self.cv_pause = tk.Canvas(prev, width=348, height=170, bg='#0b0c0f', highlightthickness=0)
-        self.cv_pause.grid(row=1, column=0, padx=(0, 6))
+        self.cv_pause.grid(row=2, column=0, padx=(0, 6))
         self.cv_speed = tk.Canvas(prev, width=348, height=170, bg='#0b0c0f', highlightthickness=0)
-        self.cv_speed.grid(row=1, column=1)
+        self.cv_speed.grid(row=2, column=1)
 
         # ---- 打轴器（提词器）：导入 md 轴文件后，到帧就显示那一条 ----
         prom = tk.Frame(self.root, bg=UI_BG)
@@ -257,6 +267,11 @@ class MonitorApp:
                                     font=('Microsoft YaHei UI', 9), bg='#262a33', fg=UI_FG,
                                     activebackground='#333947', relief='flat', padx=8, pady=3)
         self.btn_manual.pack(side='left', padx=3)
+        # 「顶部逐帧条」开关：少数关卡才有这条，默认关（见 docs 第 16 节）
+        self.btn_topbar = tk.Button(btns, text='顶部逐帧条 (O)', command=self.toggle_topbar,
+                                    font=('Microsoft YaHei UI', 9), bg='#262a33', fg=UI_FG,
+                                    activebackground='#333947', relief='flat', padx=8, pady=3)
+        self.btn_topbar.pack(side='left', padx=3)
         for text, cmd in (('清零计数', self.clear_count),
                           ('开始记录', self.toggle_csv),
                           ('校准模式', self.toggle_overlay),
@@ -338,7 +353,8 @@ class MonitorApp:
                         ('c', self.clear_count), ('C', self.clear_count),
                         ('l', self.toggle_csv), ('L', self.toggle_csv),
                         ('p', self.toggle_manual_pause), ('P', self.toggle_manual_pause),
-                        ('t', self.import_timeline), ('T', self.import_timeline)):
+                        ('t', self.import_timeline), ('T', self.import_timeline),
+                        ('o', self.toggle_topbar), ('O', self.toggle_topbar)):
             r.bind(seq, self._guard(lambda _e, f=fn: f()))
         for seq in ('<Left>', '<Right>', '<Up>', '<Down>',
                     '<Shift-Left>', '<Shift-Right>', '<Shift-Up>', '<Shift-Down>'):
@@ -350,6 +366,8 @@ class MonitorApp:
         deltas, scale = load_calibration(self.calib_path)
         if deltas:
             self.deltas = {k: list(v) for k, v in deltas.items()}
+            for k in ROI_ORDER:              # 旧校准文件里没有 topbar
+                self.deltas.setdefault(k, [0, 0, 0, 0])
             self.calib_scale = scale
 
     def _nudge(self, event):
@@ -367,9 +385,19 @@ class MonitorApp:
             d[3 if shift else 0] += step
         self._apply_deltas()
 
+    def _roi_names(self):
+        '''当前 layout 里真有的 ROI 名字（topbar 没开就不在里面）。'''
+        lay = self.monitor.layout
+        if lay is None:
+            return ('bar', 'pause', 'speed')
+        return tuple(n for n in ROI_ORDER if getattr(lay, n, None) is not None)
+
     def _cycle_target(self):
-        order = ('bar', 'pause', 'speed')
-        self.target = order[(order.index(self.target) + 1) % len(order)]
+        order = self._roi_names()
+        if self.target not in order:
+            self.target = order[0]
+        else:
+            self.target = order[(order.index(self.target) + 1) % len(order)]
         self._set_note('当前校准目标：%s' % self.target)
 
     def _apply_deltas(self):
@@ -454,8 +482,10 @@ class MonitorApp:
         if lay is None or win is None:
             return
         ox, oy = win.client[0], win.client[1]
-        for name in ('bar', 'pause', 'speed'):
-            r = getattr(lay, name)
+        for name in self._roi_names():
+            r = getattr(lay, name, None)
+            if r is None:
+                continue
             color = ROI_COLORS[name] if name != self.target else '#ffffff'
             cv.create_rectangle(ox + r.x - 3, oy + r.y - 3, ox + r.x2 + 3, oy + r.y2 + 3,
                                 outline=color, width=3)
@@ -481,6 +511,22 @@ class MonitorApp:
                                   fg=WARN if on else UI_FG)
         self._set_note('已暂停计数（手动）：数字按住不动，再按 P 继续'
                        if on else '已收开关：继续计数（重新起锚）')
+
+    def toggle_topbar(self):
+        '''开关「顶部逐帧退格条」（少数关卡才有这条，默认关）。
+
+        打开后满费那段就按它数帧：一格 = 1 个逻辑帧，而且**游戏自己暂停时它也不动**，
+        不用去猜暂停键、也不用猜倍速（见 docs 第 16 节）。不在有这条的关卡里时它读不到
+        任何东西，计数通道逐项不变（已实测：另一段普通录像开与不开结果完全一致）。
+        '''
+        on = not self.monitor.use_topbar
+        self.monitor.set_topbar(on)
+        self.btn_topbar.configure(fg=ACCENT if on else UI_FG)
+        names = self._roi_names()
+        if self.target not in names:      # 关掉之后别把校准目标留在一条没有的 ROI 上
+            self.target = names[0]
+        self._set_note('已打开顶部逐帧条：满费时按它数帧，预览里红竖线就是认到的边缘'
+                       if on else '已关掉顶部逐帧条')
 
     def _on_rate_pick(self, label):
         """下拉框选中某一项。选「自定义」不切档，只把光标丢进输入框。"""
@@ -758,6 +804,8 @@ class MonitorApp:
                 self.lb_state.configure(text='状态 计数已暂停（手动，按住不动）', fg=WARN)
             elif res.mode == 'pause':
                 self.lb_state.configure(text='状态 已暂停（不计数）', fg=WARN)
+            elif res.mode.startswith('topbar'):
+                self.lb_state.configure(text='状态 运行中（满费，按顶部逐帧条数）', fg=ACCENT)
             elif res.mode.startswith('clock'):
                 self.lb_state.configure(text='状态 运行中（满费，挂钟估算）', fg=WARN)
             elif res.mode == 'bar-reject' and res.warn == 'speed-unknown':
@@ -877,12 +925,34 @@ class MonitorApp:
         if upd.bar_img is None:
             return
         self._show(self.cv_bar, upd.bar_img, mark_rows=(5, 12))
+        self._render_topbar(upd, lay)
         if lay is not None:
             self._show(self.cv_pause, upd.pause_img,
                        mark_rows=lay.pause.band_rows(*PAUSE_SHAPE_BAND))
             self._show(self.cv_speed, upd.speed_img,
                        mark_rows=lay.speed.band_rows(*SPEED_DIGIT_BAND),
                        mark_cols=lay.speed.cols_range(*SPEED_DIGIT_COLS))
+
+    def _render_topbar(self, upd, lay):
+        '''顶部逐帧条预览：铺满画布画，红竖线 = 程序认到的填充边缘。'''
+        if upd.topbar_img is None or lay is None or lay.topbar is None:
+            return
+        arr = upd.topbar_img
+        h, w = arr.shape
+        box_w = int(self.cv_topbar['width'])
+        box_h = int(self.cv_topbar['height'])
+        img = Image.fromarray(arr, mode='L').convert('RGB').resize((box_w, box_h),
+                                                                 Image.NEAREST)
+        d = ImageDraw.Draw(img)
+        res = upd.result
+        if res is not None and res.topbar_cells is not None and res.topbar_cells >= 0:
+            edge = (w - 1) - res.topbar_cells * lay.topbar_cell_px
+            x = int(round(edge / max(1, w - 1) * (box_w - 1)))
+            d.line([(x, 0), (x, box_h - 1)], fill=(230, 60, 60))
+        photo = ImageTk.PhotoImage(img)
+        self._photos[self.cv_topbar] = photo
+        self.cv_topbar.delete('all')
+        self.cv_topbar.create_image(0, 0, anchor='nw', image=photo)
 
     def _show(self, canvas, arr, mark_rows=None, mark_cols=None):
         """把 ROI 灰度图放大画进固定大小的画布（按比例缩放并居中，不拉伸）。

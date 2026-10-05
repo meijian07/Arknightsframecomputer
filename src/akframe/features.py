@@ -12,7 +12,9 @@ import numpy as np
 
 from .geometry import (ARROW_MIN_CONTRAST, ARROW_RATIO_MIN, ARROW_REL, CORR_2X_MIN,
                        DIGIT_RATIO_MIN, PAUSE_SHAPE_BAND, RUN_PAUSE_RATIO_MIN,
-                       SPEED_ARROW_BAND, SPEED_DIGIT_BAND, SPEED_DIGIT_COLS, Layout)
+                       SPEED_ARROW_BAND, SPEED_DIGIT_BAND, SPEED_DIGIT_COLS,
+                       TOPBAR_EDGE_STEP, TOPBAR_FILL_MIN, TOPBAR_RUN_CELLS,
+                       TOPBAR_TRACK_CELLS, TOPBAR_TRACK_MAX, Layout)
 
 # ---- 阈值 ----
 # 纯白下限：实测填充恒为 255，用 250 而不是 240（240 会把接近白的场景像素也算进去）
@@ -443,3 +445,90 @@ def _ncc(a: np.ndarray, b: np.ndarray) -> float:
     if na <= 0 or nb <= 0:
         return 0.0
     return float((av * bv).sum() / (na * nb))
+
+
+# ===================== 顶部「逐帧退格」条 =====================
+# 少数关卡在 HUD 下面画一条横贯画面左半边的细条：左边是**填充段**（亮灰，亮度跟着
+# 场景走，实测 94~186），右边是**未填充段**（半透明黑，实测 16~42），最右端一个红色
+# 「!」三角帽。条从右往左退，**退一格 = 1 个逻辑帧**（实测见 docs 第 16 节：25 个
+# 退格点和独立算法逐点对上）。
+#
+# 为什么读法要长这样（都是踩过的坑）：
+#   * 填充段的亮度随场景变（同一段录像里 94 -> 186，切场景时整个 HUD 还会被压暗），
+#     所以判据必须**相对**：只看「左窗比右窗亮多少」，绝不写死灰度。
+#   * 条画在场景之上但**没有完全不透明**，右边未填充段不是纯黑，所以也不能只靠
+#     「右边很黑」—— 场景一暗它就黑，场景一亮它就有 40~75。
+#   * 唯一稳的特征是**边缘那一步**：填充段右边紧挨着就是轨道，一步能差 89~165 个
+#     灰阶；而场景里的亮缝最陡处只有 18。理由和阈值见 read_topbar()。
+
+
+@dataclass
+class TopBarReading:
+    """顶部「逐帧退格」条读数。"""
+    present: bool     # 这一拍读到条了（左侧亮带 + 右侧暗轨 + 中间一步台阶）
+    cells: int        # 从条最右端算起，已经退了几格；读不到位置时是 None
+    edge: int         # 填充段右边缘的列号（ROI 内坐标，调试用）；-1 = 没找到
+    level: float      # 填充段亮度（调试用）
+    look: float       # 未填充段亮度（调试用）
+
+
+def _row_median_filter(row: np.ndarray, k: int) -> np.ndarray:
+    """一维中值滤波。k 必须是奇数；行比 k 短时原样返回。"""
+    if k <= 1 or row.size <= k:
+        return row.astype(np.float32)
+    pad = k // 2
+    p = np.pad(row.astype(np.float32), (pad, pad), mode='edge')
+    return np.median(np.lib.stride_tricks.sliding_window_view(p, k), axis=1)
+
+
+def read_topbar(roi: np.ndarray, layout: Layout) -> TopBarReading:
+    """读顶部「逐帧退格」条。
+
+    roi 是 layout.topbar 那块灰度图（x 从画面最左边到条的右端）。
+    返回 present=False 时 cells 是 None —— 调用方必须当「读不到」，不要当成 0。
+
+    判据只有三条，全都看**边缘**这一处，不再要求填充段本身平不平：
+      1) 边缘够陡：填充段右边紧挨着就是暗轨道。实测真条这一步能差 89~165 灰阶，
+         而场景里的亮缝（录像 f=1757 那条）最陡处只有 18，一条判据就够分开。
+      2) 边缘左侧是真亮带：填充段本身（暗的是贴图轨道，实测 20~40）。
+      3) 边缘右侧够暗：未填充的轨道。
+    为什么放弃「填充段要平」：这条是**渐变**填充（实测靠边缘一段从 115 爬到 190），
+    靠左还被计数器窗口的投影压出一道缓坡；去线性趋势后残差仍有 6~7，越退到后段越
+    容易被误杀（实测 21 格往后整段读不到）。改成看边缘之后，25 个退格点全对上了。
+    """
+    none = TopBarReading(present=False, cells=None, edge=-1, level=0.0, look=0.0)
+    if roi is None or roi.size == 0 or layout.topbar is None:
+        return none
+    cell = layout.topbar_cell_px
+    if cell <= 1.0 or roi.shape[1] < 4 * cell:
+        return none
+
+    row = roi if roi.ndim == 1 else np.median(roi, axis=0)
+    sm = _row_median_filter(row, 5)
+    n = sm.size
+    run = max(3, int(round(cell * TOPBAR_RUN_CELLS)))
+    look = max(4, int(round(cell * TOPBAR_TRACK_CELLS)))
+    if n < run + look + 4:
+        return none
+
+    win_min = np.lib.stride_tricks.sliding_window_view(sm, run).min(axis=1)
+    win_avg = np.lib.stride_tricks.sliding_window_view(sm, look).mean(axis=1)
+    idx = np.arange(n - 1)
+
+    left = np.zeros(n - 1, dtype=bool)
+    sel = idx >= run - 1
+    left[sel] = win_min[idx[sel] - run + 1] >= TOPBAR_FILL_MIN
+    right = np.zeros(n - 1, dtype=bool)
+    sel = idx + look <= n - 1
+    right[sel] = win_avg[idx[sel] + 1] <= TOPBAR_TRACK_MAX
+
+    ok = ((sm[:-1] - sm[1:]) >= TOPBAR_EDGE_STEP) & left & right
+    hit = np.nonzero(ok)[0]
+    if hit.size == 0:
+        return none
+    # 取最靠右的那个台阶 = 填充段的右边缘（条被游戏画在场景之上，右边未填充段一定
+    # 比左边暗；同一条里出现多个台阶时，靠右的那个才是填充边界）
+    edge = int(hit[-1])
+    cells = int(round((roi.shape[1] - 1 - edge) / cell))
+    return TopBarReading(present=True, cells=cells, edge=edge,
+                         level=float(sm[edge]), look=float(sm[edge + 1]))

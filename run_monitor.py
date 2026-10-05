@@ -10,6 +10,7 @@
     python run_monitor.py --rate 60        # 省 CPU（半个核足够），代价是偶尔漏采一帧
     python run_monitor.py --timeline maps/example.md   # 启动时直接载入打轴器的轴文件
     python run_monitor.py --cost-rate 60    # 回费速度 -50% 的 tag：一费 60 逻辑帧
+    python run_monitor.py --topbar          # 少数关卡：满费时用顶部「逐帧退格」条数帧
 
 回费速率默认读设置文件 cost_rate.json（没有这个文件就按 30 = 1 秒 1 费），
 也可以在这里用 --cost-rate 覆盖；界面上那行「回费速率」改完会写回设置文件。
@@ -62,6 +63,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--duration', type=float, default=0.0, help='运行多少秒后自动退出（0=不限）')
     p.add_argument('--timeline', default=None,
                    help='打轴器：启动时直接导入的 md 轴文件（界面里也能按 T 换）')
+    p.add_argument('--topbar', action='store_true',
+                   help='额外读顶部「逐帧退格」条（少数关卡才有；满费时用它数帧，'
+                        '比挂钟稳。界面里也能按 O 开关，见 docs 第 16 节）')
     return p
 
 
@@ -101,7 +105,8 @@ def build_monitor(args, cost_rate=DEFAULT_FRAMES_PER_COST) -> LiveMonitor:
     layout = build_layout(*win.client_size) if win else None
     mon = LiveMonitor(layout, exe=args.exe, title=args.title, pid=args.pid,
                       rate=args.rate, templates=templates, csv_path=args.csv,
-                      build_layout=build_layout, cost_rate=cost_rate)
+                      build_layout=build_layout, cost_rate=cost_rate,
+                      topbar=args.topbar, ui_scaler=ui_scaler)
     # 把刚找到的窗口交给监视器：不然 main() 里判 mon.window 永远是 None，
     # 明明找到了也会打印「找不到窗口」，白白吓人一跳
     mon.window = win

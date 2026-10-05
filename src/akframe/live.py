@@ -19,12 +19,13 @@ import csv
 import os
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
-from .features import read_bar, read_pause, read_speed
-from .geometry import Layout, layout_for, union_rect
+from .features import read_bar, read_pause, read_speed, read_topbar
+from .geometry import (UI_SCALER_DEFAULT, Layout, layout_for, union_rect,
+                       with_topbar)
 from .cost_rate import RateEstimator
 from .settings import DEFAULT_FRAMES_PER_COST
 from .state import CSV_HEADER, Counter, FrameResult
@@ -48,6 +49,7 @@ class LiveUpdate:
     grab_ms: float
     note: str
     readable: bool
+    topbar_img: np.ndarray | None = None   # 顶部「逐帧退格」条的灰度图（没开就是 None）
 
 
 @dataclass
@@ -91,13 +93,25 @@ class LiveMonitor:
     def __init__(self, layout: Layout = None, *, exe: str = 'Arknights.exe',
                  title: str = None, pid: int = None, rate: float = 120.0,
                  templates=(), csv_path: str = None, build_layout=None,
-                 cost_rate=DEFAULT_FRAMES_PER_COST):
+                 cost_rate=DEFAULT_FRAMES_PER_COST, topbar: bool = False,
+                 ui_scaler: float = None):
         self.exe = exe
         self.title = title
         self.pid = pid
         self.rate = float(rate)
         self.templates = list(templates)
         self.build_layout = build_layout or _default_build_layout
+        # 顶部「逐帧退格」条：只有少数关卡才有，默认关。开了之后每次换布局都会
+        # 自动补上 topbar ROI（见 set_layout）。ui_scaler 只用来算这块 ROI 的纵向位置。
+        self.use_topbar = bool(topbar)
+        # None = 跟 _default_build_layout 用同一个来源（注册表里的游戏 UI 缩放），
+        # 否则 topbar 的纵向位置会和费用条/按钮对不上。
+        if ui_scaler is None:
+            try:
+                ui_scaler = arknights_ui_scaler()
+            except Exception:
+                ui_scaler = UI_SCALER_DEFAULT
+        self.ui_scaler = ui_scaler
         self.window: WindowInfo | None = None
         self.layout: Layout | None = None
         self.counter: Counter | None = None
@@ -135,8 +149,16 @@ class LiveMonitor:
         layout.validate()
         elapsed = self.counter.elapsed if (keep_elapsed and self.counter) else 0
         manual = _manual_cost_rate(self.cost_rate)
+        if self.use_topbar:
+            if layout.topbar is None:
+                layout = with_topbar(layout, ui_scaler=self.ui_scaler)
+        elif layout.topbar is not None:
+            # 关掉开关：把 topbar 从布局里摘掉。不摘的话外接矩形还盖着那一整条，
+            # 每拍白抓 1807x9 个像素（还占着 DIB 的宽度）。
+            layout = replace(layout, topbar=None)
         self.layout = layout
-        self._union = union_rect([layout.bar, layout.pause, layout.speed])
+        self._union = union_rect([r for r in (layout.bar, layout.pause, layout.speed,
+                                              layout.topbar) if r is not None])
         self.counter = Counter(layout.model_bar_w, fps=max(1.0, self.rate or 60.0),
                                frames_per_cost=manual or DEFAULT_FRAMES_PER_COST,
                                bar_width_frac=layout.bar_width_f, visible_w=layout.bar.w)
@@ -146,6 +168,15 @@ class LiveMonitor:
         self._apply_cost_rate()
         # 外接矩形变了，之前按尺寸缓存的 DIB 不再需要（ScreenGrabber 自己按尺寸复用）
         self._grabber = None
+
+    def set_topbar(self, on: bool) -> None:
+        '''开关「满费时用顶部逐帧条计数」（少数关卡才有，默认关）。'''
+        on = bool(on)
+        if on == self.use_topbar or self.layout is None:
+            self.use_topbar = on
+            return
+        self.use_topbar = on
+        self.set_layout(self.layout)
 
     def set_cost_rate(self, spec) -> float:
         """改回费速率：数字 = 手工档（一费几个逻辑帧）；'auto' = 开自动识别。
@@ -299,12 +330,14 @@ class LiveMonitor:
         bar_img = to_gray(cut(lay.bar))
         pause_img = to_gray(cut(lay.pause))
         speed_img = to_gray(cut(lay.speed))
+        topbar_img = to_gray(cut(lay.topbar)) if lay.topbar is not None else None
 
         bar = read_bar(bar_img, lay)
         pause = read_pause(pause_img, lay)
         speed = read_speed(speed_img, lay, self.templates)
+        topbar = read_topbar(topbar_img, lay) if topbar_img is not None else None
         self._track_cost_rate(bar)
-        res = self.counter.step(self._idx, t, bar, pause, speed)
+        res = self.counter.step(self._idx, t, bar, pause, speed, topbar=topbar)
 
         note = ''
         if res.mode == 'manual-pause':
@@ -314,6 +347,8 @@ class LiveMonitor:
         elif not res.running:
             # 帧操：采样这一瞬图标是「暂停」，但两次采样之间游戏跑过了、条动过了
             note = '暂停键=暂停，但费用条在动 —— 按费用条计数'
+        elif res.mode.startswith('topbar'):
+            note = '满费中，按顶部逐帧条计数（游戏暂停时它自己也不动）'
         elif res.mode.startswith('clock'):
             note = '满费中，按挂钟 × 倍速估算'
         elif res.warn == 'speed-unknown':
@@ -328,7 +363,8 @@ class LiveMonitor:
             self.stats.hz = (len(self._hz_window) - 1) / span if span > 0 else 0.0
         self.stats.grab_ms = grab_ms
         self._unreadable_since = None
-        upd = LiveUpdate(t, res, bar_img, pause_img, speed_img, grab_ms, note, True)
+        upd = LiveUpdate(t, res, bar_img, pause_img, speed_img, grab_ms, note, True,
+                         topbar_img)
         self.latest = upd
         row = res.as_row()
         if self.keep_rows:
