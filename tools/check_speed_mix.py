@@ -1,8 +1,12 @@
 #!/usr/bin/env python
 """变速混合自测：「一费 = 30 逻辑帧」在各种倍速下是不是都成立。
 
-check_state_synth.py 只测 2 倍速一种情况。这个脚本把 1X / 2X / 0.2X（子弹时间）、
-暂停、满费、关卡外、**手动暂停计数**全混在一起，喂给状态机，和**精确真值**比总帧数。
+check_state_synth.py 只测 2 倍速一种情况。这个脚本把 1X / 2X、暂停、满费、
+满费+子弹时间、关卡外、**手动暂停计数**全混在一起，喂给状态机，和**精确真值**比总帧数。
+
+子弹时间的真值就是**固定 6 帧/秒**（= 30/5），和倍速设置无关 ——
+实测三段录像（倍速设置 1X / 2X / 2X），满费段与可见条段里条都恰好每 10 个视频帧走
+1 个相位。所以「满费+子弹时间」在两段用例里真值一样，只是倍速设置不同。
 
 真值怎么来：生成器自己按「这一拍游戏前进了 speed/2 个逻辑帧」推进相位
 （60Hz 采样 = 1/60 秒/拍，1 倍速每秒 30 逻辑帧 -> 每拍 0.5 帧），
@@ -29,6 +33,7 @@ from akframe.synthesis import synthesized_width                       # noqa: E4
 
 BAR_W = 240
 FPS = 60.0
+BULLET_FPS = 30.0 / 5.0     # 子弹时间下游戏被压到的速率：固定 6 逻辑帧/秒
 
 RUN = PauseReading(ratio=0.30, running=True)
 PAUSED = PauseReading(ratio=0.05, running=False)
@@ -96,14 +101,23 @@ def simulate(segments):
                 fill = synthesized_width(BAR_W, float(BAR_W), phase_frac(frames))
                 c.step(idx, t, bar(fill, 'TRACK'), RUN, speed_reading(speed))
                 continue
-            truth += speed * 30.0 * dt
             if mode.startswith('max'):
                 # 满费：整条灰底，相位被游戏钉在 0；退出后从 0 重新涨（实测结论）。
-                # 0.2 倍速时倍速键上不画数字，只有三条箭头。
+                # 倍速键这一刻的形态决定速率：
+                #   max        -> 画着数字，速率 = 30 x 设置
+                #   maxbullet  -> 子弹时间 >>>，速率**固定** 6 帧/秒（与设置无关）
+                #   maxblind   -> 按钮淡出 / 被遮罩糊掉，速率未知 -> 真值 0（计数器应冻结）
                 frames = 0.0
-                c.step(idx, t, bar(0, 'MAX'), RUN,
-                       speed_reading(speed, bullet=(speed < 1.0)))
+                if mode.endswith('blind'):
+                    rd = SpeedReading(digit_ratio=0.0, corr_2x=float('nan'),
+                                      has_digit=False, m=float('nan'),
+                                      bullet=False, conf='low')
+                else:
+                    rd = speed_reading(speed, bullet=mode.endswith('bullet'))
+                    truth += (BULLET_FPS if rd.bullet else speed * 30.0) * dt
+                c.step(idx, t, bar(0, 'MAX'), RUN, rd)
             else:
+                truth += speed * 30.0 * dt
                 frames += speed * 30.0 * dt
                 fill = synthesized_width(BAR_W, float(BAR_W), phase_frac(frames))
                 c.step(idx, t, bar(fill, 'TRACK'), RUN, speed_reading(speed))
@@ -118,7 +132,12 @@ def main():
         ('纯 0.2X 子弹时间', [(600, 0.2, 'run')]),
         ('满费 1X', [(600, 1.0, 'max')]),
         ('满费 2X', [(600, 2.0, 'max')]),
-        # 满费 + 0.2X：倍速键上不画数字 -> 按设计**冻结**（见下面的 KNOWN 检查）
+        # 满费 + 子弹时间（拖干员）：倍速键变 >>>，速率固定 6 帧/秒。
+        # 两段的**真值一样**（各 30 帧），因为子弹时间和倍速设置无关。
+        ('满费+子弹 1X设置', [(300, 1.0, 'run'), (300, 1.0, 'maxbullet'),
+                             (300, 1.0, 'run')]),
+        ('满费+子弹 2X设置', [(300, 2.0, 'run'), (300, 2.0, 'maxbullet'),
+                             (300, 2.0, 'run')]),
         ('暂停 60 秒', [(3600, 1.0, 'pause')]),
         # 手动暂停计数：按住的 5 秒不计，放开后不跳（重新起锚）
         ('手动暂停计数', [(300, 1.0, 'run'), (300, 1.0, 'manual'),
@@ -144,9 +163,10 @@ def main():
             for mode, speed, n, gotd, truthd in detail:
                 print('      %-8s %4.1fX %5d 拍  状态机 %6.1f  真值 %6.1f  差 %+6.1f'
                       % (mode, speed, n, gotd, truthd, gotd - truthd))
-    # 已知**故意**不记的情况：满费 + 倍速键上没画数字（暂停菜单 / 拖干员时的按钮）。
-    # 这时速率未知，冻结不猜 —— 猜成 0.2 倍速就是 5 倍偏差，猜成 1 倍速也是 5 倍偏差。
-    got, truth, _ = simulate([(300, 1.0, 'run'), (300, 0.2, 'max'), (300, 1.0, 'run')])
+    # 已知**故意**不记的情况：满费 + 倍速键上什么都没画（按钮淡出 / 被部署遮罩糊掉）。
+    # 这时速率未知，冻结不猜 —— 猜 1 倍速和猜 0.2 倍速各错 5 倍。
+    # 注意**子弹时间不算这一类**：>>> 本身就把速率定死在 6 帧/秒（见上面的用例）。
+    got, truth, _ = simulate([(300, 1.0, 'run'), (300, 1.0, 'maxblind'), (300, 1.0, 'run')])
     expect = 300          # 只有两段 1X（各 150 帧）该被记；中间 300 拍冻结
     ok = abs(got - expect) <= 2
     print('%-18s %10d %10d %8s  %s'

@@ -695,8 +695,11 @@ class MonitorApp:
                                   fg='#101418' if flash else ACCENT,
                                   bg=ACCENT if flash else UI_BG)
 
-        # 倒计时秒数按当前倍速折算：2 倍速下 30 帧只要 0.5 秒
-        rate = (res.m if res.m else 1.0) * (0.2 if res.bullet else 1.0)
+        # 倒计时秒数按当前倍速折算：2 倍速下 30 帧只要 0.5 秒。
+        # 子弹时间是**绝对**的 1/5（恒 6 帧/秒），与倍速设置无关 —— 所以这里要直接
+        # 用 0.2，不能再乘 res.m（2X 下乘出来是 0.4 = 12 帧/秒，快了一倍）。
+        # 实测见 docs 3.1。
+        rate = 0.2 if res.bullet else (res.m if res.m else 1.0)
         if p.next_cue is None:
             self.lb_cue_next.configure(text='轴已走完（共 %d 条）' % p.total, fg=UI_DIM)
         else:
@@ -794,10 +797,16 @@ class MonitorApp:
                                                       res.bar_state, res.mode))
             self.lb_pause.configure(
                 text='按钮 ratio=%.3f  %s' % (res.pause_ratio, '运行中' if res.running else '已暂停'))
-            bullet = ' 子弹时间' if res.bullet else ''
+            # 子弹时间下倍速数字不在画面上（res.m 是 nan），别印成「倍速 nanX」。
+            if res.bullet:
+                speed_text = '子弹时间 6 帧/秒'
+            elif res.m == res.m:
+                speed_text = '倍速 %.0fX' % res.m
+            else:
+                speed_text = '倍速未画出（沿用上次）'
             self.lb_speed.configure(
-                text='倍速 %.0fX%s  conf=%s  digit=%.3f corr=%s' % (
-                    res.m, bullet, 'ok' if res.corr_2x == res.corr_2x else 'low',
+                text='%s  conf=%s  digit=%.3f corr=%s' % (
+                    speed_text, 'ok' if res.corr_2x == res.corr_2x else 'low',
                     res.digit_ratio, '%.3f' % res.corr_2x if res.corr_2x == res.corr_2x else '—'))
             self.lb_warn.configure(text=('告警：' + res.warn) if res.warn else '')
             self._update_cycle(res)

@@ -134,11 +134,18 @@ def run_console(mon: LiveMonitor, duration: float = 0.0) -> int:
                     if abs(fpc - DEFAULT_FRAMES_PER_COST) > 1e-9:
                         rate = ' | 回费 %.0f帧/费(%s)' % (
                             fpc, '自动' if (est is not None and est.frames_per_cost) else '设置')
-                    print('[%6.1fs] 帧 %-6d 时间 %s | 条 %-9s fill %3d/%-3d | %s | %.0fX%s '
+                    # 子弹时间下倍速数字不在画面上（r.m 是 nan），别印成「nanX」。
+                    if r.bullet:
+                        m_txt = '子弹6帧/s'      # 与倍速设置无关，见 docs 3.1
+                    elif r.m == r.m:
+                        m_txt = '%.0fX' % r.m
+                    else:
+                        m_txt = '倍速?'
+                    print('[%6.1fs] 帧 %-6d 时间 %s | 条 %-9s fill %3d/%-3d | %s | %-11s '
                           '| 通道 %-5s | %.1fHz %.1fms%s%s'
                           % (now - t0, r.elapsed, _fmt_time(r.elapsed / 30.0), r.bar_state,
                              r.fill, mon.layout.bar_w, '运行中' if r.running else '已暂停',
-                             r.m, ' 子弹' if r.bullet else '', r.mode, st.hz, st.grab_ms,
+                             m_txt, r.mode, st.hz, st.grab_ms,
                              (' | ' + r.warn) if r.warn else '', rate))
             if duration and now - t0 >= duration:
                 break
