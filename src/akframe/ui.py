@@ -30,7 +30,6 @@ import time
 import tkinter as tk
 from tkinter import filedialog
 
-import numpy as np
 from PIL import Image, ImageDraw, ImageTk
 
 from .geometry import (PAUSE_SHAPE_BAND, SPEED_DIGIT_BAND, SPEED_DIGIT_COLS,
@@ -40,8 +39,7 @@ from .settings import (COST_RATE_PRESETS, DEFAULT_FRAMES_PER_COST, clamp_frames_
                        format_frames_per_cost, save_cost_rate)
 from .state import LOGICAL_FPS
 from .timeline import Teleprompter, parse_lines
-from .win32 import (arknights_ui_scaler, enable_dpi_awareness, set_click_through,
-                    virtual_screen_bounds)
+from .win32 import arknights_ui_scaler, set_click_through, virtual_screen_bounds
 
 
 # 输入框里的初始提示（# 开头 = 注释，解析器会跳过，不会变成轴）

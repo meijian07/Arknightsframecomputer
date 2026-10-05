@@ -22,22 +22,6 @@ LOGICAL_FPS = 30          # 游戏内时钟恒为 30 帧/秒，和画面帧数�
 SCALE = 1 << 24           # 1.0 的定点表示
 EPSILON_RAW = 167         # 回费判定容差，约 1e-5
 SPEED_NORMAL = SCALE // 30      # 559240，正常：1 秒 1 费
-SPEED_HALF = SCALE // 60        # 279620，回费速度减半（2 秒 1 费）
-SPEED_QUARTER = SCALE // 120    # 139810，回费速度 25%（4 秒 1 费）
-
-
-def speed_for_frames(frames: int) -> int:
-    """按「多少逻辑帧回一费」构造 speed。"""
-    if frames <= 0:
-        return 0
-    return SCALE // frames
-
-
-def required_from_ratio(ratio: float) -> int:
-    """按「一费相当于几个正常周期的量」构造 required（战前减速 tag = 2.0 / 4.0）。"""
-    if ratio != ratio or ratio <= 0:
-        return 0
-    return int(round(ratio * SCALE))
 
 
 def required_from_frames(frames: float) -> int:

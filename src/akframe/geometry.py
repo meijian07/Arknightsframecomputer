@@ -332,19 +332,6 @@ def apply_deltas(base: Layout, deltas: dict, src_scale: float | None = None) -> 
     return lay
 
 
-def save_layout(path: str, layout: Layout) -> None:
-    """把布局存成 JSON（绝对值），供调试和复现用。"""
-    import json
-    with open(path, 'w', encoding='utf-8') as fh:
-        json.dump(layout.to_dict(), fh, ensure_ascii=False, indent=2)
-
-
-def load_layout(path: str) -> Layout:
-    import json
-    with open(path, encoding='utf-8') as fh:
-        return Layout.from_dict(json.load(fh))
-
-
 def load_calibration(path: str):
     """读前端保存的校准文件，返回 (deltas, 记录时的 scale)。
 
