@@ -13,6 +13,10 @@
     C 清零计数    L 开始/停止记录 CSV    P 暂停/继续计数（手动）
     T 导入 md 轴文件    Esc 退出
 
+回费速率（减费 tag）：默认 30 帧/费（1 秒 1 费）。点了「回费速度 -50% / -75%」的 tag
+时，在面板「回费速率」那行选 60 / 120，或直接填数字后点「应用」——改完立刻生效，
+并写回设置文件 cost_rate.json，下次启动自动带上。
+
 打轴器（提词器）：导入一个 md 轴文件，或直接在下面的输入框里写（Ctrl+Enter 应用），
 计数器走到对应帧号时，面板上就把那条说明放大显示出来。轴文件格式见 timeline.py 顶部注释
 和 maps/example.md。
@@ -32,6 +36,9 @@ from PIL import Image, ImageDraw, ImageTk
 from .geometry import (PAUSE_SHAPE_BAND, SPEED_DIGIT_BAND, SPEED_DIGIT_COLS,
                        apply_deltas, layout_for, load_calibration)
 from .live import LiveMonitor
+from .settings import (COST_RATE_PRESETS, DEFAULT_FRAMES_PER_COST, clamp_frames_per_cost,
+                       format_frames_per_cost, save_cost_rate)
+from .state import LOGICAL_FPS
 from .timeline import Teleprompter, parse_lines
 from .win32 import (arknights_ui_scaler, enable_dpi_awareness, set_click_through,
                     virtual_screen_bounds)
@@ -52,6 +59,20 @@ UI_DIM = '#8b93a1'
 ACCENT = '#39d98a'
 WARN = '#ffb020'
 ROI_COLORS = {'bar': '#39d98a', 'pause': '#4da3ff', 'speed': '#ff9f43'}
+
+
+# 「自己填一个数」的那个下拉项。选中它不切档，只把光标丢进输入框。
+RATE_CUSTOM_LABEL = '自定义（在右边输入）'
+AUTO_RATE_LABEL = '自动识别中…'
+
+
+def _rate_label(frames: float) -> str:
+    """档位 -> 下拉框里显示的文字。落在已知档位上就显示那个档，否则显示数字。"""
+    f = clamp_frames_per_cost(frames)
+    for v, desc in COST_RATE_PRESETS:
+        if abs(v - f) < 1e-9:
+            return '%.0f  %s' % (v, desc)
+    return '%.0f  自定义' % f
 
 
 def _one_line(text: str) -> str:
@@ -75,19 +96,28 @@ def _fmt_time(seconds: float) -> str:
 
 class MonitorApp:
     def __init__(self, monitor: LiveMonitor, *, calib_path: str = 'layout_calib.json',
-                 poll_ms: int = 60, timeline_path: str = None):
+                 settings_path: str = 'cost_rate.json', poll_ms: int = 16,
+                 timeline_path: str = None):
+        # poll_ms 是**面板重绘**的周期，不是采样周期（采样在 live.py 的线程里独立跑）。
+        # 必须是 16 而不是 60：游戏 1 倍速下每秒走 30 个逻辑帧，面板 60ms 才重绘一次的话，
+        # 显示出来的数字每次跳 2 帧 —— 看着就像「漏帧」，而帧操时每次只加 1 帧，
+        # 看着又是对的（用户实测反馈正是「一帧一帧过是对的、1 倍速下像在漏帧」）。
+        # 16ms ≈ 60Hz，和游戏画面同速，数字才会每拍只变化 0 或 1。
         self.monitor = monitor
         self.calib_path = calib_path
+        self.settings_path = settings_path      # 回费速率设置文件（改档时写回这里）
         self.poll_ms = poll_ms
         self.deltas = {'bar': [0, 0, 0, 0], 'pause': [0, 0, 0, 0], 'speed': [0, 0, 0, 0]}
         self.calib_scale = None
         self.target = 'bar'
+        self._tick_times = []      # 面板重绘的实测速率（见 _tick 开头）
         self.overlay = None
         self._photos = {}
         # 打轴器：prompter 只管「当前帧号 -> 该看哪条轴」，这里只管画
         self.prompter = Teleprompter()
         self._timeline_path = None      # 当前轴来自哪个 md 文件；None = 来自面板输入框
         self._prom_flash_until = 0.0
+        self._note_hold = 0.0           # 提示行的保留截止时刻（见 _set_note）
         self._load_calib()
 
         self.root = tk.Tk()
@@ -96,11 +126,23 @@ class MonitorApp:
         self.root.attributes('-topmost', True)
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
-        self.root.geometry('724x1050+24+%d' % max(10, (sh - 1050) // 2))
+        # 先给个大概的初始尺寸，真正的尺寸等 _build_ui() 之后按内容需求算（见下）。
+        self.root.geometry('724x1000+24+%d' % max(10, (sh - 1000) // 2))
         self.root.protocol('WM_DELETE_WINDOW', self.quit)
 
         self._build_ui()
         self._bind_keys()
+        # 建完界面才知道内容到底要多宽多高（换台机器 / 换字体缩放就不一样），这里按实际
+        # 需求夹一次：窄了右边按钮会被裁（换窗口 / 退出），矮了最下面几行会被裁
+        # （回费速率 / 提示 / 帮助）。写死 724 的那版在 150% 缩放的屏幕上就是裁着的 ——
+        # tk 的点数会跟着系统 DPI 放大，同样的字号在物理像素上要宽 1.5 倍。
+        self.root.update_idletasks()
+        win_w = min(max(724, self.root.winfo_reqwidth()), max(640, sw - 40))
+        win_h = min(max(self.root.winfo_reqheight(), 640), max(640, sh - 80))
+        wrap = max(400, win_w - 30)
+        for lb in (self.lb_cycle, self.lb_perf, self.lb_warn, self.lb_note):
+            lb.configure(wraplength=wrap)
+        self.root.geometry('%dx%d+24+%d' % (win_w, win_h, max(10, (sh - win_h) // 2)))
         if timeline_path:
             self.load_timeline(timeline_path)
         # 把键盘焦点拿回主窗口：否则 Tk 可能把焦点给输入框，快捷键（C/S/T…）就失效了
@@ -138,10 +180,21 @@ class MonitorApp:
         self.lb_pause.grid(row=1, column=0, sticky='w', padx=(0, 16))
         self.lb_speed = self._label(info, '倍速 —', 10)
         self.lb_speed.grid(row=1, column=1, columnspan=2, sticky='w')
-        self.lb_perf = self._label(info, '性能 —', 9, UI_DIM)
-        self.lb_perf.grid(row=2, column=0, columnspan=3, sticky='w', pady=(4, 0))
-        self.lb_warn = self._label(info, '', 9, WARN)
-        self.lb_warn.grid(row=3, column=0, columnspan=3, sticky='w')
+        # 费用周期 = 「条从空走到下一次空」一共走了几个逻辑帧。这是唯一不依赖任何
+        # 帧率/倍速假设的「一费 = 几帧」口径：普通关卡应当恒为 30（偶尔 31 是游戏
+        # 那套定点累加器取整攒够一次误差造成的，见 fp24.py 顶部说明）。
+        # 「本费 x/30」是当前这一费已经走到第几个逻辑帧，用来核对一秒之内的位置。
+        # 这三行的内容长度会变（尤其「费用周期」和「性能」），固定 wraplength 让它们
+        # 换行而不是一直向窗口要宽度 —— 否则窗口宽度会被它们顶到屏幕以外去。
+        self.lb_cycle = self._label(info, '费用周期 —', 10, anchor='w', justify='left',
+                                    wraplength=690)
+        self.lb_cycle.grid(row=2, column=0, columnspan=3, sticky='w')
+        self.lb_perf = self._label(info, '性能 —', 9, UI_DIM, anchor='w', justify='left',
+                                   wraplength=690)
+        self.lb_perf.grid(row=3, column=0, columnspan=3, sticky='w', pady=(4, 0))
+        self.lb_warn = self._label(info, '', 9, WARN, anchor='w', justify='left',
+                                   wraplength=690)
+        self.lb_warn.grid(row=4, column=0, columnspan=3, sticky='w')
 
         prev = tk.Frame(self.root, bg=UI_BG)
         prev.pack(fill='x', **pad)
@@ -188,7 +241,9 @@ class MonitorApp:
             tk.Button(ehead, text=text, command=cmd, font=('Microsoft YaHei UI', 9),
                       bg='#262a33', fg=UI_FG, activebackground='#333947', relief='flat',
                       padx=8, pady=2).pack(side='right', padx=3)
-        self.txt_axis = tk.Text(editor, height=7, bg='#0b0c0f', fg=UI_FG, relief='flat',
+        # width 只是给窗口定「初始需要多宽」用的（Text 是 expand=True，实际宽度跟着窗口
+        # 走）。不写的话 Tk 默认按 80 字符算，光是它就能把窗口需求宽度顶到 1000+。
+        self.txt_axis = tk.Text(editor, height=7, width=40, bg='#0b0c0f', fg=UI_FG, relief='flat',
                                 insertbackground=UI_FG, selectbackground='#333947',
                                 font=('Consolas', 10), wrap='word', undo=True)
         self.txt_axis.pack(fill='both', expand=True, pady=(4, 0))
@@ -216,7 +271,44 @@ class MonitorApp:
                           relief='flat', padx=8, pady=3)
             b.pack(side='left', padx=3)
 
-        self.lb_note = self._label(self.root, '', 10, UI_DIM)
+        # ---- 回费速率（减费 tag）：手动档，改完立刻生效并写回设置文件 ----
+        # 为什么不自动认：认错档会让绝对帧号整段漂移（差一档就是几百帧），而打轴器
+        # 要的正是绝对帧号。档位取值 = 「一费几个逻辑帧」，和倍速、画面帧率都无关。
+        rate_row = tk.Frame(self.root, bg=UI_BG)
+        rate_row.pack(fill='x', **pad)
+        self._label(rate_row, '回费速率', 10).pack(side='left')
+        cur = (self.monitor.counter.frames_per_cost if self.monitor.counter is not None
+               else DEFAULT_FRAMES_PER_COST)
+        self.rate_var = tk.StringVar(value=_rate_label(cur))
+        self._rate_labels = {}
+        for v, desc in COST_RATE_PRESETS:
+            self._rate_labels['%.0f  %s' % (v, desc)] = v
+        items = list(self._rate_labels) + [RATE_CUSTOM_LABEL]
+        self.rate_menu = tk.OptionMenu(rate_row, self.rate_var, *items,
+                                       command=self._on_rate_pick)
+        self.rate_menu.config(bg='#262a33', fg=UI_FG, activebackground='#333947',
+                              activeforeground=UI_FG, relief='flat', highlightthickness=0,
+                              font=('Microsoft YaHei UI', 9), width=26, anchor='w',
+                              padx=4, pady=2)
+        self.rate_menu['menu'].config(bg='#262a33', fg=UI_FG, activebackground=ACCENT,
+                                      activeforeground=UI_BG, relief='flat',
+                                      font=('Microsoft YaHei UI', 9))
+        self.rate_menu.pack(side='left', padx=(6, 6))
+        self._label(rate_row, '自定义', 9, UI_DIM).pack(side='left')
+        self.en_rate = tk.Entry(rate_row, width=5, bg='#0b0c0f', fg=UI_FG, relief='flat',
+                                insertbackground=UI_FG, justify='center',
+                                font=('Consolas', 10))
+        self.en_rate.pack(side='left', padx=(4, 4))
+        self.en_rate.bind('<Return>', lambda _e: self.apply_rate_entry())
+        for text, cmd in (('应用', self.apply_rate_entry),
+                          ('自动识别（可选）', self.enable_auto_rate)):
+            tk.Button(rate_row, text=text, command=cmd, font=('Microsoft YaHei UI', 9),
+                      bg='#262a33', fg=UI_FG, activebackground='#333947', relief='flat',
+                      padx=8, pady=2).pack(side='left', padx=3)
+
+        # height=2：提示行会换行，先把位置占住，免得它一变长就把下面的帮助行挤掉
+        self.lb_note = self._label(self.root, '', 10, UI_DIM, anchor='w', justify='left',
+                                   wraplength=690, height=2)
         self.lb_note.pack(fill='x', padx=10, pady=(2, 0))
         self.lb_help = self._label(
             self.root,
@@ -391,6 +483,57 @@ class MonitorApp:
                                   fg=WARN if on else UI_FG)
         self._set_note('已暂停计数（手动）：数字按住不动，再按 P 继续'
                        if on else '已收开关：继续计数（重新起锚）')
+
+    def _on_rate_pick(self, label):
+        """下拉框选中某一项。选「自定义」不切档，只把光标丢进输入框。"""
+        if label == RATE_CUSTOM_LABEL:
+            self.en_rate.focus_set()
+            self.en_rate.select_range(0, 'end')
+            self._set_note('在输入框里填「一费几个逻辑帧」（例如 45），再点「应用」')
+            # 下拉框回显真实值，免得看上去像已经切过去了
+            self.rate_var.set(_rate_label(self._current_rate()))
+            return
+        v = self._rate_labels.get(label)
+        if v is not None:
+            self.apply_cost_rate(v)
+
+    def _current_rate(self) -> float:
+        return (self.monitor.counter.frames_per_cost if self.monitor.counter is not None
+                else DEFAULT_FRAMES_PER_COST)
+
+    def apply_rate_entry(self):
+        """「应用」按钮 / 输入框回车：把输入框里的数当成一费逻辑帧数切档。"""
+        text = self.en_rate.get().strip()
+        try:
+            v = float(text)
+        except ValueError:
+            self._set_note('「一费几个逻辑帧」要填数字，例如 60（回费速度 -50%% 就是 60）：%r'
+                           % text)
+            return
+        if not (v > 0):
+            self._set_note('「一费几个逻辑帧」要填正数，例如 60')
+            return
+        self.apply_cost_rate(v)
+
+    def apply_cost_rate(self, value):
+        """切到某个回费速率：立刻生效（已数的像素帧按比例换算）+ 写回设置文件。"""
+        v = clamp_frames_per_cost(value)
+        self.monitor.set_cost_rate(v)
+        self.rate_var.set(_rate_label(v))
+        self.en_rate.delete(0, 'end')
+        note = '回费速率 = %s' % format_frames_per_cost(v)
+        try:
+            save_cost_rate(self.settings_path, v)
+            self._set_note('%s，已存到 %s' % (note, os.path.abspath(self.settings_path)))
+        except OSError as exc:
+            self._set_note('%s，但存盘失败：%s' % (note, exc))
+
+    def enable_auto_rate(self):
+        """可选功能：让程序自己数条宽认档位（认错档会让帧号整段漂移，默认不用）。"""
+        self.monitor.set_cost_rate('auto')
+        self.rate_var.set(AUTO_RATE_LABEL)
+        self._set_note('已开启自动识别：数出一个完整周期里条出现过多少种宽度，'
+                       '认准了才切档（结果不写回设置文件）')
 
     def toggle_csv(self):
         if self.monitor._csv_path:
@@ -576,12 +719,36 @@ class MonitorApp:
 
     # ---------------- 每帧刷新 ----------------
 
-    def _set_note(self, text: str):
+    def _set_note(self, text: str, hold: float = 3.0):
+        """更新底部提示行。
+
+        hold > 0 时这条提示会顶住 _tick 的自动状态行几秒 —— 否则面板每 16ms 就把状态行
+        刷一遍，用户刚点的操作（改回费速率、保存校准）连一眼都看不见。
+        """
         self.lb_note.configure(text=text)
+        self._note_hold = time.perf_counter() + hold
 
     def _tick(self):
+        # 面板自己的重绘速率，用来核对「显示跟不跟得上游戏」：
+        # 1 倍速下游戏每秒走 30 个逻辑帧，面板必须显著高于 30 Hz 才可能每拍只跳 1 帧。
+        # 实测过 60ms 的旧值（16.7 Hz）会每拍跳 2 帧，看着就像在漏帧。
+        now = time.perf_counter()
+        self._tick_times.append(now)
+        if len(self._tick_times) > 30:
+            self._tick_times.pop(0)
+        ui_hz = 0.0
+        if len(self._tick_times) >= 2:
+            span = self._tick_times[-1] - self._tick_times[0]
+            ui_hz = (len(self._tick_times) - 1) / span if span > 0 else 0.0
         upd = self.monitor.latest
         st = self.monitor.stats
+        # 「最大间隔」的告警门限必须跟着当前倍速走：采样间隔一旦超过「一个逻辑帧在屏幕上
+        # 停留的时长」就会整帧漏采。停留时长 = 1000 / (30 x 倍速)：1X -> 33.3ms、
+        # 2X -> 16.7ms。门限写死 33.3ms 的话，2 倍速下明明在漏采也不会报警。
+        # 倍速读不到时按 1X 算（保守，宁可多报也不漏报）。
+        cur_m = 1.0
+        if upd.result is not None and upd.result.m == upd.result.m and upd.result.m > 0:
+            cur_m = float(upd.result.m)
         if upd.result is not None:
             res = upd.result
             self.lb_frames.configure(text=str(res.elapsed))
@@ -594,6 +761,31 @@ class MonitorApp:
                 self.lb_state.configure(text='状态 运行中（满费，挂钟估算）', fg=WARN)
             elif res.mode == 'bar-reject' and res.warn == 'speed-unknown':
                 self.lb_state.configure(text='状态 运行中（满费，倍速未知：冻结）', fg=WARN)
+            elif res.mode == 'anchor-head':
+                # 条第一次被读到：画面上的「空格子」就是本费第 1 帧，这一拍已经是
+                # 第 k 帧了，所以起锚时要把它补上（见 docs 第 13 节）。
+                self.lb_state.configure(
+                    text='状态 起锚：已补上费用周期开头的 %d 帧' % res.delta, fg=ACCENT)
+            elif res.warn == 'anchor-late':
+                self.lb_state.configure(
+                    text='状态 起锚（条是半路出现的，前面丢了多少帧无法证明：不补）',
+                    fg=WARN)
+            elif res.mode == 'wrap':
+                # 条走满之后游戏把条收起来一拍（回费动画）。那一帧就是新一费的第 1 帧，
+                # 必须当场记下来（见 docs/费用条读取逻辑.md 第 13 节）。
+                self.lb_state.configure(
+                    text='状态 刚回费（条归零那一帧，记 %d 帧）' % res.delta, fg=ACCENT)
+            elif res.mode == 'wrap-missed':
+                # 归零那一帧没被采到，这一拍把漏的帧一起补了 —— 不是计数错，是采样漏拍。
+                self.lb_state.configure(
+                    text='状态 刚回费（归零那一帧没采到，这一拍一次补 %d 帧；'
+                         '提高采样率可消除）' % res.delta, fg=WARN)
+            elif res.warn == 'phase-resync':
+                # 相位模型连续 REJECT_RESYNC_SECONDS(0.2s) 和画面对不上（采样卡了太久，
+                # 缺口跨过 1/4 个周期）：模型自己已经不可信，按当前画面重新起锚。
+                # 丢掉的帧无法证明，这一拍 delta=0 —— 宁可少记也不猜。
+                self.lb_state.configure(
+                    text='状态 相位重锚（采样卡顿太久、模型对不上：这段不补帧）', fg=WARN)
             elif not res.running:
                 # 帧操：采样这一瞬图标是「暂停」，但两次采样之间游戏跑过了、条动过了
                 self.lb_state.configure(text='状态 已暂停（条在动，按像素计数）', fg=ACCENT)
@@ -610,23 +802,69 @@ class MonitorApp:
                     res.m, bullet, 'ok' if res.corr_2x == res.corr_2x else 'low',
                     res.digit_ratio, '%.3f' % res.corr_2x if res.corr_2x == res.corr_2x else '—'))
             self.lb_warn.configure(text=('告警：' + res.warn) if res.warn else '')
+            self._update_cycle(res)
         self._update_prompter(upd.result)
+        # 「最大间隔」是漏帧的直接指标：采样间隔一旦超过一个逻辑帧的显示时长，
+        # 就有可能整帧没被采到（表现：某一拍一次 +2）。门限见上面的 cur_m。
+        jam_thr = 1000.0 / (LOGICAL_FPS * max(1.0, cur_m))
+        jam = st.gap_max_ms >= jam_thr
         self.lb_perf.configure(
-            text='采样 %.1f Hz ｜ 抓屏 %.1f ms ｜ 采样 %d 次 ｜ 读不到累计 %.2f s'
-                 % (st.hz, st.grab_ms, st.samples, st.unreadable_s))
+            text='采样 %.1f Hz ｜ 最大间隔 %s%.1f ms%s ｜ 面板 %.0f Hz ｜ 抓屏 %.1f ms '
+                 '｜ 采样 %d 次 ｜ 读不到累计 %.2f s'
+                 % (st.hz, '⚠ ' if jam else '', st.gap_max_ms,
+                    '（超过 %.1f ms，可能漏采）' % jam_thr if jam else '',
+                    ui_hz, st.grab_ms, st.samples, st.unreadable_s),
+            fg=WARN if jam else UI_DIM)
         win = self.monitor.window
         lay = self.monitor.layout
-        if win is not None and lay is not None:
+        if now < self._note_hold:
+            pass                     # 刚弹过的提示还留着，先别盖
+        elif win is not None and lay is not None:
             self._set_note('%s  %dx%d @(%d,%d) ｜ %s' % (
                 win.exe, win.client[2], win.client[3], win.client[0], win.client[1],
-                upd.note or 'ROI %s' % self.target))
+                upd.note or 'ROI %s' % self.target), hold=0.0)
         elif upd.note:
-            self._set_note(upd.note)
+            self._set_note(upd.note, hold=0.0)
 
         self._render_previews(upd, lay)
         if self.overlay is not None:
             self._draw_overlay()
         self.root.after(self.poll_ms, self._tick)
+
+    def _update_cycle(self, res):
+        """更新「费用周期」那一行：一费几帧 + 本费走到第几帧。
+
+        一费几帧由 Counter.frames_per_cost 给出：普通关卡 30，带了减回费的 tag 时是
+        60 / 120（自动认，见 cost_rate.py；也可以用 --cost-rate 手工指定）。
+        这里的「一费 N 帧（中位）」是**实测**值，正常应和它一致；
+        稳定不一致才说明相位模型有问题。
+        """
+        counter = self.monitor.counter
+        per = float(counter.frames_per_cost) if counter is not None else LOGICAL_FPS
+        into = int(round(res.phase * per))
+        parts = []
+        # 回费速率（减费 tag）：手工设置的档位，或「自动识别」认准后自动切的档
+        est = getattr(self.monitor, 'rate_estimate', None)
+        auto_ok = est is not None and est.frames_per_cost
+        if self.rate_var.get() == AUTO_RATE_LABEL and self.monitor.rate_locked:
+            # 认准了：下拉框也跟着切过去，免得显示和实际不一致
+            self.rate_var.set(_rate_label(per))
+        if counter is not None and abs(per - LOGICAL_FPS) > 1e-9:
+            parts.append('回费速率 %.0f 帧/费（%s）'
+                         % (per, '自动认定' if auto_ok else '设置档'))
+        elif auto_ok:
+            parts.append('回费速率 %.0f 帧/费（自动认定）' % est.frames_per_cost)
+        n_cyc, med, lo, hi = counter.cycle_stats() if counter is not None else (0, 0, 0, 0)
+        if n_cyc:
+            parts.append('一费 %d 帧（中位）' % med)
+            parts.append('上次 %d 帧' % counter.cycle_lengths[-1])
+            if lo != hi:
+                parts.append('范围 %d..%d' % (lo, hi))
+            parts.append('共 %d 个' % n_cyc)
+        else:
+            parts.append('还没走完一个完整周期')
+        parts.append('本费 %d/%d 帧' % (into, int(round(per))))
+        self.lb_cycle.configure(text='费用周期 ' + ' ｜ '.join(parts))
 
     def _render_previews(self, upd, lay):
         if upd.bar_img is None:

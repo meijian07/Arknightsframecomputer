@@ -38,8 +38,7 @@ REL_THR = 0.35       # 相对阈值：median + REL_THR * (max - median)
 # 状态机就退回挂钟通道，画面上的表现就是「不看条了，按 1 秒 30 帧瞎涨」。
 # 处理办法：主路径（绝对阈值）完全读不到东西时，再按这一行自己的白电平抬回 255 试一次。
 # 只在主路径读不到时才走这一步，所以已经标定过的 SDR 画面逐像素不变。
-DIM_HI_PCTL = 99.0     # 白电平取 99 分位而不是 max：单个噪点不该把估计抬飞
-DIM_LO_PCTL = 5.0
+# 白/暗电平由 _row_levels() 统一给（1 / 99 分位，理由见那里）
 DIM_HI_MIN = 100       # 行里没有这个亮度以上的高光，就不可能是被压暗的游戏 HUD
 DIM_HI_MAX = MASKED_WHITE_MIN   # = 150。到这一档就当成 SDR 的半透明渲染（蒙遮罩/渐变），
                                 # 不做 HDR 还原：实测 SDR 满费退出过渡那一行的亮点是 154，
@@ -156,19 +155,36 @@ def _scan_fill(row: np.ndarray) -> tuple:
     return 0, False
 
 
+ROW_DARK_PCTL = 1.0     # 暗电平（轨道）取 1 分位
+ROW_WHITE_PCTL = 99.0   # 白电平（填充）取 99 分位
+
+
+def _row_levels(row: np.ndarray) -> tuple:
+    """行内「暗电平（轨道）/ 白电平（填充）」两个水位。
+
+    **必须用 1 / 99 分位，不能用 5 / 95**：填充最多能占整行的 97%（一费最后一帧实测
+    232~233 / 240），这时第 5 百分位已经落进填充里（暗电平 = 白电平，台阶判据和压暗
+    判据都会自己判死自己）；反过来填充只有 3% 时第 95 百分位又落进轨道里。1 / 99
+    在 240px 的条槽上只吃最边上 ~2px，两端都留得住。
+    """
+    return (float(np.percentile(row, ROW_DARK_PCTL)),
+            float(np.percentile(row, ROW_WHITE_PCTL)))
+
+
 def _row_is_step(row: np.ndarray, fill: int) -> bool:
     """条的形状检查：必须是「左亮右暗」的一个台阶。
 
     fill 左边（跳过最左 1px）至少 70% 是亮点、右边至少 70% 是暗点。
-    阈值取自己的 p5/p95 的中点 —— 不能用中位数：填充超过半条时，中位数本身就
-    变成填充值了，台阶判据会自己把自己判掉。
+    阈值取自己暗/白电平（_row_levels，1 / 99 分位）的中点 —— 不能用中位数：
+    填充超过半条时中位数本身就变成填充值了，也不能用 p5/p95：填充占 97%（一费最后
+    一帧）时 p5 落进填充、只占 3%（一费第一帧）时 p95 落进轨道，两种极端都会把
+    真台阶判掉。
     为什么必须有这道闸：亮度自适应把整行抬亮的同时，也把 UI 杂色抬成了假填充 ——
     实测一段暂停菜单录像被误判成「整条 TRACK」，于是那些帧进了像素通道。
     台阶形状是费用条独有的：场景再亮，也不会有 200px 宽的一整条台阶。
     """
     n = row.size
-    lo = float(np.percentile(row, 5))
-    hi = float(np.percentile(row, 95))
+    lo, hi = _row_levels(row)
     thr = lo + 0.5 * (hi - lo)
     left = min(VALIDITY_LEFT_INSET, n - 1)
     lseg = row[left:fill]
@@ -188,8 +204,7 @@ def _dim_anchor(row: np.ndarray):
     整行会被抬到 88 —— 正好落进满费退出灰底的判据，于是关卡外也一秒 30 帧地涨。
     所以「有高光」本身就是必要条件：没有 >= DIM_HI_MIN 的高光，就不是被压暗的游戏 HUD。
     """
-    hi = float(np.percentile(row, DIM_HI_PCTL))
-    lo = float(np.percentile(row, DIM_LO_PCTL))
+    lo, hi = _row_levels(row)
     if not (DIM_HI_MIN <= hi < DIM_HI_MAX) or hi - lo < DIM_MIN_CONTRAST:
         return None
     return hi
@@ -310,6 +325,13 @@ def read_pause(roi: np.ndarray, layout: Layout) -> PauseReading:
     只取字形顶部的条带：单三角（已暂停）顶部很窄，双竖条（运行中）顶部是两个整宽矩形，
     两者亮点数差约 4 倍（实测 0.063 vs 0.24），所以用占比判别很稳。
     """
+    if not layout.buttons_visible:
+        # 画面里根本没有暂停键（截屏 / 放大 / 裁剪录像只截了右下角）：这是「读不到」，
+        # 不是「读到暂停」。返回「运行中」而不是猜「已暂停」，理由：
+        #   - 条还在画面上，条不动时像素通道自己就不涨，「已暂停」并不能多保护什么；
+        #   - 反过来，误判成「已暂停」会把满费挂钟通道整段掐掉 —— 那是系统性少记。
+        # 代价：满费（没有相位信息、要走挂钟）期间真按暂停，挂钟会多走几帧。
+        return PauseReading(ratio=1.0, running=True)
     r0, r1 = layout.pause.band_rows(*PAUSE_SHAPE_BAND)
     band = roi[r0:r1 + 1, :]
     thr = rel_threshold(roi)
@@ -331,6 +353,11 @@ def read_speed(roi: np.ndarray, layout: Layout, templates=()) -> SpeedReading:
 
     templates: [(倍速值, 名字, 归一化模板数组), ...]，由 cli 从 templates/ 目录加载。
     """
+    if not layout.buttons_visible:
+        # 同 read_pause：倍速键不在画面里。返回「不知道倍速」（m=nan），
+        # 让挂钟通道按既有规则冻结，而不是硬按 1 倍速补帧。
+        return SpeedReading(digit_ratio=0.0, corr_2x=float('nan'), has_digit=False,
+                            m=float('nan'), bullet=False, conf='low')
     thr = rel_threshold(roi)
     r0, r1 = layout.speed.band_rows(*SPEED_DIGIT_BAND)
     c0, c1 = layout.speed.cols_range(*SPEED_DIGIT_COLS)

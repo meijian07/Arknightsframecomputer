@@ -20,7 +20,7 @@ from typing import Iterator
 
 import numpy as np
 
-from .geometry import Layout, layout_for, reframe_layout
+from .geometry import Layout, Rect, bar_only_layout, layout_for, reframe_layout
 
 ROI_NAMES = ('bar', 'pause', 'speed')
 FFMPEG_LABELS = {'bar': 'b', 'pause': 'p', 'speed': 's'}
@@ -181,18 +181,24 @@ def open_video(path: str, outdir: str, ffmpeg: str | None = None,
                force: bool = False, size: tuple | None = None,
                ui_scaler: float | None = None,
                client_size: tuple | None = None,
-               offset: tuple | None = None) -> tuple:
+               offset: tuple | None = None,
+               bar_box: tuple | None = None,
+               layout: Layout | None = None) -> tuple:
     """准备视频输入，返回 (layout, fps, 帧迭代器)。
 
     ui_scaler   游戏内「UI 缩放」；None = 用默认档 1.0（不改变 ROI）。
     client_size 客户区尺寸。录制整个桌面（画面里含任务栏 / 窗口标题栏）时，ROI 要按
                 客户区尺寸算，而不是按视频尺寸 —— 否则条的位置整个偏掉。
     offset      客户区原点在视频坐标里的位置 (x, y)，配合 client_size 用。
+    bar_box     直接给出费用条槽在画面里的像素框 (x, y, w, h)。画面被放大 / 裁剪过、
+                几何推不出来时用，见 geometry.bar_only_layout。
+    layout      整套 ROI 直接给全（比 bar_box 更底层，主要给测试用）。
     """
     # 缓存命中时连 ffmpeg 都不需要（抽流是一次性成本，之后只读 .raw）
     # 缓存命中时连 ffmpeg 都不需要 —— 但只有「按视频尺寸算 ROI」这一路才敢直接复用
     # （给了 client_size / offset 说明画面里有别的东西，layout 得重新算）
-    if not force and size is None and client_size is None and offset is None:
+    if (not force and size is None and client_size is None and offset is None
+            and bar_box is None and layout is None):
         cached = _valid_cache(outdir, path)
         if cached is not None:
             return Layout.from_dict(cached['layout']), float(cached['fps']), iter_cached(outdir)
@@ -203,10 +209,13 @@ def open_video(path: str, outdir: str, ffmpeg: str | None = None,
         if info.size is None:
             raise RuntimeError('无法从视频里读出分辨率，请用 --size WxH 手动指定')
         size = info.size
-    cw, ch = client_size if client_size else size
-    layout = layout_for(cw, ch, ui_scaler if ui_scaler is not None else 1.0)
-    if offset:
-        layout = reframe_layout(layout, int(offset[0]), int(offset[1]), size[0], size[1])
+    if bar_box is not None:
+        layout = bar_only_layout(size[0], size[1], Rect(*[int(v) for v in bar_box]))
+    elif layout is None:
+        cw, ch = client_size if client_size else size
+        layout = layout_for(cw, ch, ui_scaler if ui_scaler is not None else 1.0)
+        if offset:
+            layout = reframe_layout(layout, int(offset[0]), int(offset[1]), size[0], size[1])
     meta = extract(exe, path, layout, outdir, force=force)
     return layout, float(meta['fps']), iter_cached(outdir)
 

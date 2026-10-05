@@ -25,6 +25,8 @@ import numpy as np
 
 from .features import read_bar, read_pause, read_speed
 from .geometry import Layout, layout_for, union_rect
+from .cost_rate import RateEstimator
+from .settings import DEFAULT_FRAMES_PER_COST
 from .state import CSV_HEADER, Counter, FrameResult
 from .win32 import (ScreenGrabber, WindowInfo, arknights_ui_scaler, client_rect,
                     find_window, is_minimized, to_gray)
@@ -56,6 +58,27 @@ class LiveStats:
     unreadable_s: float = 0.0
     resyncs: int = 0
     rows: int = 0
+    # 相邻两次「抓屏那一刻」的间隔。1 倍速下一个逻辑帧只有 33.3ms，采样间隔一旦超过它，
+    # 就有可能整帧没被采到 —— 表现是「某一帧不读、下一帧一次 +2」（用户报的
+    # 「第 0 帧不读、第一帧补了两帧」）。所以这个数必须露出来，漏帧才有据可查。
+    gap_ms: float = 0.0
+    gap_max_ms: float = 0.0
+
+
+def _manual_cost_rate(spec):
+    """把 cost_rate 的取值解析成「一费几个逻辑帧」；auto / 空 -> None（= 自动识别）。"""
+    if spec is None:
+        return None
+    if isinstance(spec, (int, float)):
+        return float(spec) if spec > 0 else None
+    text = str(spec).strip().lower()
+    if text in ('', 'auto', 'off', 'none'):
+        return None
+    try:
+        v = float(text)
+    except ValueError:
+        return None
+    return v if v > 0 else None
 
 
 class LiveMonitor:
@@ -66,8 +89,9 @@ class LiveMonitor:
     """
 
     def __init__(self, layout: Layout = None, *, exe: str = 'Arknights.exe',
-                 title: str = None, pid: int = None, rate: float = 60.0,
-                 templates=(), csv_path: str = None, build_layout=None):
+                 title: str = None, pid: int = None, rate: float = 120.0,
+                 templates=(), csv_path: str = None, build_layout=None,
+                 cost_rate=DEFAULT_FRAMES_PER_COST):
         self.exe = exe
         self.title = title
         self.pid = pid
@@ -82,12 +106,21 @@ class LiveMonitor:
         self.rows: list = []
         self.keep_rows = False     # True 时把每帧结果留在内存里（导出用）
         self.manual_pause = False  # 「暂停计数」开关（手动，给测试用）
+        # 回费速率：默认为手工档「一费几个逻辑帧」（30 = 1 秒 1 费，60 = 回费 -50%，
+        # 120 = -75%）。给 'auto' 才开自动识别（见 cost_rate.py），那是可选功能：
+        # 认错档会让绝对帧号整段漂移，所以默认不认。
+        self.cost_rate = cost_rate
+        self.rate_est = None       # 自动识别器（手工指定速率时是 None）
+        self.rate_estimate = None  # 最近一次识别结果（界面显示用）
+        self._rate_locked = False  # 已经认准过速率就不再改（防两段样本来回翻）
         self._csv_path = csv_path
         self._stop = threading.Event()
         self._thread = None
         self._t0 = time.perf_counter()
         self._idx = 0
         self._hz_window = []
+        self._gap_window = []          # 最近 1 秒左右的采样间隔（毫秒）
+        self._last_grab_t = None
         self._grabber = None
         self._union = None
         self._last_window_scan = 0.0
@@ -101,15 +134,54 @@ class LiveMonitor:
         """换布局（窗口缩放、人工校准后）。会重建外接矩形和计数器。"""
         layout.validate()
         elapsed = self.counter.elapsed if (keep_elapsed and self.counter) else 0
+        manual = _manual_cost_rate(self.cost_rate)
         self.layout = layout
         self._union = union_rect([layout.bar, layout.pause, layout.speed])
         self.counter = Counter(layout.model_bar_w, fps=max(1.0, self.rate or 60.0),
+                               frames_per_cost=manual or DEFAULT_FRAMES_PER_COST,
                                bar_width_frac=layout.bar_width_f, visible_w=layout.bar.w)
         self.counter.elapsed = elapsed
         self.counter.resync()
         self.counter.set_manual_pause(self.manual_pause)
+        self._apply_cost_rate()
         # 外接矩形变了，之前按尺寸缓存的 DIB 不再需要（ScreenGrabber 自己按尺寸复用）
         self._grabber = None
+
+    def set_cost_rate(self, spec) -> float:
+        """改回费速率：数字 = 手工档（一费几个逻辑帧）；'auto' = 开自动识别。
+
+        已经数出来的像素帧会按新旧速率比例换算（见 Counter.set_frames_per_cost），
+        所以中途改档不会让绝对帧号从头偏掉。返回此刻生效的「一费几个逻辑帧」。
+        """
+        self.cost_rate = spec
+        self._apply_cost_rate()
+        if self.counter is not None:
+            return self.counter.frames_per_cost
+        return _manual_cost_rate(spec) or DEFAULT_FRAMES_PER_COST
+
+    @property
+    def rate_locked(self) -> bool:
+        """速率是不是已经定下来了（手工档恒为 True；auto 认准后变 True）。"""
+        return bool(self._rate_locked)
+
+    def _apply_cost_rate(self) -> None:
+        """把 self.cost_rate 落到 Counter 上（换布局、改设置都走这里）。"""
+        manual = _manual_cost_rate(self.cost_rate)
+        if manual:
+            # 手工档：没有可认的，直接换档
+            if self.counter is not None:
+                self.counter.set_frames_per_cost(manual)
+            self.rate_est = None
+            self._rate_locked = True
+        else:
+            # 'auto'：认出来之前先按 30 算（和没有减费 tag 的关卡一致），认准了再换
+            if self.counter is not None:
+                self.counter.set_frames_per_cost(DEFAULT_FRAMES_PER_COST)
+            lay = self.layout
+            self.rate_est = (None if lay is None else
+                             RateEstimator(lay.model_bar_w, lay.bar_width_f, lay.bar.w))
+            self._rate_locked = False
+        self.rate_estimate = None
 
     def set_manual_pause(self, on: bool) -> None:
         """开关「暂停计数」：数字按住不动，方便对着游戏逐段核对。"""
@@ -117,12 +189,33 @@ class LiveMonitor:
         if self.counter is not None:
             self.counter.set_manual_pause(self.manual_pause)
 
+    def _track_cost_rate(self, bar) -> None:
+        """顺手认回费速率：认准了就换 Counter 的 required（并把已数的帧按比例换算）。
+
+        为什么认准了才换、而且只换一次：认错档位比不认更糟 —— 差一档会让绝对帧号
+        整段漂移，打轴器要的正是绝对帧号。所以只在置信度 high 时换，换过就锁住
+        （两段样本可能给出略有出入的估计，来回翻会毁掉帧号）。
+        """
+        if self.rate_est is None or self._rate_locked:
+            return
+        est = self.rate_est.feed(bar.fill, bar.state)
+        self.rate_estimate = est
+        if est.conf == 'high' and est.frames_per_cost:
+            if abs(est.frames_per_cost - self.counter.frames_per_cost) > 1e-9:
+                self.counter.set_frames_per_cost(est.frames_per_cost)
+            self._rate_locked = True
+
     def toggle_manual_pause(self) -> bool:
         self.set_manual_pause(not self.manual_pause)
         return self.manual_pause
 
     def reset(self) -> None:
         """清零计数（不清空已写出的 CSV）。"""
+        if self.rate_est is not None:
+            self.rate_est.reset()
+        self.rate_estimate = None
+        if not _manual_cost_rate(self.cost_rate):
+            self._rate_locked = False
         self._t0 = time.perf_counter()
         self._idx = 0
         self._hz_window.clear()
@@ -130,6 +223,10 @@ class LiveMonitor:
         self.stats.resyncs = 0
         if self.layout:
             self.set_layout(self.layout, keep_elapsed=False)
+        if self.counter is not None:
+            # 清零 = 「从这一刻起从 0 开始数」。下一次起锚不许把清零**之前**数过的
+            # 那几帧（当前费用周期开头那 1~2 帧）补回来 —— 补了数字就会停在 1/2。
+            self.counter.mark_zero_start()
 
     # ---------- 采样 ----------
 
@@ -174,12 +271,27 @@ class LiveMonitor:
         full = self._grabber.grab_bgra(x + u.x, y + u.y, u.w, u.h)
         grab_ms = (time.perf_counter() - t_grab) * 1000.0
         # 时间戳取在抓屏之后：这一拍的像素内容就是这一刻左右从屏幕上取的
-        t = time.perf_counter() - self._t0
+        now = time.perf_counter()
+        t = now - self._t0
+        if self._last_grab_t is not None:
+            gap_ms = (now - self._last_grab_t) * 1000.0
+            self.stats.gap_ms = gap_ms
+            self._gap_window.append(gap_ms)
+            if len(self._gap_window) > 120:
+                self._gap_window.pop(0)
+            self.stats.gap_max_ms = max(self._gap_window)
+        self._last_grab_t = now
 
         def cut(r) -> np.ndarray:
             oy, ox = r.y - u.y, r.x - u.x
             return full[oy:oy + r.h, ox:ox + r.w]
 
+        # 只把三个 ROI 转灰度，**不要**把整块外接矩形转一遍再切。
+        # 为什么：三个 ROI 加起来 6.8万像素，外接矩形 53万像素（条在右下、按钮在右上，
+        # 中间一大片全是空的）。实测 to_gray 整块 7.33 ms、三个 ROI 0.73 ms —— 差 6.6 ms，
+        # 而这一步的省下直接决定采样率：本机实时链路原来 8.9+7.0+1.2 ≈ 18 ms/拍 = 54.6 Hz，
+        # 改完 ≈ 11 ms/拍 = 90 Hz（用户要的「16ms 精度」是 60 Hz）。
+        # 结果完全一致（同一像素同一公式，已验证逐像素相等）。
         bar_img = to_gray(cut(lay.bar))
         pause_img = to_gray(cut(lay.pause))
         speed_img = to_gray(cut(lay.speed))
@@ -187,6 +299,7 @@ class LiveMonitor:
         bar = read_bar(bar_img, lay)
         pause = read_pause(pause_img, lay)
         speed = read_speed(speed_img, lay, self.templates)
+        self._track_cost_rate(bar)
         res = self.counter.step(self._idx, t, bar, pause, speed)
 
         note = ''

@@ -49,6 +49,22 @@ def bar(fill, state):
                       row=np.zeros(BAR_W, np.int16))
 
 
+def phase_frac(frames: float) -> float:
+    """游戏钟走了 frames 个逻辑帧时，条应该画在什么相位上。
+
+    实测：回费那一帧相位是 1.0（条画满 = 宽 240），**下一帧**才回到 1/30（宽 0）。
+    早先这里写成 (frames % 30)/30，等于给状态机喂了一条「有两个连续 0 宽帧、
+    没有 240」的信号 —— 那和游戏不一样，自检也就测不出「回费帧匹配不上」的问题。
+    这里的 frames 是浮点（1 倍速 + 60Hz 采样 = 每拍 0.5 帧），所以按小数处理。
+    """
+    if frames <= 0.0:
+        return 0.0
+    p = frames % 30.0
+    if p == 0.0:
+        p = 30.0
+    return p / 30.0
+
+
 def simulate(segments):
     """segments: [(采样数, speed, mode)]。返回 (状态机帧数, 真值帧数, 每段明细)。"""
     c = Counter(BAR_W, fps=FPS)
@@ -71,13 +87,13 @@ def simulate(segments):
                 continue
             if mode == 'pause':
                 # 暂停：相位不动，游戏时钟也停
-                fill = synthesized_width(BAR_W, float(BAR_W), (frames % 30.0) / 30.0)
+                fill = synthesized_width(BAR_W, float(BAR_W), phase_frac(frames))
                 c.step(idx, t, bar(fill, 'TRACK'), PAUSED, speed_reading(1.0))
                 continue
             if mode == 'manual':
                 # 手动暂停计数：游戏照常跑，只是数字不动
                 frames += speed * 30.0 * dt
-                fill = synthesized_width(BAR_W, float(BAR_W), (frames % 30.0) / 30.0)
+                fill = synthesized_width(BAR_W, float(BAR_W), phase_frac(frames))
                 c.step(idx, t, bar(fill, 'TRACK'), RUN, speed_reading(speed))
                 continue
             truth += speed * 30.0 * dt
@@ -89,7 +105,7 @@ def simulate(segments):
                        speed_reading(speed, bullet=(speed < 1.0)))
             else:
                 frames += speed * 30.0 * dt
-                fill = synthesized_width(BAR_W, float(BAR_W), (frames % 30.0) / 30.0)
+                fill = synthesized_width(BAR_W, float(BAR_W), phase_frac(frames))
                 c.step(idx, t, bar(fill, 'TRACK'), RUN, speed_reading(speed))
         detail.append((mode, speed, n, c.elapsed - before, truth))
     return c.elapsed, sum(d[4] for d in detail), detail

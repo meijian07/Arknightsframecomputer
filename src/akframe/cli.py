@@ -14,8 +14,10 @@ import numpy as np
 
 from .capture import find_ffmpeg, open_images, open_video, probe_video
 from .features import read_bar, read_pause, read_speed
+from .cost_rate import collect_cycles, infer_rate
 from .geometry import layout_for
-from .state import CSV_HEADER, Counter
+from .settings import DEFAULT_FRAMES_PER_COST
+from .state import CSV_HEADER, PROBE_MIN_SECONDS, Counter
 
 IMAGE_EXT = ('.png', '.jpg', '.jpeg', '.bmp')
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -41,11 +43,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--roi-offset', default=None,
                    help='客户区原点在视频里的位置，如 16,45；填 auto 则自动探测。'
                         '配合 --client 用（录桌面/窗口时）')
+    p.add_argument('--bar-box', default=None,
+                   help='直接指定费用条槽在画面里的像素框 x,y,w,h。画面被放大 / 裁剪过'
+                        '（只截到右下角一块）时用：ROI 只按条算，暂停 / 倍速通道关闭')
     p.add_argument('--templates', default=DEFAULT_TEMPLATES,
                    help='倍速模板目录（默认 templates/）。文件名形如 2_bright.npy / 1_bright.npy，'
                         '开头的整数就是倍速值；匹配不上时沿用上次倍速并标记 low')
     p.add_argument('--ui-scaler', type=float, default=None,
                    help='游戏内「UI 缩放」0..1（默认从注册表读；读不到按 1.0）')
+    p.add_argument('--cost-rate', default=None,
+                   help='回费速率 = 一费几个逻辑帧。不填 = 30（普通关卡，1 秒 1 费）；'
+                        '60 = 回费速度 -50%；120 = -75%。'
+                        'auto = 可选：从费用条一个周期里出现过多少种宽度自动认'
+                        '（认错档会让绝对帧号整段漂移，所以默认不用）')
     p.add_argument('--print-layout', action='store_true', help='只打印算出来的 ROI 就退出')
     p.add_argument('--quiet', action='store_true', help='不打印进度')
     return p
@@ -72,6 +82,26 @@ def load_templates(dirpath: str):
             continue
         out.append((float(m.group(1)), fn, arr.astype(np.float32)))
     return out
+
+
+def cache_suffix(bar_box, client_size, offset) -> str:
+    """抽流缓存目录的后缀：把「决定 ROI 的那几项」编进目录名。
+
+    为什么必须编进去：缓存里存的是三路 ROI 裁出来的灰度流，换一组 ROI 就是另一套
+    数据。以前只区分了手工条框，于是「同一段录像先带 --roi-offset 跑一遍、再不带跑
+    一遍」会命中前一次的缓存 —— 读的是上一次的 ROI，画面里明明没有费用条，程序却
+    一本正经地报数（实测踩到过：两个 2558x1440 的录像换了 offset，读数全废）。
+    """
+    if bar_box:
+        return '_barbox'
+    if not client_size and not offset:
+        return ''
+    bits = []
+    if client_size:
+        bits.append('c%dx%d' % (client_size[0], client_size[1]))
+    if offset:
+        bits.append('o%d_%d' % (offset[0], offset[1]))
+    return '_' + '_'.join(bits).replace('-', 'm')
 
 
 def registry_ui_scaler() -> float:
@@ -134,14 +164,28 @@ def main(argv=None) -> int:
             else:
                 ox, oy = spec.split(',')
                 roi_offset = (int(ox), int(oy))
+        bar_box = None
+        if args.bar_box:
+            parts = [q for q in re.split(r'[,\s]+', args.bar_box.strip()) if q]
+            if len(parts) != 4:
+                print('--bar-box 要四个数：x,y,w,h（例 2133,1436,419,15）')
+                return 2
+            bar_box = tuple(int(q) for q in parts)
         cache = args.cache
         if cache is None:
             stem = os.path.splitext(os.path.basename(args.input))[0]
-            cache = os.path.join('out', 'cache', stem)
+            # 决定 ROI 的参数（手工条框 / 客户区尺寸 / 原点偏移）都编进目录名，
+            # 免得两套 ROI 互相覆盖缓存（见 cache_suffix）
+            cache = os.path.join('out', 'cache',
+                                 stem + cache_suffix(bar_box, client_size, roi_offset))
         layout, fps, frames = open_video(args.input, cache, ffmpeg=args.ffmpeg,
                                         force=args.force, size=size, ui_scaler=ui_scaler,
-                                        client_size=client_size, offset=roi_offset)
+                                        client_size=client_size, offset=roi_offset,
+                                        bar_box=bar_box)
         source_desc = '视频 %s' % os.path.basename(args.input)
+        if bar_box:
+            print('费用条框  : x=%d y=%d w=%d h=%d  <- 手工指定（暂停/倍速通道关闭）'
+                  % bar_box)
 
     print('输入      : %s' % source_desc)
     print('帧率      : %.3f fps' % fps)
@@ -149,12 +193,67 @@ def main(argv=None) -> int:
           % (layout.bar, layout.pause, layout.speed, layout.scale))
     print('条槽宽    : %d px（真实 %.2f px），每逻辑帧 %.3f px，UI 缩放 %.2f'
           % (layout.bar_w, layout.bar_width_f, layout.px_per_frame, ui_scaler))
+    if not layout.buttons_visible:
+        print('注意      : 画面里没有暂停键 / 倍速键（截屏或放大裁剪过），这两个通道关闭。')
+        print('            计数只由费用条驱动；满费那几秒没有相位信息，按挂钟补，')
+        print('            此时若按了暂停会多记（条正常推进时不受影响）。')
     print('倍速模板  : %s' % (', '.join('%s->%.0fX' % (n, v) for v, n, _ in templates)
                               if templates else '无（全部标记 low，沿用初始 2X）'))
     if args.print_layout:
         return 0
 
-    counter = Counter(layout.model_bar_w, fps=fps,
+    # ---- 回费速率 ----
+    # 「一费几个逻辑帧」默认 30（普通关卡，1 秒 1 费）；带了减回费速度 tag 的关卡用
+    # --cost-rate 60 / 120 直接指定。--cost-rate auto 是可选功能：数「一个完整费用
+    # 周期里条出现过多少种不同宽度」自己认（见 cost_rate.py）—— 认错档会让绝对帧号
+    # 整段漂移，而打轴器要的正是绝对帧号，所以默认不用。
+    rate_note = None
+    frames_per_cost = DEFAULT_FRAMES_PER_COST
+    spec = args.cost_rate
+    if spec is None or str(spec).strip() == '':
+        pass                     # 默认档，不用在输出里占一行
+    elif str(spec).lower() == 'auto':
+        # 认速率要先看完整段录像，所以这一趟把帧和条读进来（ROI 很小，几 MB 级；
+        # 真正的大头是抽流缓存，那个在 out/cache 里，不进内存）
+        bars = []
+        prepared = []
+        for fr in frames:
+            bar = read_bar(fr.bar, layout)
+            bars.append(bar)
+            prepared.append((fr, bar))
+        frames = prepared
+        est = infer_rate(collect_cycles([b.fill for b in bars], [b.state for b in bars],
+                                        layout.model_bar_w),
+                         layout.model_bar_w, layout.bar_width_f, layout.bar.w)
+        if est.frames_per_cost:
+            frames_per_cost = est.frames_per_cost
+        rate_note = est
+    else:
+        try:
+            frames_per_cost = float(spec)
+        except (TypeError, ValueError):
+            print('--cost-rate 要填 auto 或一个正数（一费几个逻辑帧，例如 60）：%r'
+                  % (spec,))
+            return 2
+        if not (frames_per_cost > 0):
+            print('--cost-rate 要填正数（一费几个逻辑帧，例如 60）')
+            return 2
+
+    if rate_note is not None:
+        if rate_note.frames_per_cost:
+            print('回费速率  : %.0f 帧/费  <- 数出 %.0f 种条宽（%s）'
+                  % (rate_note.frames_per_cost, rate_note.median_levels, rate_note.conf))
+        elif rate_note.level_count:
+            print('回费速率  : 按 30 帧/费算 —— 认不出来：数出 %.0f 种条宽，和已知档位'
+                  '都对不上。要手工指定就加 --cost-rate N'
+                  % rate_note.median_levels)
+        else:
+            print('回费速率  : 按 30 帧/费算 —— 这段录像里没有走完一个完整费用周期，'
+                  '量不出来。要手工指定就加 --cost-rate N')
+    elif abs(frames_per_cost - DEFAULT_FRAMES_PER_COST) > 1e-9:
+        print('回费速率  : %.0f 帧/费  <- --cost-rate 手工指定' % frames_per_cost)
+
+    counter = Counter(layout.model_bar_w, fps=fps, frames_per_cost=frames_per_cost,
                       bar_width_frac=layout.bar_width_f, visible_w=layout.bar.w)
     mode_count = collections.Counter()
     state_count = collections.Counter()
@@ -170,8 +269,13 @@ def main(argv=None) -> int:
     with open(args.output, 'w', newline='', encoding='utf-8') as fh:
         writer = csv.writer(fh)
         writer.writerow(CSV_HEADER)
-        for fr in frames:
-            bar = read_bar(fr.bar, layout)
+        for item in frames:
+            # 自动认速率时这一趟已经把条读过了（顺手存下来，省一次 median），
+            # 手工指定时还是原始 Frame，现场读
+            if isinstance(item, tuple):
+                fr, bar = item
+            else:
+                fr, bar = item, read_bar(item.bar, layout)
             pause = read_pause(fr.pause, layout)
             speed = read_speed(fr.speed, layout, templates)
             res = counter.step(fr.index, fr.t, bar, pause, speed)
@@ -203,10 +307,28 @@ def main(argv=None) -> int:
     print('处理帧数  : %d' % n)
     fps_meas, probe_frames, probe_mt = counter.probe()
     print('累计逻辑帧: %d  (约 %.2f 秒游戏内 1 倍速时间)' % (counter.elapsed, counter.elapsed / 30.0))
-    if probe_mt > 0:
-        print('实测帧率  : %.3f fps  <- 像素通道 %d 帧 / 时间轴 %.2f 秒（1 倍速等效）'
-              % (fps_meas, probe_frames, probe_mt))
-        print('            = %.4f 秒/费用周期（30 帧为一个周期）' % (30.0 / fps_meas))
+    # 「一费几帧」是唯一精确的口径：它只数「条从空走到下一次空」记了几帧，
+    # 不除时间、不乘倍速，所以窗口头尾各差半帧这点量化误差根本进不来。
+    # 「实测帧率」要除时间，天生带 ±1 帧/秒（1 秒窗口就是 ±3%），只在没走完一个
+    # 完整周期、没别的口径可量时才拿出来兜底 —— 免得用户看到 29.5 以为在漏帧。
+    n_cyc, cyc_med, cyc_min, cyc_max = counter.cycle_stats()
+    if n_cyc:
+        print('费用周期  : 一费 %d 帧（中位）  <- %d 个完整周期，范围 %d..%d 帧'
+              % (cyc_med, n_cyc, cyc_min, cyc_max))
+        if cyc_min != cyc_max:
+            print('            逐周期(帧): ' + ' '.join(str(v) for v in counter.cycle_lengths))
+        if cyc_min != cyc_max and (cyc_min < frames_per_cost or cyc_max > frames_per_cost):
+            print('            提示：一费应为 %.0f 帧/费（本段判定值）。不稳定说明相位模型'
+                  '还差一帧，或者这段里回费速率变过（局内减速 / 负费）。'
+                  % frames_per_cost)
+    else:
+        print('费用周期  : 这段录像里没有走完一个完整周期，量不出「一费几帧」')
+        if fps_meas == fps_meas:
+            print('实测帧率  : %.2f fps（粗估，±1 帧/秒）<- 只统计条在动且未暂停的样本，'
+                  '累计 %.2f 秒 / %d 帧' % (fps_meas, probe_mt, probe_frames))
+        elif probe_mt > 0:
+            print('实测帧率  : 样本不足（条在动且未暂停的时间只有 %.2f 秒，不到 %.1f 秒），'
+                  '不报数' % (probe_mt, PROBE_MIN_SECONDS))
     print('计数通道  : ' + '  '.join('%s=%d' % kv for kv in sorted(mode_count.items())))
     print('条状态帧数: ' + '  '.join('%s=%d' % kv for kv in sorted(state_count.items())))
     print('分段数    : ' + '  '.join('%s=%d' % kv for kv in sorted(runs.items())))

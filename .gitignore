@@ -2,6 +2,9 @@
 # out/cache 是抽流出来的原始 ROI 帧，跑几段视频就能到几百 MB，绝对不能提交
 out/
 
+# ---- 个人设置（各人机器上的回费速率不一样，别提交）----
+cost_rate.json
+
 # ---- Python ----
 __pycache__/
 *.pyc

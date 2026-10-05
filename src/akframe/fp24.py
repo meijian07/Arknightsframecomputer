@@ -40,6 +40,34 @@ def required_from_ratio(ratio: float) -> int:
     return int(round(ratio * SCALE))
 
 
+def required_from_frames(frames: float) -> int:
+    """按「多少逻辑帧回一费」构造 required。
+
+    这是战前回费速度 tag 该走的那条路（前人 fp24 的说明：
+    突袭 / 磨难 / 合约词条这类**战前**就定下来的修正改的是 `required`；
+    战斗中才生效的（负费、可露希尔、忍冬）改的是 `speed`）。
+
+        frames = 30  -> required = 1.0 * SCALE   （1 秒 1 费，普通关卡）
+        frames = 60  -> required = 2.0 * SCALE   （2 秒 1 费，回费速度 -50%）
+        frames = 120 -> required = 4.0 * SCALE   （4 秒 1 费，回费速度 -75%）
+
+    为什么用 required 而不是改 speed：两种写法「一费几帧」都对，但**边界周期**
+    （第几费会多出 1 帧）不一样。前人文档给的表是按 required 算的：
+    30 -> `30*10, 31`、39 -> `39*8, 40`、45 -> `45*6, 46`、60 -> `60*5, 61`。
+    照抄它才能和游戏对得上，回归项 tools/check_cost_rate.py 就是照这张表验的。
+    """
+    if frames != frames or frames <= 0:
+        return 0
+    return int(round(frames / float(LOGICAL_FPS) * SCALE))
+
+
+def frames_from_required(required: int) -> float:
+    """反过来：这个 required 相当于多少逻辑帧回一费。"""
+    if not required or required <= 0:
+        return 0.0
+    return required / float(SCALE) * LOGICAL_FPS
+
+
 class CostTiming:
     """费用累加器。一个逻辑帧调用一次 advance_one_frame()。"""
 
@@ -68,9 +96,21 @@ class CostTiming:
         return False
 
     def phase(self) -> float:
-        """当前相位 0..1，也就是费用条应该画到多满。"""
+        """当前相位 0..1，也就是费用条应该画到多满。
+
+        **刚好回费的那一帧返回 1.0，不是 0。** 实测一连串录像里，回卷处的可见宽度
+        序列是 `... 223, 232, 240, 0, 8 ...`：游戏是在累加器刚好攒满的那一帧把条画满
+        （相位 = 1.0 -> 宽度 240），**下一帧**才归零。如果这里返回 0，模型就少了
+        「条画满」这个状态，于是每费的回费帧都匹配不上、被判 bar-reject，
+        一费之内必然差 1 帧 —— 表现正是「一秒的总数对、一秒内的位置不对」。
+
+        frames_since_cycle_start == 0 只在本帧刚回费（或还没起锚）时成立，
+        用 cycles > 0 把「还没起锚」排除掉。
+        """
         if self.required <= 0:
             return 0.0
+        if self.cycles > 0 and self.frames_since_cycle_start == 0:
+            return 1.0
         p = self.accumulator / self.required
         if p < 0.0:
             return 0.0

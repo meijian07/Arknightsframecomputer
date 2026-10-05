@@ -110,6 +110,9 @@ class Layout:
     speed: Rect
     # 真实条槽宽（亚像素、未被裁）。0 表示未知，按 bar.w 处理（兼容旧缓存/旧校准文件）。
     bar_width_frac: float = 0.0
+    # 画面里到底有没有右上角那两个按钮。截屏 / 放大 / 裁剪过的录像只截到右下角一块时
+    # 设 False —— 这时暂停 / 倍速是「画面上没这个东西」，不是「读数为 0」，两者不能混。
+    buttons_visible: bool = True
 
     @property
     def bar_w(self) -> int:
@@ -166,6 +169,7 @@ class Layout:
             'pause': self.pause.to_dict(),
             'speed': self.speed.to_dict(),
             'bar_width_frac': self.bar_width_frac,
+            'buttons_visible': self.buttons_visible,
         }
 
     @staticmethod
@@ -178,6 +182,7 @@ class Layout:
             pause=Rect.from_dict(d['pause']),
             speed=Rect.from_dict(d['speed']),
             bar_width_frac=float(d.get('bar_width_frac') or 0.0),
+            buttons_visible=bool(d.get('buttons_visible', True)),
         )
 
 
@@ -233,6 +238,31 @@ def layout_for(width: int, height: int, ui_scaler: float = UI_SCALER_DEFAULT) ->
 
     lay = Layout(width=width, height=height, scale=s, bar=bar, pause=pause, speed=speed,
                  bar_width_frac=bar_frac)
+    lay.validate()
+    return lay
+
+
+def bar_only_layout(width: int, height: int, bar: Rect) -> Layout:
+    """只有费用条、没有右上角按钮的布局（画面被放大 / 裁剪时用）。
+
+    什么时候需要它：录像只截到屏幕右下角一块 —— 实测 2026-10-04 18-19-44.mp4 是整屏
+    被放大 1.75 倍的裁剪画面（条槽 419px 而正常是 240px、条高 15px 而正常 8px），
+    客户区原点、客户区尺寸都推不出来。但费用条本身完整地在画面里，而它一个就够用：
+    相位读数全部来自条，「30 逻辑帧 = 一个费用周期」这个换算不需要屏幕几何。
+
+    所以这里的取舍是**明确的**：
+        bar        用调用方量出来的条槽；ROI 上下取 BAR_ROI_H 行，让 read_bar 固定的
+                   判别条带（ROI 第 5..12 行）压在条身上；
+        pause/speed 留 1x1 占位 + buttons_visible=False，读的时候直接返回「读不到」。
+    代价写在 cli 的提示里：满费（条变灰底、没有相位）期间按暂停键，挂钟会多走。
+    """
+    roi_y = bar.y + bar.h // 2 - BAR_ROI_H // 2
+    roi_y = max(0, min(int(roi_y), int(height) - BAR_ROI_H))
+    placeholder = Rect(0, 0, 1, 1)
+    lay = Layout(width=int(width), height=int(height), scale=bar.w / BAR_W_UNIT,
+                 bar=Rect(int(bar.x), roi_y, int(bar.w), BAR_ROI_H),
+                 pause=placeholder, speed=placeholder,
+                 bar_width_frac=float(bar.w), buttons_visible=False)
     lay.validate()
     return lay
 

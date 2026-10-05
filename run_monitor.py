@@ -7,7 +7,12 @@
     python run_monitor.py --pid 12345      # 指定窗口
     python run_monitor.py --no-ui          # 不开界面，在控制台打印读数
     python run_monitor.py --rate 0         # 不限速，用满 CPU 跑到最快（测上限用）
+    python run_monitor.py --rate 60        # 省 CPU（半个核足够），代价是偶尔漏采一帧
     python run_monitor.py --timeline maps/example.md   # 启动时直接载入打轴器的轴文件
+    python run_monitor.py --cost-rate 60    # 回费速度 -50% 的 tag：一费 60 逻辑帧
+
+回费速率默认读设置文件 cost_rate.json（没有这个文件就按 30 = 1 秒 1 费），
+也可以在这里用 --cost-rate 覆盖；界面上那行「回费速率」改完会写回设置文件。
 
 界面里的键位见 ui.py 顶部注释（Tab/方向键校准 ROI，K 显示 ROI 框，S 保存，L 记录 CSV）。
 """
@@ -22,6 +27,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src
 from akframe.cli import DEFAULT_TEMPLATES, load_templates          # noqa: E402
 from akframe.geometry import apply_deltas, layout_for, load_calibration  # noqa: E402
 from akframe.live import LiveMonitor                                # noqa: E402
+from akframe.settings import (DEFAULT_FRAMES_PER_COST, clamp_frames_per_cost,  # noqa: E402
+                              format_frames_per_cost, load_cost_rate)
 from akframe.win32 import (arknights_ui_scaler, enable_dpi_awareness,  # noqa: E402
                            find_window, list_windows)
 
@@ -32,12 +39,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--exe', default='Arknights.exe', help='游戏进程名（默认 Arknights.exe）')
     p.add_argument('--title', default=None, help='窗口标题里的关键字（可选，比进程名更精确）')
     p.add_argument('--pid', type=int, default=None, help='直接指定进程号')
-    p.add_argument('--rate', type=float, default=60.0,
-                   help='每秒采样次数（默认 60；0 = 不限速）')
+    p.add_argument('--rate', type=float, default=120.0,
+                   help='每秒采样次数（默认 120；0 = 不限速）。'
+                        '1 倍速下一个逻辑帧只有 33.3ms，采样必须远快于 30Hz 才不会整帧漏采；'
+                        '实测本机一拍（抓屏+特征）约 6.7ms，上限约 150Hz。'
+                        '机器吃不消时降到 60，代价是偶尔会漏采一帧（下一拍一次 +2）')
     p.add_argument('--templates', default=DEFAULT_TEMPLATES, help='倍速模板目录')
     p.add_argument('--calib', default='layout_calib.json', help='ROI 校准文件')
     p.add_argument('--ui-scaler', type=float, default=None,
                    help='游戏内「UI 缩放」0..1（默认从注册表读；读不到按 1.0）')
+    p.add_argument('--cost-rate', default=None,
+                   help='回费速率 = 一费几个逻辑帧。不填就读设置文件（--settings），'
+                        '30 = 正常（1 秒 1 费）；60 = 回费速度 -50%；120 = -75%。'
+                        'auto = 开自动识别（可选功能：从费用条一个周期里出现过多少种'
+                        '宽度自己认，认错档会让绝对帧号整段漂移，所以默认不用）')
+    p.add_argument('--settings', default='cost_rate.json',
+                   help='回费速率设置文件（默认 cost_rate.json；界面里改档会写回这里）')
     p.add_argument('--csv', default=None, help='把逐帧读数记录到这个 CSV')
     p.add_argument('--list', action='store_true', help='列出可见窗口后退出')
     p.add_argument('--no-ui', action='store_true', help='不开图形界面，控制台打印')
@@ -47,7 +64,27 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def build_monitor(args) -> LiveMonitor:
+def resolve_cost_rate(args):
+    """命令行 --cost-rate 优先；没给就读设置文件。返回 (值, 报错信息)。
+
+    值可以是数字（手工档，一费几个逻辑帧）或 'auto'（开自动识别）。
+    """
+    if args.cost_rate is None or str(args.cost_rate).strip() == '':
+        return (load_cost_rate(args.settings), None)
+    text = str(args.cost_rate).strip().lower()
+    if text in ('auto', 'off', 'none'):
+        return ('auto', None)
+    try:
+        v = float(text)
+    except ValueError:
+        return (None, '--cost-rate 要填 auto 或一个正数（一费几个逻辑帧，例如 60）：%r'
+                % (args.cost_rate,))
+    if not (v > 0):
+        return (None, '--cost-rate 要填正数（一费几个逻辑帧，例如 60）')
+    return (clamp_frames_per_cost(v), None)
+
+
+def build_monitor(args, cost_rate=DEFAULT_FRAMES_PER_COST) -> LiveMonitor:
     templates = load_templates(args.templates)
     deltas, calib_scale = load_calibration(args.calib)
     ui_scaler = args.ui_scaler if args.ui_scaler is not None else arknights_ui_scaler()
@@ -63,7 +100,7 @@ def build_monitor(args) -> LiveMonitor:
     layout = build_layout(*win.client_size) if win else None
     mon = LiveMonitor(layout, exe=args.exe, title=args.title, pid=args.pid,
                       rate=args.rate, templates=templates, csv_path=args.csv,
-                      build_layout=build_layout)
+                      build_layout=build_layout, cost_rate=cost_rate)
     # 把刚找到的窗口交给监视器：不然 main() 里判 mon.window 永远是 None，
     # 明明找到了也会打印「找不到窗口」，白白吓人一跳
     mon.window = win
@@ -89,12 +126,19 @@ def run_console(mon: LiveMonitor, duration: float = 0.0) -> int:
                                                               st.hz, st.grab_ms))
                 else:
                     r = upd.result
+                    est = mon.rate_estimate
+                    fpc = (mon.counter.frames_per_cost if mon.counter is not None
+                           else DEFAULT_FRAMES_PER_COST)
+                    rate = ''
+                    if abs(fpc - DEFAULT_FRAMES_PER_COST) > 1e-9:
+                        rate = ' | 回费 %.0f帧/费(%s)' % (
+                            fpc, '自动' if (est is not None and est.frames_per_cost) else '设置')
                     print('[%6.1fs] 帧 %-6d 时间 %s | 条 %-9s fill %3d/%-3d | %s | %.0fX%s '
-                          '| 通道 %-5s | %.1fHz %.1fms%s'
+                          '| 通道 %-5s | %.1fHz %.1fms%s%s'
                           % (now - t0, r.elapsed, _fmt_time(r.elapsed / 30.0), r.bar_state,
                              r.fill, mon.layout.bar_w, '运行中' if r.running else '已暂停',
                              r.m, ' 子弹' if r.bullet else '', r.mode, st.hz, st.grab_ms,
-                             (' | ' + r.warn) if r.warn else ''))
+                             (' | ' + r.warn) if r.warn else '', rate))
             if duration and now - t0 >= duration:
                 break
     except KeyboardInterrupt:
@@ -127,7 +171,12 @@ def main(argv=None) -> int:
             print(w)
         return 0
 
-    mon = build_monitor(args)
+    cost_rate, why = resolve_cost_rate(args)
+    if why:
+        print(why)
+        return 2
+
+    mon = build_monitor(args, cost_rate)
     if mon.window is None:
         print('找不到窗口（进程名 %s）。用 --list 看看有哪些窗口，或加 --pid。' % args.exe)
     else:
@@ -135,13 +184,19 @@ def main(argv=None) -> int:
         print('ROI     : bar=%s pause=%s speed=%s (scale=%.4f)'
               % (mon.layout.bar, mon.layout.pause, mon.layout.speed, mon.layout.scale))
         print('条槽真实宽: %.2f px，UI 缩放 %.2f' % (mon.layout.bar_width_f, mon.ui_scaler))
+    fpc = mon.counter.frames_per_cost if mon.counter else DEFAULT_FRAMES_PER_COST
+    print('回费速率: %s%s' % (
+        format_frames_per_cost(fpc),
+        '（自动识别已开启，认准后自动切换）' if mon.rate_est is not None else
+        '，改档在界面「回费速率」那行，会写回 %s' % args.settings))
     print('DPI 感知: %s' % dpi)
 
     if args.no_ui:
         return run_console(mon, args.duration)
 
     from akframe.ui import MonitorApp
-    app = MonitorApp(mon, calib_path=args.calib, timeline_path=args.timeline)
+    app = MonitorApp(mon, calib_path=args.calib, settings_path=args.settings,
+                     timeline_path=args.timeline)
     mon.start()
     if args.duration:
         app.root.after(int(args.duration * 1000), app.quit)
