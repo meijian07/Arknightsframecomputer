@@ -13,14 +13,15 @@ import sys
 import numpy as np
 
 from .capture import find_ffmpeg, open_images, open_video
+from .paths import templates_dir
 from .features import read_bar, read_pause, read_speed
 from .cost_rate import collect_cycles, infer_rate
 from .settings import DEFAULT_FRAMES_PER_COST
 from .state import CSV_HEADER, PROBE_MIN_SECONDS, Counter
 
 IMAGE_EXT = ('.png', '.jpg', '.jpeg', '.bmp')
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-DEFAULT_TEMPLATES = os.path.join(PROJECT_ROOT, 'templates')
+# 模板目录由 paths 统一决定（打包成 exe 后 __file__ 指向解包目录，自己数层数会错）
+DEFAULT_TEMPLATES = templates_dir()
 
 
 def build_parser() -> argparse.ArgumentParser:

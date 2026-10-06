@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src
 from akframe.cli import DEFAULT_TEMPLATES, load_templates          # noqa: E402
 from akframe.geometry import apply_deltas, layout_for, load_calibration  # noqa: E402
 from akframe.live import LiveMonitor                                # noqa: E402
+from akframe.paths import data_path                                 # noqa: E402
 from akframe.settings import (DEFAULT_FRAMES_PER_COST, clamp_frames_per_cost,  # noqa: E402
                               format_frames_per_cost, load_cost_rate)
 from akframe.win32 import (arknights_ui_scaler, enable_dpi_awareness,  # noqa: E402
@@ -45,7 +46,8 @@ def build_parser() -> argparse.ArgumentParser:
                         '实测本机一拍（抓屏+特征）约 6.7ms，上限约 150Hz。'
                         '机器吃不消时降到 60，代价是偶尔会漏采一帧（下一拍一次 +2）')
     p.add_argument('--templates', default=DEFAULT_TEMPLATES, help='倍速模板目录')
-    p.add_argument('--calib', default='layout_calib.json', help='ROI 校准文件')
+    p.add_argument('--calib', default=data_path('layout_calib.json'),
+                   help='ROI 校准文件（默认和程序放一起）')
     p.add_argument('--ui-scaler', type=float, default=None,
                    help='游戏内「UI 缩放」0..1（默认从注册表读；读不到按 1.0）')
     p.add_argument('--cost-rate', default=None,
@@ -54,8 +56,8 @@ def build_parser() -> argparse.ArgumentParser:
                         '30 = 正常（1 秒 1 费）；60 = 回费速度 -50%%；120 = -75%%。'
                         'auto = 开自动识别（可选功能：从费用条一个周期里出现过多少种'
                         '宽度自己认，认错档会让绝对帧号整段漂移，所以默认不用）')
-    p.add_argument('--settings', default='cost_rate.json',
-                   help='回费速率设置文件（默认 cost_rate.json；界面里改档会写回这里）')
+    p.add_argument('--settings', default=data_path('cost_rate.json'),
+                   help='回费速率设置文件（默认和程序放一起；界面里改档会写回这里）')
     p.add_argument('--csv', default=None, help='把逐帧读数记录到这个 CSV')
     p.add_argument('--list', action='store_true', help='列出可见窗口后退出')
     p.add_argument('--no-ui', action='store_true', help='不开图形界面，控制台打印')
