@@ -3,13 +3,26 @@
 坐标约定：x 向右、y 向下，矩形用 (x, y, w, h) 表示，覆盖 x..x+w-1 与 y..y+h-1。
 
 所有尺寸常数都以「单位尺度 s = 1」（即 1920x1080 的窗口）表示。
-目前的数值是把 2560x1600 的实测值除以 s = 1.3333 反推出来的，
-**只在一个窗口尺寸上验证过**；换尺寸后必须重新实测校正，不要盲目相信。
+数值是把 2560x1600 的实测值除以 s = 1.3333 反推出来的。
+
+信任来源分三档，layout_for() 按顺序取：
+    1. **实测校准表**（`resolutions_measured.json`，tools/calibrate.py 量出来写进去的）
+       —— 表里有的客户区尺寸就是实测值：s = 条槽宽 / 180，另外还可以带条槽的
+       竖直锚点与右边缘距，见 layout_for。尺寸不完全一样、但 ui_scale 落在同一档上的
+       客户区也会命中（见 measured_for）。
+    2. VERIFIED_SIZES：早期手工标定过的尺寸（2560x1600、1152x720）。
+    3. 其余尺寸按 ui_scale() 的两条规则**推**：宽高比 >= 16:9 用高度、否则用宽度。
+       推得对不对没人验过 —— resolution_status() 会把这一点如实报出来，
+       tools/calibrate.py 负责把「推的」变成「实测的」。
 """
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass, replace
+
+from .paths import app_dir, frozen
 
 REF_W = 1920
 REF_H = 1080
@@ -213,19 +226,142 @@ def ui_edge_scale(ui_scaler: float) -> float:
     return 0.9 + 0.1 * ui_scaler
 
 
+# ---- 实测校准表（换分辨率的入口）----
+#
+# tools/calibrate.py 拿一段录像量出条槽的真实几何之后写到这里。layout_for() 优先用它：
+# 表里有的尺寸就是**实测值**，没有的才退回 ui_scale() 的推算值。
+#
+# 一条记录长这样（只有 scale 是必填的，其余是从同一次测量里顺手算出来的）：
+#     "2560x1600": {
+#         "scale": 1.3323,          # 实测条槽宽 / 180 / 记录时的 UI 缩放系数
+#         "edge": 1.0,              # 记录时的 UI 缩放系数（游戏设置里的「UI 缩放」）
+#         "bar_cy_unit": 268.0,     # 条槽中心距客户区底边 / (scale * edge)，可省
+#         "right_margin_unit": 0.0, # 条槽右边缘距客户区右边 / (scale * edge)，可省
+#         "bar_w": 239.8,           # 实测条槽宽（人看的，不参与计算）
+#         "source": "录像 2026-10-04 15-54-49.mp4",
+#         "date": "2026-10-06",
+#     }
+def measured_path() -> str:
+    """实测校准表的路径（读和写都用它）。
+
+    优先级：
+        1. AKFRAME_RESOLUTIONS 环境变量指定的文件；
+        2. **程序目录旁边**的同名文件（打包成 exe 后 = exe 旁边，用户自己量的结果放这儿）；
+        3. 随代码发的那份（src/akframe/resolutions_measured.json）。
+
+    为什么要第 2 条：打包成 exe 之后第 3 条那份在 PyInstaller 的解包目录里 —— 只读、
+    每次启动都可能换个临时目录，而且实测数据本来是**跟着机器/分辨率走**的，应该能放在
+    看得见摸得着的地方。
+    """
+    env = os.environ.get('AKFRAME_RESOLUTIONS')
+    if env:
+        return env
+    if frozen():
+        local = os.path.join(app_dir(), 'resolutions_measured.json')
+        if os.path.isfile(local):
+            return local
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        'resolutions_measured.json')
+
+
+_measured_cache = None
+
+
+def measured_layouts() -> dict:
+    """读实测校准表。读不到（没这个文件 / 坏了）就返回空表，不影响其它功能。"""
+    global _measured_cache
+    if _measured_cache is None:
+        path = measured_path()
+        data = {}
+        try:
+            with open(path, encoding='utf-8') as fh:
+                raw = json.load(fh)
+            if isinstance(raw, dict):
+                data = {k: v for k, v in raw.items()
+                        if isinstance(v, dict) and float(v.get('scale') or 0) > 0}
+        except (OSError, ValueError, TypeError):
+            data = {}
+        _measured_cache = data
+    return _measured_cache
+
+
+MEASURED_MATCH_TOL = 0.005   # 「同一档缩放」的容差：ui_scale 相对差在这个范围内就算一档
+
+
+def measured_for(width: int, height: int):
+    """按客户区尺寸查实测表，返回 (记录, 'exact' / 'scale')；没有返回 (None, None)。
+
+    先找尺寸完全一样的；找不到再找**同一档缩放**的 —— 表里的锚点（距底 / 距右）本来
+    就是以 scale 为单位存的，ui_scale 相同的客户区直接用没问题。实测 2558x1440 和
+    2558x1494 的 ui_scale 都是 1.3323（取宽度那一条），量其中一个就够用两个。
+    """
+    table = measured_layouts()
+    key = '%dx%d' % (int(width), int(height))
+    if key in table:
+        return table[key], 'exact'
+    want = ui_scale(width, height)
+    best = None
+    for k, rec in table.items():
+        s = float(rec.get('scale') or 0)
+        if s <= 0:
+            continue
+        d = abs(s / want - 1.0)
+        if d <= MEASURED_MATCH_TOL and (best is None or d < best[0]):
+            best = (d, rec)
+    if best is None:
+        return None, None
+    return best[1], 'scale'
+
+
+def reload_measured() -> dict:
+    """丢掉缓存重读一次（工具写完之后调，省得重启进程）。"""
+    global _measured_cache
+    _measured_cache = None
+    return measured_layouts()
+
+
+def save_measured(key: str, rec: dict, path: str = None):
+    """把一个客户区尺寸的实测结果写进校准表（合并，不覆盖别人的条目）。"""
+    path = path or measured_path()
+    try:
+        with open(path, encoding='utf-8') as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+    data[key] = rec
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8', newline='\n') as fh:
+        json.dump(data, fh, ensure_ascii=False, indent=2, sort_keys=True)
+        fh.write('\n')
+    os.replace(tmp, path)
+    return reload_measured()
+
+
 def layout_for(width: int, height: int, ui_scaler: float = UI_SCALER_DEFAULT) -> Layout:
-    """按帧（窗口）尺寸推算三个 ROI。
+    """按帧（窗口）尺寸给出三个 ROI。
 
     ui_scaler 是游戏设置里的「UI 缩放」（PC 端能从注册表读到，见 win32.arknights_ui_scaler）。
-    默认 1.0，此时结果和以前逐像素一致。
+    默认 1.0。实测校准表里有这个客户区尺寸时，用实测的 scale / 锚点，不再按规则推。
     """
     s = ui_scale(width, height)
     edge = ui_edge_scale(ui_scaler)
+    rec, _how = measured_for(width, height)
+    cy_unit = BAR_CENTER_FROM_BOTTOM_UNIT
+    right_unit = 0.0
+    if rec:
+        s = float(rec['scale'])
+        # 记录时的 UI 缩放系数可能和现在不同（记录时 edge 折进 s 里了），
+        # 按比例换算回来：只有「距边」的那些量跟着它变。
+        edge = edge / (float(rec.get('edge') or 1.0) or 1.0)
+        cy_unit = float(rec.get('bar_cy_unit') or BAR_CENTER_FROM_BOTTOM_UNIT)
+        right_unit = float(rec.get('right_margin_unit') or 0.0)
 
     bar_frac = BAR_W_UNIT * s * edge          # 真实条槽宽（保留小数，合成模型要用）
     bar_w = int(round(bar_frac))
-    bar_x = width - bar_w
-    bar_cy = height - int(round(BAR_CENTER_FROM_BOTTOM_UNIT * s * edge))
+    bar_x = width - int(round(right_unit * s * edge)) - bar_w
+    bar_cy = height - int(round(cy_unit * s * edge))
     bar = Rect(bar_x, bar_cy - BAR_ROI_H // 2, bar_w, BAR_ROI_H)
 
     btn_w = int(round(BTN_W_UNIT * s))
@@ -389,6 +525,12 @@ MIN_CLIENT_H = 540
 
 def resolution_status(width: int, height: int) -> tuple:
     """这个客户区尺寸的布局可不可信。返回 (status, 给人看的说明)。"""
+    rec, how = measured_for(width, height)
+    if rec:
+        src = rec.get('source') or 'tools/calibrate.py'
+        return ('measured', '实测校准表：条槽 %.1fpx（%s%s）'
+                % (float(rec.get('bar_w') or 0), src,
+                   '，同缩放档' if how == 'scale' else ''))
     if (width, height) in VERIFIED_SIZES:
         return ('verified', '实测标定过')
     ar = width / height

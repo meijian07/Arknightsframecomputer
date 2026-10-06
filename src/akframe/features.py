@@ -156,6 +156,40 @@ def _scan_fill(row: np.ndarray) -> tuple:
     return 0, False
 
 
+def fill_run(row: np.ndarray, gap: int = 2):
+    """一行里「白填充」的列区间 (起, 止)，含两端；这一行没有填充时返回 None。
+
+    与 _scan_fill 用同一套判据（绝对白 250，读不到就按「整体压暗」的白电平抬亮重扫），
+    区别是它同时给出**左端** —— 校准工具要的是「白块铺在条槽的哪一段」，只有右端的话
+    没法知道条槽左边缘在哪。
+
+    取的是**最长的那一段连续白**（允许 gap 列空隙），不是「第一个白到最后一个白」：
+    条槽左边紧挨着费用数字 / 场景里的高光，按首尾取会把区间拉到条槽外面去。
+    """
+    n = int(row.size)
+    if n <= 0:
+        return None
+    for band in (row, brighten_row(row)):
+        if band is None:
+            continue
+        hit = np.nonzero(band > WHITE_MIN)[0]
+        if hit.size == 0:
+            continue
+        runs = []
+        s = p = int(hit[0])
+        for q in hit[1:]:
+            q = int(q)
+            if q - p <= gap + 1:
+                p = q
+            else:
+                runs.append((s, p))
+                s = p = q
+        runs.append((s, p))
+        s, e = max(runs, key=lambda t: t[1] - t[0])
+        return (s, e)
+    return None
+
+
 ROW_DARK_PCTL = 1.0     # 暗电平（轨道）取 1 分位
 ROW_WHITE_PCTL = 99.0   # 白电平（填充）取 99 分位
 

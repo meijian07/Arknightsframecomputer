@@ -57,16 +57,22 @@ SUSTAIN_LEVEL = 0.5  # 判定「填充覆盖到了这一列」用峰值频率的
 MIN_SUSTAIN_FRAC = 0.4   # 边缘右边连续这么多列都得被填充覆盖过（占条槽宽的比例）
 
 
-def extract_strip(ffmpeg, video, rect, stride=1):
-    """抽 rect 这一块的灰度原始流。stride > 1 时每 stride 帧取一帧。"""
+def extract_strip(ffmpeg, video, rect, stride=1, frames=None):
+    """抽 rect 这一块的灰度原始流。stride > 1 时每 stride 帧取一帧。
+
+    frames 给一个整数就只抽前 frames 帧（校准工具用：它只统计白块出现过的最左 /
+    最右列，多解几十秒只是白花时间）。
+    """
     vf = 'format=gray,%s' % rect.crop_filter()
     if stride > 1:
         vf += ",select=not(mod(n\\,%d))" % stride
     path = tempfile.mktemp(suffix='.gray', dir=tempfile.gettempdir())
+    tail = ['-vsync', '0', '-f', 'rawvideo', '-pix_fmt', 'gray', '-y', path]
+    if frames:
+        tail = ['-frames:v', str(int(frames))] + tail
     try:
         subprocess.run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-i', video,
-                        '-vf', vf, '-vsync', '0', '-f', 'rawvideo', '-pix_fmt', 'gray',
-                        '-y', path], check=True)
+                        '-vf', vf] + tail, check=True)
         data = np.fromfile(path, dtype=np.uint8)
     finally:
         if os.path.isfile(path):
