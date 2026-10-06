@@ -21,21 +21,6 @@ BAR_ROI_H = 17                        # 条 ROI 高度（固定像素，容错 �
 BAR_BAND_TOP = 5                      # ROI 内取第 5..12 行做逐列中位数
 BAR_BAND_BOTTOM = 13                  # （左闭右开）
 
-# ---- 顶部「逐帧退格」条（少数关卡才有；满费时用它数帧，见 docs 第 16 节）----
-# 位置实测自 2560x1600 的一段录像（客户区原点在视频 (2,45)）：条带在视频 y=220..228，
-# 即客户区 y=175..183；从画面最左边一直铺到客户区 x≈1806，右端是红色「!」三角帽。
-# 红「!」左边是**未填充段**（半透明黑），左边是**填充段**（亮灰，亮度跟着场景走，
-# 实测 94~186）。每退一格 35.5px，从右往左退，左端固定 —— 一格 = 1 个逻辑帧。
-TOPBAR_Y_UNIT = 131.25     # ROI 顶边距客户区上边（s=1）
-TOPBAR_H_UNIT = 7.0        # ROI 高度（s=1）；实测条带本身 9px @ s=1.3333
-TOPBAR_END_UNIT = 1356.0   # 条最右端（红「!」左边缘）距客户区左边（s=1）
-TOPBAR_CELL_UNIT = 26.625  # 一格多少像素（s=1）；实测 35.5px @ s=1.3333
-TOPBAR_EDGE_STEP = 45.0    # 边缘锐度：填充 -> 未填充至少差这么多灰阶才算一条边
-TOPBAR_FILL_MIN = 70.0     # 边缘左侧「填充」的亮度下限
-TOPBAR_TRACK_MAX = 70.0    # 边缘右侧「未填充」的亮度上限
-TOPBAR_RUN_CELLS = 0.5     # 「左侧是亮带」要求亮够多少格（遮挡极限约 0.7 格）
-TOPBAR_TRACK_CELLS = 0.8   # 「右侧是暗轨」要看多长
-
 BTN_W_UNIT = 150.0                    # 右上角按钮宽
 BTN_H_UNIT = 120.0                    # 右上角按钮高
 BTN_TOP_UNIT = 30.0                   # 按钮顶边距窗口上边
@@ -128,11 +113,6 @@ class Layout:
     # 画面里到底有没有右上角那两个按钮。截屏 / 放大 / 裁剪过的录像只截到右下角一块时
     # 设 False —— 这时暂停 / 倍速是「画面上没这个东西」，不是「读数为 0」，两者不能混。
     buttons_visible: bool = True
-    # 顶部「逐帧退格」条的 ROI。**默认 None = 不读**：这条只有少数关卡才有，默认关掉
-    # 才不会在别的关卡上把场景里的亮带当成条。打开方式见 with_topbar()。
-    topbar: object = None
-    # 一格多少像素。0 表示按 TOPBAR_CELL_UNIT * scale 算（兼容旧校准文件）。
-    topbar_cell: float = 0.0
 
     @property
     def bar_w(self) -> int:
@@ -164,11 +144,6 @@ class Layout:
         return self.bar_width_f / 30.0
 
     @property
-    def topbar_cell_px(self) -> float:
-        """顶部条一格多少像素。校准文件里存了就用存的，否则按分辨率推。"""
-        return self.topbar_cell if self.topbar_cell > 0 else TOPBAR_CELL_UNIT * self.scale
-
-    @property
     def bar_band(self) -> tuple:
         return (BAR_BAND_TOP, BAR_BAND_BOTTOM - 1)
 
@@ -178,10 +153,8 @@ class Layout:
         ffmpeg 的 crop 在 x+w 超出帧宽时会静默左移 x（本机踩过：2200 被改成 2160），
         越界不会报错、只会让数据对不上，所以这里必须硬断言。
         """
-        for name in ('bar', 'pause', 'speed', 'topbar'):
+        for name in ('bar', 'pause', 'speed'):
             r = getattr(self, name)
-            if r is None:      # topbar 是可选的：None = 这个关卡没这条 / 没打开
-                continue
             if r.x < 0 or r.y < 0 or r.x2 >= self.width or r.y2 >= self.height:
                 raise ValueError(
                     'ROI 越界：%s = (x=%d, y=%d, w=%d, h=%d)，帧尺寸 %dx%d'
@@ -197,8 +170,6 @@ class Layout:
             'speed': self.speed.to_dict(),
             'bar_width_frac': self.bar_width_frac,
             'buttons_visible': self.buttons_visible,
-            'topbar': self.topbar.to_dict() if self.topbar is not None else None,
-            'topbar_cell': self.topbar_cell,
         }
 
     @staticmethod
@@ -212,8 +183,6 @@ class Layout:
             speed=Rect.from_dict(d['speed']),
             bar_width_frac=float(d.get('bar_width_frac') or 0.0),
             buttons_visible=bool(d.get('buttons_visible', True)),
-            topbar=Rect.from_dict(d['topbar']) if d.get('topbar') else None,
-            topbar_cell=float(d.get('topbar_cell') or 0.0),
         )
 
 
@@ -273,31 +242,6 @@ def layout_for(width: int, height: int, ui_scaler: float = UI_SCALER_DEFAULT) ->
     return lay
 
 
-def topbar_rect(width: int, height: int, ui_scaler: float = UI_SCALER_DEFAULT) -> Rect:
-    """按客户区尺寸推算顶部条的 ROI（x 从画面最左边到条的右端）。"""
-    s = ui_scale(width, height)
-    edge = ui_edge_scale(ui_scaler)
-    h = max(6, int(round(TOPBAR_H_UNIT * s)))
-    y = int(round(TOPBAR_Y_UNIT * s * edge))
-    y = max(0, min(y, height - h))
-    w = max(8, min(int(round(TOPBAR_END_UNIT * s)), width))
-    return Rect(0, y, w, h)
-
-
-def with_topbar(layout: Layout, rect: Rect = None,
-                ui_scaler: float = UI_SCALER_DEFAULT) -> Layout:
-    """打开顶部「逐帧退格」条：返回带 topbar ROI 的新 layout。
-
-    不放进 layout_for() 是**故意的**：这条只有少数关卡才有，默认算出来会让所有录像
-    缓存整批失效，还会在别的关卡上白白多抓一块屏。调用方（cli --topbar / 前端开关）
-    显式打开才用。
-    """
-    r = rect if rect is not None else topbar_rect(layout.width, layout.height, ui_scaler)
-    out = replace(layout, topbar=r)
-    out.validate()
-    return out
-
-
 def bar_only_layout(width: int, height: int, bar: Rect) -> Layout:
     """只有费用条、没有右上角按钮的布局（画面被放大 / 裁剪时用）。
 
@@ -344,8 +288,7 @@ def reframe_layout(layout: Layout, dx: int, dy: int, width: int, height: int) ->
 
     out = replace(layout, width=width, height=height,
                               bar=shift(layout.bar), pause=shift(layout.pause),
-                              speed=shift(layout.speed),
-                              topbar=shift(layout.topbar) if layout.topbar else None)
+                              speed=shift(layout.speed))
     out.validate()
     return out
 
@@ -380,14 +323,11 @@ def apply_deltas(base: Layout, deltas: dict, src_scale: float | None = None) -> 
     frac = base.bar_width_frac
     if frac > 0 and base.bar.w > 0:
         frac = frac * (bar.w / float(base.bar.w))
-    topbar = base.topbar
-    if topbar is not None and 'topbar' in deltas:
-        topbar = adj(topbar, deltas['topbar'])
     lay = Layout(width=base.width, height=base.height, scale=base.scale,
                  bar=bar,
                  pause=adj(base.pause, deltas.get('pause', zero)),
                  speed=adj(base.speed, deltas.get('speed', zero)),
-                 bar_width_frac=frac, topbar=topbar, topbar_cell=base.topbar_cell)
+                 bar_width_frac=frac)
     lay.validate()
     return lay
 

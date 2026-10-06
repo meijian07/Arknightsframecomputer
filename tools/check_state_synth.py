@@ -38,8 +38,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'src'))
 
 from akframe.features import BarReading, PauseReading, SpeedReading   # noqa: E402
-from akframe.state import (ANCHOR_MAX_CATCHUP, REJECT_RESYNC_SECONDS,  # noqa: E402
-                           Counter)
+from akframe.state import (ANCHOR_MAX_CATCHUP, BULLET_FPS,  # noqa: E402
+                           REJECT_RESYNC_SECONDS, Counter)
 from akframe.synthesis import synthesized_width                       # noqa: E402
 
 BAR_W = 120
@@ -382,6 +382,52 @@ def pause_missing_bar(run=45, gap=240, fps=60.0):
     return c.elapsed - before
 
 
+def fast_frame_step_at_max(fps=60.0):
+    """满费 + 快速帧操：暂停 -> 只跑 2 拍 -> 再暂停。每一下的零点几帧都必须留住。
+
+    实测用户录像 `Desktop 2026.10.06 - 18.32.40.02`（24.1 秒 / 1448 拍，全程满费）：
+    29 段「运行中」里 20 段只有 1~3 拍，旧的「连续 5 拍确认」门把它们全吃掉 ——
+    累计 21 帧，正确值是 41（前 16 段是 1X，从 11.25 秒起进子弹时间）。见 docs 第 8 节。
+
+    真值不用猜：每一拍的真值就是 rate / fps 个逻辑帧（rate = 30 x 倍速，子弹时间是 6）。
+    返回失败项列表。
+    """
+    bad = []
+    dt = 1.0 / fps
+    for name, m, bullet in (('1X', 1.0, False), ('2X', 2.0, False),
+                            ('子弹时间', float('nan'), True)):
+        rate = BULLET_FPS if bullet else 30.0 * m
+        sp = (SpeedReading(digit_ratio=0.0, corr_2x=float('nan'), has_digit=False,
+                           m=float('nan'), bullet=True, conf='ok') if bullet else
+              SpeedReading(digit_ratio=0.30, corr_2x=1.0, has_digit=True, m=m,
+                           bullet=False, conf='ok'))
+        c = Counter(BAR_W, fps=fps)
+        t, idx = 0.0, 0
+        for _ in range(60):            # 先满费跑 60 拍，过掉起锚那一拍
+            idx += 1
+            t += dt
+            c.step(idx, t, bar(0, 'MAX'), RUN, sp)
+        base = c.elapsed_f
+        truth = 0.0
+        for _ in range(12):
+            for _ in range(30):        # 暂停 30 拍（这一段一帧都不能记）
+                idx += 1
+                t += dt
+                c.step(idx, t, bar(0, 'MAX'), PAUSED, sp)
+            for _ in range(2):         # 只跑 2 拍：旧门限要 5 拍，于是整段记 0
+                idx += 1
+                t += dt
+                c.step(idx, t, bar(0, 'MAX'), RUN, sp)
+                truth += rate * dt
+        got = c.elapsed_f - base
+        if abs(got - truth) > 1e-9:
+            bad.append((name, '%.4f' % got, '%.4f' % truth))
+        if c.clock_frames > c.elapsed_f + 1e-9:
+            bad.append((name, 'clock_frames 超过 elapsed_f',
+                        c.clock_frames, c.elapsed_f))
+    return bad
+
+
 def reduced_cost_rate_cycles():
     """带减费 tag 时（一费 60 / 120 逻辑帧），逐周期长度必须跟着变成 60 / 120。
 
@@ -518,6 +564,17 @@ def main():
     print('结论：%s' % ('✅ 通过（一帧都没多记）' if added == 0 else '❌ 暂停期间凭空多记'))
     ok4 = added == 0
 
+    bad_fast = fast_frame_step_at_max()
+    print()
+    print('满费 + 快速帧操（暂停 30 拍 -> 只跑 2 拍，重复 12 轮）：')
+    if bad_fast:
+        for b in bad_fast:
+            print('  ❌ %s：实际 %s，期望 %s' % b)
+    else:
+        print('  ✅ 通过（1X / 2X / 子弹时间下，每小段跑动的零点几帧都累进了 elapsed_f；'
+              '旧逻辑三种速率下每轮分别丢 1 / 1 / 0.2 帧）')
+    ok11 = not bad_fast
+
     bad_rate = reduced_cost_rate_cycles()
     print()
     print('减费环境逐周期长度（一费 60 / 120 逻辑帧）：')
@@ -539,7 +596,7 @@ def main():
     ok9 = not bad_switch
 
     return 0 if (ok and ok2 and ok3 and ok4 and ok5 and ok6 and ok7
-                 and ok8 and ok9 and ok10) else 1
+                 and ok8 and ok9 and ok10 and ok11) else 1
 
 
 if __name__ == '__main__':

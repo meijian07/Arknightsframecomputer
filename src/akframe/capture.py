@@ -20,21 +20,16 @@ from typing import Iterator
 
 import numpy as np
 
-from .geometry import (Layout, Rect, bar_only_layout, layout_for, reframe_layout,
-                       with_topbar)
+from .geometry import (Layout, Rect, bar_only_layout, layout_for,
+                       reframe_layout)
 
 ROI_NAMES = ('bar', 'pause', 'speed')
-FFMPEG_LABELS = {'bar': 'b', 'pause': 'p', 'speed': 's', 'topbar': 't'}
+FFMPEG_LABELS = {'bar': 'b', 'pause': 'p', 'speed': 's'}
 
 
 def roi_names(layout) -> tuple:
-    """这套 layout 实际要抽哪几路 ROI。
-
-    顶部条（topbar）只有少数关卡才有，layout.topbar 是 None 时**不抽** —— 一是省一路
-    解码/存储，二是这样一来旧缓存（没有 topbar.raw）依然命中，不会因为加了这个功能
-    就把所有历史录像的缓存整批作废。
-    """
-    return ROI_NAMES + (('topbar',) if layout.topbar is not None else ())
+    """这套 layout 实际要抽哪几路 ROI。"""
+    return ROI_NAMES
 
 _FPS_RE = re.compile(r'(\d+(?:\.\d+)?)\s*fps')
 _SIZE_RE = re.compile(r'Video:.*?(\d{2,5})x(\d{2,5})')
@@ -43,13 +38,12 @@ _DUR_RE = re.compile(r'Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)')
 
 @dataclass
 class Frame:
-    """一帧的几个 ROI 灰度图（topbar 只有开了顶部条通道时才有）。"""
+    """一帧的几个 ROI 灰度图。"""
     index: int
     t: float
     bar: np.ndarray
     pause: np.ndarray
     speed: np.ndarray
-    topbar: np.ndarray | None = None
 
 
 @dataclass
@@ -186,8 +180,7 @@ def iter_cached(outdir: str) -> Iterator[Frame]:
             if truncated:
                 break
             yield Frame(index=i, t=i / fps,
-                        bar=imgs['bar'], pause=imgs['pause'], speed=imgs['speed'],
-                        topbar=imgs.get('topbar'))
+                        bar=imgs['bar'], pause=imgs['pause'], speed=imgs['speed'])
     finally:
         for h in handles.values():
             h.close()
@@ -199,8 +192,7 @@ def open_video(path: str, outdir: str, ffmpeg: str | None = None,
                client_size: tuple | None = None,
                offset: tuple | None = None,
                bar_box: tuple | None = None,
-               layout: Layout | None = None,
-               topbar: bool = False) -> tuple:
+               layout: Layout | None = None) -> tuple:
     """准备视频输入，返回 (layout, fps, 帧迭代器)。
 
     ui_scaler   游戏内「UI 缩放」；None = 用默认档 1.0（不改变 ROI）。
@@ -210,13 +202,12 @@ def open_video(path: str, outdir: str, ffmpeg: str | None = None,
     bar_box     直接给出费用条槽在画面里的像素框 (x, y, w, h)。画面被放大 / 裁剪过、
                 几何推不出来时用，见 geometry.bar_only_layout。
     layout      整套 ROI 直接给全（比 bar_box 更底层，主要给测试用）。
-    topbar      True 时额外加一路顶部「逐帧退格」条 ROI（少数关卡才有，见 geometry）。
     """
     # 缓存命中时连 ffmpeg 都不需要（抽流是一次性成本，之后只读 .raw）
     # 缓存命中时连 ffmpeg 都不需要 —— 但只有「按视频尺寸算 ROI」这一路才敢直接复用
     # （给了 client_size / offset 说明画面里有别的东西，layout 得重新算）
     if (not force and size is None and client_size is None and offset is None
-            and bar_box is None and layout is None and not topbar):
+            and bar_box is None and layout is None):
         cached = _valid_cache(outdir, path)
         if cached is not None:
             return Layout.from_dict(cached['layout']), float(cached['fps']), iter_cached(outdir)
@@ -233,15 +224,8 @@ def open_video(path: str, outdir: str, ffmpeg: str | None = None,
     elif layout is None:
         cw, ch = client_size if client_size else size
         layout = layout_for(cw, ch, scaler)
-        if topbar:
-            # 必须在 reframe **之前**加：topbar_rect 是按客户区尺寸算出来的，
-            # 先加再整体平移才是视频坐标。顺序反了的话 y 会少一个 offset
-            # （实测：条 ROI 落在 y=175 而不是 220，读数全是空）。
-            layout = with_topbar(layout, ui_scaler=scaler)
         if offset:
             layout = reframe_layout(layout, int(offset[0]), int(offset[1]), size[0], size[1])
-    elif topbar:
-        layout = with_topbar(layout, ui_scaler=scaler)
     meta = extract(exe, path, layout, outdir, force=force)
     return layout, float(meta['fps']), iter_cached(outdir)
 
@@ -286,5 +270,4 @@ def _iter_images(paths, layout: Layout, fps: float) -> Iterator[Frame]:
         def cut(r):
             return img[r.y:r.y2 + 1, r.x:r.x2 + 1].copy()
         yield Frame(index=i, t=i / fps,
-                    bar=cut(layout.bar), pause=cut(layout.pause), speed=cut(layout.speed),
-                    topbar=cut(layout.topbar) if layout.topbar is not None else None)
+                    bar=cut(layout.bar), pause=cut(layout.pause), speed=cut(layout.speed))
