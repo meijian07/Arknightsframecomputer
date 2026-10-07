@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 
 LOGICAL_FPS = 30.0     # 轴里的帧号 = 1 倍速逻辑帧（和 state.LOGICAL_FPS 同一个约定）
 UPCOMING_MAX = 6       # 提词器默认往后显示几条
+RECENT_MAX = 3         # 刻度表在「现在」线下面回看几条
 
 _LIST_RE = re.compile(r'^\s*(?:[-*+]\s+|\d+[.)]\s+)')
 _HEAD_RE = re.compile(r'^\s*#{1,6}\s*')
@@ -162,6 +163,9 @@ class Prompt:
     next_in: int | None       # 距离下一条还有几帧
     done: int                 # 已经触发了几条
     total: int
+    # 刚过去的那几条（不含 current 本身），帧号升序。
+    # 刻度表要在「现在」线下面画它们，所以光有 current 不够。
+    recent: list = field(default_factory=list)
 
 
 class Teleprompter:
@@ -200,6 +204,8 @@ class Teleprompter:
         current = tl.cues[self.done - 1] if self.done else None
         upcoming = [(c, c.frame - frame) for c in tl.cues[self.done:self.done + self.upcoming]]
         nxt = tl.cues[self.done] if self.done < len(tl.cues) else None
+        lo = max(0, self.done - 1 - RECENT_MAX)
+        recent = tl.cues[lo:self.done - 1]
         return Prompt(current=current, newly=newly, upcoming=upcoming, next_cue=nxt,
                       next_in=(nxt.frame - frame) if nxt is not None else None,
-                      done=self.done, total=len(tl.cues))
+                      done=self.done, total=len(tl.cues), recent=recent)

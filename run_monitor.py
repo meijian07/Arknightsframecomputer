@@ -10,6 +10,9 @@
     python run_monitor.py --rate 60        # 省 CPU（半个核足够），代价是偶尔漏采一帧
     python run_monitor.py --timeline maps/example.md   # 启动时直接载入打轴器的轴文件
     python run_monitor.py --cost-rate 60    # 回费速度 -50% 的 tag：一费 60 逻辑帧
+    python run_monitor.py --demo-axis      # 演示模式：不找游戏，用假费用条推着面板跑
+    python run_monitor.py --demo-axis --demo-speed 4 --demo-pause 8
+                                           # 4 倍速快进 + 每 8 秒暂停 1.2 秒
 
 回费速率默认读设置文件 cost_rate.json（没有这个文件就按 30 = 1 秒 1 费），
 也可以在这里用 --cost-rate 覆盖；界面上那行「回费速率」改完会写回设置文件。
@@ -25,6 +28,7 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src'))
 
 from akframe.cli import DEFAULT_TEMPLATES, load_templates          # noqa: E402
+from akframe.demo import DEMO_AXIS_TEXT, DEMO_SIZE, DemoMonitor     # noqa: E402
 from akframe.geometry import apply_deltas, layout_for, load_calibration  # noqa: E402
 from akframe.live import LiveMonitor                                # noqa: E402
 from akframe.paths import data_path                                 # noqa: E402
@@ -64,6 +68,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--duration', type=float, default=0.0, help='运行多少秒后自动退出（0=不限）')
     p.add_argument('--timeline', default=None,
                    help='打轴器：启动时直接导入的 md 轴文件（界面里也能按 T 换）')
+    # ---- 演示模式：没有游戏画面也能把面板跑起来（刻度表预览 / 调界面用）----
+    p.add_argument('--demo-axis', action='store_true',
+                   help='演示模式：不找游戏窗口，用合成的费用条推着面板跑。'
+                        '刻度表只在「计数器在动」时才会画，这一档就是给刻度表看的')
+    p.add_argument('--demo-speed', type=float, default=1.0,
+                   help='演示里每秒走几倍速的逻辑帧（默认 1 = 每秒 30 帧；'
+                        '嫌轴来得太慢就调大，比如 4 就是 4 倍速快进）')
+    p.add_argument('--demo-bullet', action='store_true', help='演示子弹时间（恒 6 帧/秒）')
+    p.add_argument('--demo-max', action='store_true',
+                   help='演示全程满费（逼状态机走挂钟通道，帧号会带小数）')
+    p.add_argument('--demo-pause', type=float, default=0.0,
+                   help='演示里每这么多秒暂停 1.2 秒（0 = 不暂停），用来看数字会不会停住')
+    p.add_argument('--demo-res', default='%dx%d' % DEMO_SIZE,
+                   help='演示用的客户区尺寸（默认 %dx%d，正好命中实测校准表）' % DEMO_SIZE)
     return p
 
 
@@ -110,6 +128,25 @@ def build_monitor(args, cost_rate=DEFAULT_FRAMES_PER_COST) -> LiveMonitor:
     mon.window = win
     mon.ui_scaler = ui_scaler          # 给 main() 打印用（不是 LiveMonitor 的必需字段）
     return mon
+
+
+def build_demo(args, cost_rate) -> DemoMonitor:
+    """--demo-axis：不找游戏窗口，用合成输入把面板推起来。
+
+    存在的理由：刻度表只在「计数器在动」时才画（ui._update_prompter 在 res 为 None 时
+    直接 return），所以游戏不在关卡里的时候，刻度表区域永远只有一句提示文字 ——
+    改刻度表就只能靠玩游戏时顺手瞄一眼。这一档把「画面」换成合成的费用条，
+    面板、状态机、打轴器、刻度表全是真的（见 akframe/demo.py）。
+    """
+    text = str(args.demo_res).lower().replace('*', 'x')
+    try:
+        w, h = (int(v) for v in text.split('x')[:2])
+    except ValueError:
+        raise SystemExit('--demo-res 要写成 宽x高（比如 1920x1080），收到的是 %r'
+                         % args.demo_res)
+    return DemoMonitor((w, h), speed=args.demo_speed, bullet=args.demo_bullet,
+                       maxed=args.demo_max, pause_every=args.demo_pause, rate=args.rate,
+                       cost_rate=cost_rate, ui_scaler=args.ui_scaler)
 
 
 def run_console(mon: LiveMonitor, duration: float = 0.0) -> int:
@@ -187,8 +224,13 @@ def main(argv=None) -> int:
         print(why)
         return 2
 
-    mon = build_monitor(args, cost_rate)
-    if mon.window is None:
+    mon = build_demo(args, cost_rate) if args.demo_axis else build_monitor(args, cost_rate)
+    if args.demo_axis:
+        print('演示模式：没有游戏输入，帧号由合成的费用条推出来（刻度表预览 / 调界面用）')
+        print('假世界  : %s' % mon.describe())
+        print('ROI     : bar=%s (scale=%.4f，条槽真实宽 %.2f px)'
+              % (mon.layout.bar, mon.layout.scale, mon.layout.bar_width_f))
+    elif mon.window is None:
         print('找不到窗口（进程名 %s）。用 --list 看看有哪些窗口，或加 --pid。' % args.exe)
     else:
         print('目标窗口: %s' % mon.window)
@@ -206,8 +248,11 @@ def main(argv=None) -> int:
         return run_console(mon, args.duration)
 
     from akframe.ui import MonitorApp
+    # 演示模式默认塞一份内置轴（除非用户明确给了 --timeline 文件）：刻度表要有轴才画得满，
+    # 轴不来自文件也不影响，面板输入框里能直接改、能按 Ctrl+Enter 重解析。
+    text = DEMO_AXIS_TEXT if (args.demo_axis and not args.timeline) else None
     app = MonitorApp(mon, calib_path=args.calib, settings_path=args.settings,
-                     timeline_path=args.timeline)
+                     timeline_path=args.timeline, timeline_text=text)
     mon.start()
     if args.duration:
         app.root.after(int(args.duration * 1000), app.quit)

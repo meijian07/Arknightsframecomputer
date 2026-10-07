@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import traceback
 import tkinter as tk
 from tkinter import filedialog
 
@@ -38,6 +39,8 @@ from .geometry import (PAUSE_SHAPE_BAND, SPEED_DIGIT_BAND, SPEED_DIGIT_COLS,
 from .live import LiveMonitor
 from .settings import (COST_RATE_PRESETS, DEFAULT_FRAMES_PER_COST, clamp_frames_per_cost,
                        format_frames_per_cost, save_cost_rate)
+from .scale import ScaleGeom, Theme, build as build_scale, clip, one_line
+from .scale_render import render as render_scale
 from .state import LOGICAL_FPS
 from .timeline import Teleprompter, parse_lines
 from .win32 import arknights_ui_scaler, set_click_through, virtual_screen_bounds
@@ -61,6 +64,11 @@ ROI_COLORS = {'bar': '#39d98a', 'pause': '#4da3ff', 'speed': '#ff9f43'}
 # 校准目标 / ROI 框 / 预览按这个顺序走。
 ROI_ORDER = ('bar', 'pause', 'speed')
 
+# 刻度缩放档：1 个逻辑帧画几个像素。轴点挤在一起就调小，隔得远就调大。
+SCALE_ZOOMS = ((0.5, '0.5x'), (1.0, '1x'), (1.5, '1.5x'), (3.0, '3x'))
+SCALE_ZOOM_DEFAULT = 1.5
+
+
 
 # 「自己填一个数」的那个下拉项。选中它不切档，只把光标丢进输入框。
 RATE_CUSTOM_LABEL = '自定义（在右边输入）'
@@ -76,16 +84,6 @@ def _rate_label(frames: float) -> str:
     return '%.0f  自定义' % f
 
 
-def _one_line(text: str) -> str:
-    """轴说明里可能有换行；大字区只显示一行，换行折叠成 ·。"""
-    return ' · '.join(x.strip() for x in (text or '').split('\n') if x.strip())
-
-
-def _clip(text: str, n: int) -> str:
-    s = _one_line(text)
-    return s if len(s) <= n else s[:n - 1] + '…'
-
-
 def _fmt_time(seconds: float) -> str:
     """把秒数格式化成 mm:ss.cc（游戏内时间，1 倍速等效）。"""
     if seconds < 0:
@@ -97,13 +95,24 @@ def _fmt_time(seconds: float) -> str:
 
 class MonitorApp:
     def __init__(self, monitor: LiveMonitor, *, calib_path: str = 'layout_calib.json',
-                 settings_path: str = 'cost_rate.json', poll_ms: int = 16,
-                 timeline_path: str = None):
+                 settings_path: str = 'cost_rate.json', poll_ms: int = 8,
+                 timeline_path: str = None, timeline_text: str = None):
         # poll_ms 是**面板重绘**的周期，不是采样周期（采样在 live.py 的线程里独立跑）。
-        # 必须是 16 而不是 60：游戏 1 倍速下每秒走 30 个逻辑帧，面板 60ms 才重绘一次的话，
-        # 显示出来的数字每次跳 2 帧 —— 看着就像「漏帧」，而帧操时每次只加 1 帧，
-        # 看着又是对的（用户实测反馈正是「一帧一帧过是对的、1 倍速下像在漏帧」）。
-        # 16ms ≈ 60Hz，和游戏画面同速，数字才会每拍只变化 0 或 1。
+        # 游戏 1 倍速下每秒走 30 个逻辑帧，面板必须显著快过 30 Hz，数字才会每拍只
+        # 变化 0 或 1；慢了就会一次跳 2 帧，看着像「漏帧」（而帧操一次只推 1 帧，
+        # 看着又是对的 —— 用户最早的反馈正是「一帧一帧过是对的、1 倍速下像在漏帧」）。
+        #
+        # 16 这个旧值是错的，因为 Windows 的定时器粒度是 **15.6 ms**：tkinter 的
+        # after(n) 实际落在 ceil(n / 15.6) x 15.6 上。n=16 比 15.6 大一丁点，于是被抬到
+        # 31.2 ms —— 实测面板 32.8 Hz，刚好压在 33.3 ms（1 倍速下一逻辑帧的显示时长）
+        # 上，还是偶尔跳 2 帧。降到 8 之后实测周期 15.55 ms（64 Hz），翻了一倍。
+        # 关键规律：**只要 n 跨过 15.6，周期就翻倍**，所以别往回调大。
+        #
+        # 实测（--demo-axis，真实 Tk 主循环，6 秒，取每次 _tick 的挂钟间隔中位数）：
+        #     n=4  -> 15.53 ms (64.4 Hz)      n=8  -> 15.55 ms (64.3 Hz)
+        #     n=16 -> 30.53 ms (32.8 Hz)      n=33 -> 46.65 ms (21.4 Hz)
+        # 再往上就是被「整窗口重绘约 14.7 ms」卡住的上限，调 n 已经没用。
+        # CPU 代价很小：n=16 约占一个核的 5%，n=8 约 13%。
         self.monitor = monitor
         self.calib_path = calib_path
         self.settings_path = settings_path      # 回费速率设置文件（改档时写回这里）
@@ -112,12 +121,23 @@ class MonitorApp:
         self.calib_scale = None
         self.target = 'bar'
         self._tick_times = []      # 面板重绘的实测速率（见 _tick 开头）
+        self._tick_times = []      # 面板重绘的实测速率（见 _tick_body）
         self.overlay = None
         self._photos = {}
         # 打轴器：prompter 只管「当前帧号 -> 该看哪条轴」，这里只管画
         self.prompter = Teleprompter()
         self._timeline_path = None      # 当前轴来自哪个 md 文件；None = 来自面板输入框
         self._prom_flash_until = 0.0
+        # 刻度表的几何和配色。布局数学全在 akframe.scale 里（tools/check_scale.py
+        # 能脱离界面把它验一遍），这里只负责照着自己画。
+        self.scale_geom = ScaleGeom(width=420, height=280, ruler_w=50,
+                                    px_per_frame=SCALE_ZOOM_DEFAULT)
+        self.scale_theme = Theme()
+        self._prom_state = None     # (当前帧, 全部轴, 已触发几条)，换缩放时重画要用
+        # 刻度表本体是**一张 PIL 图**（akframe.scale_render），下面这两个是它贴到
+        # Canvas 上的那一个图元和那一份 PhotoImage —— 必须留引用，否则会被回收成空白。
+        self._scale_item = None
+        self._scale_photo = None
         self._note_hold = 0.0           # 提示行的保留截止时刻（见 _set_note）
         self._load_calib()
 
@@ -144,7 +164,12 @@ class MonitorApp:
         for lb in (self.lb_cycle, self.lb_perf, self.lb_warn, self.lb_note):
             lb.configure(wraplength=wrap)
         self.root.geometry('%dx%d+24+%d' % (win_w, win_h, max(10, (sh - win_h) // 2)))
-        if timeline_path:
+        # timeline_text 是直接把轴喂进面板输入框（演示模式用：轴不来自文件，
+        # 但仍然能在面板里改、能按 Ctrl+Enter 重解析）。
+        if timeline_text:
+            self._set_axis_text(timeline_text)
+            self.apply_axis_text()
+        elif timeline_path:
             self.load_timeline(timeline_path)
         # 把键盘焦点拿回主窗口：否则 Tk 可能把焦点给输入框，快捷键（C/S/T…）就失效了
         self.root.after(300, self.root.focus_set)
@@ -218,16 +243,29 @@ class MonitorApp:
             tk.Button(head, text=text, command=cmd, font=('Microsoft YaHei UI', 9),
                       bg='#262a33', fg=UI_FG, activebackground='#333947', relief='flat',
                       padx=8, pady=2).pack(side='right', padx=3)
-        # 大字 = 当前该看的那条轴；到帧瞬间整块反色 1.4 秒（肉眼能抓住）
-        self.lb_cue = self._label(prom, '—', 15, UI_DIM, True,
-                                  anchor='w', justify='left', wraplength=684)
-        self.lb_cue.pack(fill='x', pady=(6, 2))
-        # 下一条 + 倒计时（帧操真正用得上的是这个数）
+        # 刻度表：按帧等比例摆在一条竖直刻度上，指针（青线）固定不动，帧数上涨时
+        # 整条刻度往下滚 —— 所以轴点是从上方压下来、穿过指针、再变暗沉下去。
+        self.cv_scale = tk.Canvas(prom, width=self.scale_geom.width,
+                                  height=self.scale_geom.height,
+                                  bg=self.scale_theme.bg, highlightthickness=0)
+        self.cv_scale.pack(anchor='w', pady=(6, 2))
+        self._draw_scale_hint()
+
+        zrow = tk.Frame(prom, bg=UI_BG)
+        zrow.pack(fill='x', pady=(2, 0))
+        self._label(zrow, '刻度缩放', 9, UI_DIM).pack(side='left')
+        self.zoom_btns = {}
+        for ppf, text in SCALE_ZOOMS:
+            b = tk.Button(zrow, text=text, command=lambda v=ppf: self.set_scale_zoom(v),
+                          font=('Microsoft YaHei UI', 9), bg='#262a33', fg=UI_FG,
+                          activebackground='#333947', relief='flat', padx=6, pady=1)
+            b.pack(side='left', padx=3)
+            self.zoom_btns[ppf] = b
+        self._mark_zoom()
+        # 下一条 + 倒计时秒数。秒数要按当前倍速折算（2 倍速下 30 帧只有 0.5 秒，
+        # 子弹时间是恒定的 1/5），这一条 Canvas 里放不下，仍旧用 label 印。
         self.lb_cue_next = self._label(prom, '', 11, ACCENT, True, anchor='w')
         self.lb_cue_next.pack(fill='x')
-        self.lb_cue_list = tk.Label(prom, text='', bg=UI_BG, fg=UI_DIM,
-                                    font=('Consolas', 9), anchor='w', justify='left')
-        self.lb_cue_list.pack(fill='x')
 
         # ---- 轴文本输入：不想开文件就直接在这里写/粘，格式和 md 一样 ----
         editor = tk.Frame(self.root, bg=UI_BG)
@@ -678,9 +716,9 @@ class MonitorApp:
         """装上一份新轴（不管是 md 来的还是面板文本来的）。"""
         self.prompter.set_timeline(tl)
         self.lb_prom_title.configure(text='打轴器 — %s ｜ 0/%d' % (tl.name, len(tl)))
-        self.lb_cue.configure(text='等计数器走到第一条…', fg=UI_DIM, bg=UI_BG)
-        self.lb_cue_next.configure(text='')
-        self.lb_cue_list.configure(text='')
+        self._prom_state = None
+        self._draw_scale_hint()
+        self.lb_cue_next.configure(text='等计数器走到第一条：%d 条轴已就位' % len(tl))
 
     def _axis_escape(self, _event):
         """在输入框里按 Esc 只把焦点交回主窗口，不直接退出程序。"""
@@ -690,6 +728,59 @@ class MonitorApp:
     def _axis_apply_key(self, _event):
         self.apply_axis_text()
         return 'break'
+
+    # ---------------- 刻度表 ----------------
+
+    def _draw_scale_hint(self, text='导入一份轴文件（按 T），这里会显示按帧排布的刻度表'):
+        cv = self.cv_scale
+        g = self.scale_geom
+        cv.delete('all')
+        # 图元被删了，引用要一起清掉 —— 否则 _draw_scale 以为还能复用那个图元，
+        # 往一个已经不存在的 id 上贴图会直接抛 TclError。
+        self._scale_item = None
+        self._scale_photo = None
+        cv.create_text(g.width / 2, g.height / 2, text=text, width=g.width - 30,
+                       font=('Microsoft YaHei UI', 10), fill=self.scale_theme.faint)
+
+    def _mark_zoom(self):
+        cur = self.scale_geom.px_per_frame
+        for ppf, btn in self.zoom_btns.items():
+            on = abs(ppf - cur) < 1e-9
+            btn.configure(bg=self.scale_theme.accent if on else '#262a33',
+                          fg='#101418' if on else UI_FG)
+
+    def set_scale_zoom(self, ppf):
+        """换刻度缩放：1 个逻辑帧画几个像素。轴点挤在一起就调小，隔得远就调大。"""
+        self.scale_geom.px_per_frame = float(ppf)
+        self._mark_zoom()
+        if self._prom_state is not None:
+            frame_f, cues, done = self._prom_state
+            self._draw_scale(build_scale(frame_f, cues, done, self.scale_geom))
+        self._set_note('刻度缩放 1 帧 = %.1f px（指针往上能看到 %.0f 帧）'
+                       % (ppf, self.scale_geom.frames_up()))
+
+    def _draw_scale(self, lay, flash=False):
+        """把一张 Layout 贴到 Canvas 上：整张图用 PIL 画好，只留**一个**图元。
+
+        为什么不用 Canvas 的基本图元一格格画（刻度线 / 数字 / 标签 / 高亮约 95 个）：
+        那样每帧要 delete('all') 再重建 95 个 item，记账开销全在 Tk 那边。
+        改成贴一张 420x280 的图之后实测 `_draw_scale` 整体 **2.68 ms**（PIL 画 1.19 +
+        转 PhotoImage 0.24 + 贴 0.00），Canvas 上只剩一个 item。Canvas 坐标和物理像素是
+        1:1（实测 reqwidth 420 -> winfo_width 424，差的 4 是 2px 边框），不会糊。
+
+        别把这一条的收益想大了：面板真正的速率上限是「整窗口重绘约 14.7 ms」，跟刻度表
+        贴不贴图关系不大；真正的瓶颈是定时器粒度，见 docs 14.2 的实测表。
+
+        附带好处：离屏预览 tools/preview_scale.py 调的是同一个渲染器，
+        「预览图」就是这里真正画出来的东西。
+        """
+        self._scale_photo = ImageTk.PhotoImage(
+            render_scale(lay, self.scale_theme, flash=flash))
+        cv = self.cv_scale
+        if self._scale_item is None:
+            cv.delete('all')
+            self._scale_item = cv.create_image(0, 0, anchor='nw')
+        cv.itemconfigure(self._scale_item, image=self._scale_photo)
 
     def _update_prompter(self, res):
         if self.prompter.timeline is None or res is None:
@@ -701,17 +792,14 @@ class MonitorApp:
         if p.newly:
             self._prom_flash_until = time.time() + 1.4
         flash = time.time() < self._prom_flash_until
+        if len(p.newly) > 1:
+            self._set_note('这一拍一下跨过 %d 条轴' % len(p.newly), hold=2.0)
 
-        if p.current is None:
-            self.lb_cue.configure(text='还没到第一条轴', fg=UI_DIM, bg=UI_BG)
-        else:
-            # 说明太长会把下面的「下一条」顶出窗口，这里截一下（原文在 md 里没动）
-            text = _clip(p.current.text, 120) or '(这条轴没写说明)'
-            if len(p.newly) > 1:
-                text += '   ← 这一拍一下跨过 %d 条' % len(p.newly)
-            self.lb_cue.configure(text='%d 帧 ｜ %s' % (p.current.frame, text),
-                                  fg='#101418' if flash else ACCENT,
-                                  bg=ACCENT if flash else UI_BG)
+        # 刻度用带小数的帧号：满费走挂钟时那才是精确值，刻度也能一格一格地滑，而不是
+        # 整帧整帧地跳。轴逻辑那边照旧用整数（和 CSV 的绝对帧号是同一个）。
+        frame_f = res.elapsed_f if res.mode.startswith('clock') else float(res.elapsed)
+        self._prom_state = (frame_f, tl.cues, p.done)
+        self._draw_scale(build_scale(frame_f, tl.cues, p.done, self.scale_geom), flash)
 
         # 倒计时秒数按当前倍速折算：2 倍速下 30 帧只要 0.5 秒。
         # 子弹时间是**绝对**的 1/5（恒 6 帧/秒），与倍速设置无关 —— 所以这里要直接
@@ -723,12 +811,9 @@ class MonitorApp:
         else:
             secs = p.next_in / max(1e-6, 30.0 * rate)
             self.lb_cue_next.configure(
-                text='还有 %d 帧（≈ %.1f 秒）→ %s' % (p.next_in, secs,
-                                                      _clip(p.next_cue.text, 34)),
+                text='下一条 %s ｜ 还差 %d 帧（≈ %.1f 秒）'
+                     % (clip(one_line(p.next_cue.text), 40), p.next_in, secs),
                 fg=ACCENT)
-        self.lb_cue_list.configure(
-            text='\n'.join('%6d 帧  (+%d)  %s' % (c.frame, d, _clip(c.text, 34))
-                           for c, d in p.upcoming))
 
     def quit(self):
         try:
@@ -748,6 +833,22 @@ class MonitorApp:
         self._note_hold = time.perf_counter() + hold
 
     def _tick(self):
+        """包一层：面板刷新出错绝不能让界面**冻死**。
+
+        冻住的界面看起来就是「数字不动了」，用户会以为在漏帧/卡住 —— 而真实原因
+        只是某一行抛了个异常（实测踩过：ROI 预览拿到 None，_tick 崩掉之后
+        root.after 不再排下一次，整个面板就停在那儿，只有控制台里有 traceback）。
+        所以这里兜住异常：印到控制台、把错误写进提示行，然后照常排下一次刷新。
+        """
+        try:
+            self._tick_body()
+        except Exception as exc:                     # noqa: BLE001
+            traceback.print_exc()
+            self._set_note('面板刷新出错：%s（细节在控制台）' % exc, hold=0.0)
+        finally:
+            self.root.after(self.poll_ms, self._tick)
+
+    def _tick_body(self):
         # 面板自己的重绘速率，用来核对「显示跟不跟得上游戏」：
         # 1 倍速下游戏每秒走 30 个逻辑帧，面板必须显著高于 30 Hz 才可能每拍只跳 1 帧。
         # 实测过 60ms 的旧值（16.7 Hz）会每拍跳 2 帧，看着就像在漏帧。
@@ -898,12 +999,17 @@ class MonitorApp:
         self.lb_cycle.configure(text='费用周期 ' + ' ｜ '.join(parts))
 
     def _render_previews(self, upd, lay):
-        if upd.bar_img is None:
+        # 三张图**各自判空**：LiveUpdate 只保证「读到画面时」各字段有值，
+        # 某一路没有（比如演示模式只合成了一部分 ROI）不该把整个 _tick 打挂 ——
+        # _tick 一崩，界面就整个冻住，连报错都只在控制台里（踩过）。
+        if upd.bar_img is not None:
+            self._show(self.cv_bar, upd.bar_img, mark_rows=(5, 12))
+        if lay is None:
             return
-        self._show(self.cv_bar, upd.bar_img, mark_rows=(5, 12))
-        if lay is not None:
+        if upd.pause_img is not None:
             self._show(self.cv_pause, upd.pause_img,
                        mark_rows=lay.pause.band_rows(*PAUSE_SHAPE_BAND))
+        if upd.speed_img is not None:
             self._show(self.cv_speed, upd.speed_img,
                        mark_rows=lay.speed.band_rows(*SPEED_DIGIT_BAND),
                        mark_cols=lay.speed.cols_range(*SPEED_DIGIT_COLS))
