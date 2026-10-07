@@ -19,6 +19,7 @@ import csv
 import os
 import threading
 import time
+import traceback
 from dataclasses import dataclass
 
 import numpy as np
@@ -63,6 +64,14 @@ class LiveStats:
     # 「第 0 帧不读、第一帧补了两帧」）。所以这个数必须露出来，漏帧才有据可查。
     gap_ms: float = 0.0
     gap_max_ms: float = 0.0
+    # 采样循环的心跳：每转一圈 +1，**不管这一拍读没读到画面**。界面靠它区分
+    # 「游戏暂停所以数字不动」和「采样线程已经死了」——后者以前是看不出来的。
+    ticks: int = 0
+    # 循环里被兜住的异常（见 run）。有控制台时会打完整调用栈，这里留最近一条给界面，
+    # 因为打包后用 pythonw.exe 跑**根本没有控制台**，不给界面看就彻底静默了。
+    errors: int = 0
+    last_error: str = ''
+    last_error_t: float = 0.0
 
 
 def _manual_cost_rate(spec):
@@ -140,14 +149,16 @@ class LiveMonitor:
     def set_layout(self, layout: Layout, keep_elapsed: bool = True) -> None:
         """换布局（窗口缩放、人工校准后）。会重建外接矩形和计数器。"""
         layout.validate()
-        elapsed = self.counter.elapsed if (keep_elapsed and self.counter) else 0
+        # 只留引用，最后一并 adopt 过去：**不能只搬 elapsed**，理由见 Counter.adopt
+        old = self.counter if keep_elapsed else None
         manual = _manual_cost_rate(self.cost_rate)
         self.layout = layout
         self._union = union_rect([layout.bar, layout.pause, layout.speed])
         self.counter = Counter(layout.model_bar_w, fps=max(1.0, self.rate or 60.0),
                                frames_per_cost=manual or DEFAULT_FRAMES_PER_COST,
                                bar_width_frac=layout.bar_width_f, visible_w=layout.bar.w)
-        self.counter.elapsed = elapsed
+        if old is not None:
+            self.counter.adopt(old)
         self.counter.resync()
         self.counter.set_manual_pause(self.manual_pause)
         self._apply_cost_rate()
@@ -356,15 +367,63 @@ class LiveMonitor:
         self.latest = LiveUpdate(t, None, None, None, None, 0.0, note, False)
         return self.latest
 
+    def _on_error(self, exc: BaseException, misses: int) -> None:
+        """一次采样抛异常之后的收尾：记账 + 自愈 + 让界面看得见。
+
+        为什么要丢掉 window / _grabber：采样里的异常绝大多数都是「窗口动了、被最小化、
+        换了进程、分辨率变了」这一类，缓存下来的窗口句柄和 DIB 全都不作数了。全部丢掉，
+        下一拍 _resolve_window 会重新找一次窗口 —— 多数情况下不用人管就自己好了。
+        """
+        self.stats.errors += 1
+        self.stats.last_error = '%s: %s' % (type(exc).__name__, exc)
+        self.stats.last_error_t = time.perf_counter() - self._t0
+        if misses == 1:
+            # 只在第一次失败时打完整栈：持续失败的话每拍打一遍会把控制台刷爆，
+            # 而打包后本来就没有控制台，所以 stats.last_error 还要留给界面显示。
+            traceback.print_exc()
+        self.window = None
+        self._grabber = None
+        self._last_window_scan = 0.0
+        if self.counter is not None:
+            self.counter.resync()          # 相位不可信了，重新起锚，不猜
+        self.stats.resyncs += 1
+        self._unreadable_since = None
+        t = self.latest.t if self.latest is not None else 0.0
+        self.latest = LiveUpdate(t, None, None, None, None, 0.0,
+                                 '采样异常（连续第 %d 次）：%s' % (misses, self.stats.last_error),
+                                 False)
+
     # ---------- 循环 ----------
 
     def run(self, stop: threading.Event = None) -> None:
+        """采样主循环。**一次异常都不许让它退出。**
+
+        实测踩过这个坑（2026-10-07，用户报「有些时候会莫名卡死」）：原来这里没有兜异常，
+        _sample() 只要抛一次（窗口被拖走/最小化时 BitBlt 失败、ROI 切出空数组、
+        counter 里的断言……）这个 daemon 线程就**静默退出**了。而面板是另一个
+        root.after 循环在跑，看起来一切正常 —— 「面板 64 Hz」还在跳、ROI 预览还挂着
+        最后一帧，只有数字和「采样 N 次」一起冻住。于是就成了「莫名卡死」：界面上没有
+        任何一处告诉你采样已经停了。
+
+        更糟的是打包后用 pythonw.exe 跑**没有控制台**，traceback 连个地方都去不了。
+
+        所以现在：每一拍都兜住异常、记进 stats、**丢掉窗口和抓屏器的缓存**（绝大多数
+        异常都是「窗口动了 / 换了个进程」这一类，下一拍重新找一次就好了），然后继续。
+        连续失败时稍微让出 CPU，别把核心烧在必然失败的循环上。
+        """
         stop = stop or self._stop
         period = 1.0 / self.rate if self.rate > 0 else 0.0
+        misses = 0
         while not stop.is_set():
             t_start = time.perf_counter()
-            self._sync_csv()
-            self._sample()
+            self.stats.ticks += 1
+            try:
+                self._sync_csv()
+                self._sample()
+                misses = 0
+            except Exception as exc:                     # noqa: BLE001
+                misses += 1
+                self._on_error(exc, misses)
             if period > 0:
                 # 注意：Windows 上 threading.Event.wait 的时间粒度是 15.6ms（系统时钟节拍），
                 # 用它配速只能跑到 ~33Hz。Python 3.11+ 的 time.sleep 走的是高精度等待定时器
@@ -374,13 +433,22 @@ class LiveMonitor:
                 while remain > 0 and not stop.is_set():
                     time.sleep(min(remain, 0.05))
                     remain = deadline - time.perf_counter()
+            elif misses:
+                time.sleep(0.001)      # rate=0（不限速）时才需要，正常配速自带等待
         self._close_csv()
 
-    def start(self) -> None:
+    def start(self, reset_clock: bool = True) -> None:
+        """启动采样线程。
+
+        reset_clock=False 时**保留原来的时间基准 _t0**：重新校准会把一个已经死掉的线程
+        拉起来，那时候 t 已经走到几百秒了，重置 _t0 会让 t 倒退回 0 —— Counter 的挂钟
+        通道拿到一个倒退的时间戳，会算出一个负的 dt。
+        """
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
-        self._t0 = time.perf_counter()
+        if reset_clock:
+            self._t0 = time.perf_counter()
         self._thread = threading.Thread(target=self.run, name='akframe-live', daemon=True)
         self._thread.start()
 
@@ -389,6 +457,55 @@ class LiveMonitor:
         if self._thread:
             self._thread.join(timeout=2.0)
             self._thread = None
+
+    @property
+    def alive(self) -> bool:
+        """采样线程还活着吗。
+
+        界面靠它 + stats.ticks 区分两件以前长得一模一样的事：「游戏暂停所以数字不动」
+        和「采样线程已经死了」。分不开的话，用户看到的就只有「莫名卡死」。
+        """
+        th = self._thread
+        return bool(th is not None and th.is_alive())
+
+    def recalibrate(self) -> str:
+        """重新校准：重找窗口 -> 按当前客户区重算 ROI -> 重启采样线程 -> 重新起锚。
+
+        什么时候用：游戏窗口被拖走 / 改了大小、换了分辨率、切了全屏，或者采样线程因为
+        某次异常停了（见 run 的注释）。全程**保留已经数出来的帧数** —— 只是把「从屏幕
+        哪块读、当前相位对到哪一帧」重新对一遍；要归零请用清零那个按钮。
+
+        返回一句给界面显示的结果。
+        """
+        before = self.counter.elapsed if self.counter is not None else 0
+        # 1) 丢掉缓存，强制重新找窗口（理由同 _on_error）
+        self.window = None
+        self._grabber = None
+        self._last_window_scan = 0.0
+        win = self._resolve_window()
+        if win is None:
+            note = '重新校准：没找到窗口（%s）—— 采样线程会继续等它回来' % self.exe
+        else:
+            try:
+                self.set_layout(self.build_layout(*win.client_size), keep_elapsed=True)
+            except Exception as exc:                 # noqa: BLE001
+                note = '重新校准：按 %dx%d 重算 ROI 失败（%s: %s）' % (
+                    win.client[2], win.client[3], type(exc).__name__, exc)
+            else:
+                x, y, w, h = win.client
+                note = ('重新校准完成：客户区 %dx%d @(%d,%d)，已数的 %d 帧不变'
+                        % (w, h, x, y, before))
+        if self.counter is not None:
+            self.counter.resync()
+        # 2) 线程死了就拉起来 —— 这是「卡死之后点一下就活」的关键那一下
+        if not self.alive:
+            self.start(reset_clock=False)
+            note += '；采样线程已重启'
+        # 3) 清掉上一次的异常记录，界面回到干净状态
+        self.stats.errors = 0
+        self.stats.last_error = ''
+        self.stats.last_error_t = 0.0
+        return note
 
     # ---------- CSV 记录 ----------
 

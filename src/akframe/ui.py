@@ -12,7 +12,7 @@
     P 暂停计数（数字按住不动）
     K 显示/隐藏屏幕上的 ROI 框    S 保存校准   R 恢复默认
     C 清零计数    L 开始/停止记录 CSV    P 暂停/继续计数（手动）
-    T 导入 md 轴文件    Esc 退出
+    T 导入 md 轴文件    F5 重新校准（采样停了 / 窗口动了）    Esc 退出
 
 回费速率（减费 tag）：默认 30 帧/费（1 秒 1 费）。点了「回费速度 -50% / -75%」的 tag
 时，在面板「回费速率」那行选 60 / 120，或直接填数字后点「应用」——改完立刻生效，
@@ -60,6 +60,7 @@ UI_FG = '#e6e6e6'
 UI_DIM = '#8b93a1'
 ACCENT = '#39d98a'
 WARN = '#ffb020'
+ERR = '#ff5c5c'          # 采样线程停了这类「必须去看一眼」的状态
 ROI_COLORS = {'bar': '#39d98a', 'pause': '#4da3ff', 'speed': '#ff9f43'}
 # 校准目标 / ROI 框 / 预览按这个顺序走。
 ROI_ORDER = ('bar', 'pause', 'speed')
@@ -68,6 +69,10 @@ ROI_ORDER = ('bar', 'pause', 'speed')
 SCALE_ZOOMS = ((0.5, '0.5x'), (1.0, '1x'), (1.5, '1.5x'), (3.0, '3x'))
 SCALE_ZOOM_DEFAULT = 1.5
 
+# 采样线程多久没有心跳就判「停了」。选 1 秒：正常采样 120Hz（心跳每 8ms 一次），
+# 1 秒 = 120 次心跳一次都没来，绝不可能是抖动；而 1 倍速下一个逻辑帧才 33ms，
+# 卡满 1 秒已经是肉眼可见的停顿，必须提示。
+STALL_WARN_S = 1.0
 
 
 # 「自己填一个数」的那个下拉项。选中它不切档，只把光标丢进输入框。
@@ -120,7 +125,6 @@ class MonitorApp:
         self.deltas = {k: [0, 0, 0, 0] for k in ROI_ORDER}
         self.calib_scale = None
         self.target = 'bar'
-        self._tick_times = []      # 面板重绘的实测速率（见 _tick 开头）
         self._tick_times = []      # 面板重绘的实测速率（见 _tick_body）
         self.overlay = None
         self._photos = {}
@@ -128,6 +132,9 @@ class MonitorApp:
         self.prompter = Teleprompter()
         self._timeline_path = None      # 当前轴来自哪个 md 文件；None = 来自面板输入框
         self._prom_flash_until = 0.0
+        # 采样线程的存活看门狗（见 _tick_body）：盯 stats.ticks 这个心跳。
+        self._last_ticks = -1
+        self._stall_since = 0.0
         # 刻度表的几何和配色。布局数学全在 akframe.scale 里（tools/check_scale.py
         # 能脱离界面把它验一遍），这里只负责照着自己画。
         self.scale_geom = ScaleGeom(width=420, height=280, ruler_w=50,
@@ -304,6 +311,7 @@ class MonitorApp:
                           ('保存校准', self.save_calib),
                           ('恢复默认', self.reset_calib),
                           ('换窗口', self.pick_window),
+                          ('重新校准', self.recalibrate),
                           ('退出', self.quit)):
             b = tk.Button(btns, text=text, command=cmd, font=('Microsoft YaHei UI', 9),
                           bg='#262a33', fg=UI_FG, activebackground='#333947',
@@ -352,7 +360,7 @@ class MonitorApp:
         self.lb_help = self._label(
             self.root,
             'Tab 切 ROI ｜ 方向键移动/Shift 缩放 ｜ K ROI 框 ｜ S 保存 ｜ R 默认 ｜ C 清零 ｜ '
-            'L 记录 ｜ P 暂停计数 ｜ T 导入轴 ｜ 下框可直接写轴（Ctrl+Enter 应用）',
+            'L 记录 ｜ P 暂停计数 ｜ T 导入轴 ｜ F5 重新校准 ｜ 下框可直接写轴（Ctrl+Enter 应用）',
             9, UI_DIM, wraplength=694, justify='left')
         self.lb_help.pack(fill='x', padx=10, pady=(2, 8))
 
@@ -379,6 +387,7 @@ class MonitorApp:
                         ('c', self.clear_count), ('C', self.clear_count),
                         ('l', self.toggle_csv), ('L', self.toggle_csv),
                         ('p', self.toggle_manual_pause), ('P', self.toggle_manual_pause),
+                        ('<F5>', self.recalibrate),
                         ('t', self.import_timeline), ('T', self.import_timeline)):
             r.bind(seq, self._guard(lambda _e, f=fn: f()))
         for seq in ('<Left>', '<Right>', '<Up>', '<Down>',
@@ -630,6 +639,23 @@ class MonitorApp:
         tk.Button(top, text='选这个窗口', command=choose, font=('Microsoft YaHei UI', 10),
                   bg='#262a33', fg=UI_FG, relief='flat').pack(pady=(0, 8))
 
+    def recalibrate(self):
+        """重新校准：把「从屏幕哪块读、当前相位对到哪一帧」重新对一遍。
+
+        按钮和 F5 都走这里，真正的活在 LiveMonitor.recalibrate 里：重找窗口、
+        按当前客户区重算 ROI、采样线程死了就拉起来。**已经数出来的帧数不动** ——
+        它的语义是「重新对准」，不是「清零」（清零有单独那个按钮）。
+
+        什么时候需要它：游戏窗口被拖走/改了大小、换了分辨率，或者采样线程因为某次
+        异常停了 —— 那时状态行会红着告诉你（见 _tick_body 的看门狗）。
+        """
+        note = self.monitor.recalibrate()
+        # 让看门狗从这一刻重新计时：否则刚重开就会被「之前停了 8 秒」立刻再报一次。
+        self._last_ticks = self.monitor.stats.ticks
+        self._stall_since = 0.0
+        self._set_note(note, hold=4.0)
+        return note
+
     # ---------------- 打轴器 ----------------
 
     def import_timeline(self):
@@ -862,6 +888,20 @@ class MonitorApp:
             ui_hz = (len(self._tick_times) - 1) / span if span > 0 else 0.0
         upd = self.monitor.latest
         st = self.monitor.stats
+        # ---- 采样线程的存活看门狗 ----
+        # 为什么必须有这条：采样跑在**另一个线程**里，它一旦死了，面板这边完全看不出来 ——
+        # root.after 循环照常转（「面板 64 Hz」还在跳）、ROI 预览还挂着最后一帧，只有数字
+        # 和「采样 N 次」一起冻住。用户看到的就是「莫名卡死」（2026-10-07 实测报上来）。
+        # 所以盯 stats.ticks 这个心跳（每转一圈 +1，**读不到画面也会涨**）：
+        #     ticks 不涨 -> 线程死了 / 卡住了，这是异常，必须吼出来；
+        #     ticks 在涨 -> 只是这一拍没读到画面，那是另一回事，_unreadable 已经写在提示里。
+        if st.ticks != self._last_ticks:
+            self._last_ticks = st.ticks
+            self._stall_since = 0.0
+        elif self._stall_since == 0.0:
+            self._stall_since = now
+        stall_s = (now - self._stall_since) if self._stall_since else 0.0
+        sampling_dead = (not self.monitor.alive) or stall_s >= STALL_WARN_S
         # 「最大间隔」的告警门限必须跟着当前倍速走：采样间隔一旦超过「一个逻辑帧在屏幕上
         # 停留的时长」就会整帧漏采。停留时长 = 1000 / (30 x 倍速)：1X -> 33.3ms、
         # 2X -> 16.7ms。门限写死 33.3ms 的话，2 倍速下明明在漏采也不会报警。
@@ -935,6 +975,16 @@ class MonitorApp:
                     res.digit_ratio, '%.3f' % res.corr_2x if res.corr_2x == res.corr_2x else '—'))
             self.lb_warn.configure(text=('告警：' + res.warn) if res.warn else '')
             self._update_cycle(res)
+        else:
+            # 这一拍没读到画面（窗口不在 / 还没进关卡 / 被最小化）。状态行**必须**说清楚，
+            # 不能留着上一条：采样线程刚被「重新校准」救活、但还没读到画面时，上一条
+            # 正好是红色的「采样已停」，留着的话用户会以为没救活 —— 实测踩到
+            # （tools/check_recover.py 第 5 组就是这个场景）。真死了的话，
+            # 下面 sampling_dead 那段会把它盖回红色。
+            self.lb_state.configure(
+                text='状态 采样正常，这一拍没读到画面（%s）'
+                     % clip(one_line(upd.note or '未就绪'), 40),
+                fg=UI_DIM)
         self._update_prompter(upd.result)
         # 「最大间隔」是漏帧的直接指标：采样间隔一旦超过一个逻辑帧的显示时长，
         # 就有可能整帧没被采到（表现：某一拍一次 +2）。门限见上面的 cur_m。
@@ -942,10 +992,10 @@ class MonitorApp:
         jam = st.gap_max_ms >= jam_thr
         self.lb_perf.configure(
             text='采样 %.1f Hz ｜ 最大间隔 %s%.1f ms%s ｜ 面板 %.0f Hz ｜ 抓屏 %.1f ms '
-                 '｜ 采样 %d 次 ｜ 读不到累计 %.2f s'
+                 '｜ 采样 %d 次 ｜ 心跳 %d ｜ 读不到累计 %.2f s'
                  % (st.hz, '⚠ ' if jam else '', st.gap_max_ms,
                     '（超过 %.1f ms，可能漏采）' % jam_thr if jam else '',
-                    ui_hz, st.grab_ms, st.samples, st.unreadable_s),
+                    ui_hz, st.grab_ms, st.samples, st.ticks, st.unreadable_s),
             fg=WARN if jam else UI_DIM)
         win = self.monitor.window
         lay = self.monitor.layout
@@ -961,7 +1011,17 @@ class MonitorApp:
         self._render_previews(upd, lay)
         if self.overlay is not None:
             self._draw_overlay()
-        self.root.after(self.poll_ms, self._tick)
+
+        # 放在最后：上面那一段会按「正常」把状态行和提示行刷一遍，这里再覆盖掉。
+        if sampling_dead:
+            # 「数字不动」和「游戏暂停」在面板上长得一模一样 —— 这一条就是把它们分开。
+            # 采样停了就别再显示「已暂停」，直说采样停了，并给出下一步动作。
+            why = st.last_error or '采样线程已退出'
+            self.lb_state.configure(
+                text='状态 采样已停 %.1fs（%s）→ 点「重新校准」或按 F5'
+                     % (stall_s, why), fg=ERR)
+            self._set_note('采样线程停了：%s。按 F5 / 点「重新校准」重开，'
+                           '已经数出来的帧数不会丢' % why, hold=0.0)
 
     def _update_cycle(self, res):
         """更新「费用周期」那一行：一费几帧 + 本费走到第几帧。

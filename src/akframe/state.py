@@ -467,6 +467,28 @@ class Counter:
             # 不该把关卡判定一起清掉（否则恢复后要等费用条再出现一次才开始计数）
             self.resync(keep_battle=True)
 
+    def adopt(self, other: 'Counter') -> None:
+        """把另一个 Counter 已经数出来的帧数接过来（换布局 / 重新校准时用）。
+
+        为什么不能只搬 elapsed：step() 每一拍都用 pixel_frames + clock_frames **重算**
+        elapsed（见 step 末尾）。只赋一个 elapsed 的话，下一拍立刻被 0 + 0 覆盖 ——
+        表现就是「换个窗口 / 重新校准一下，数字从 0 重新数」。
+        实测（2026-10-07）：LiveMonitor.set_layout(keep_elapsed=True) 原来只写了
+        self.counter.elapsed = elapsed，所以这个「保留已数帧数」一直是假的。
+
+        逐帧的费用周期长度也一起带过去：它是按**帧**记的，和像素几何无关（换分辨率
+        不该把「一费 N 帧（中位）」这个统计清空）。last_m 同理 —— 读不到倍速时靠它沿用，
+        换布局时清回 1.0 会在满费挂钟通道上按错误的倍速算一拍。
+        """
+        self.pixel_frames = other.pixel_frames
+        self.clock_frames = other.clock_frames
+        self._clock_frac = other._clock_frac
+        self.elapsed = self.pixel_frames + self.clock_frames
+        self.elapsed_f = self.elapsed + self._clock_frac
+        self.cycle_lengths = list(other.cycle_lengths)
+        self._cycle_seen = other._cycle_seen
+        self.last_m = other.last_m
+
     def resync(self, keep_battle: bool = False) -> None:
         """重新锚定。
 
