@@ -4,6 +4,8 @@ out/
 
 # ---- 个人设置（各人机器上的回费速率不一样，别提交）----
 cost_rate.json
+# ROI 校准跟机器 / 分辨率绑定（换台机器、换个窗口大小就得重量一次），同样是各人自己的
+layout_calib.json
 
 # ---- Python ----
 __pycache__/
