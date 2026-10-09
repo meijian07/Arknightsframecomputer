@@ -6,6 +6,11 @@ out/
 cost_rate.json
 # ROI 校准跟机器 / 分辨率绑定（换台机器、换个窗口大小就得重量一次），同样是各人自己的
 layout_calib.json
+# 录像的客户区校准（按画面尺寸归档，同样是各人机器自己的）
+video_calib.json
+# 读窗口的校准（按「进程名 + 客户区尺寸」归档：播放器窗口里的画面缩放多少跟
+# 窗口大小、播放器设置都有关，同样不能提交）
+window_calib.json
 
 # ---- Python ----
 __pycache__/

@@ -59,6 +59,11 @@ class SlotShape:
     jitter: float          # 左边缘抖动（平均绝对偏差，px）
     support: int           # 最大宽度有多少帧支持
     clipped: bool = False  # 白块顶到探针边框 —— 宽度只能是下限
+    # 具体是哪一边被裁掉了。录像里非常常见：游戏窗口比画面还宽（客户区右边缘在画面外），
+    # 条槽右端跟着跑出画面，这时「量出来的宽度」只是下限，不能当成条槽真宽用。
+    # 但左边缘仍然可信（除非左边缘也被裁掉）—— 费用条的相位全靠它。
+    clipped_left: bool = False
+    clipped_right: bool = False
 
     @property
     def w(self) -> int:
@@ -131,11 +136,13 @@ def measure_slot(frames: np.ndarray, pred_bar: Rect, x0: int = 0, y0: int = 0):
                      band_top=y0 + band[0], band_bottom=y0 + band[-1],
                      frames=n, fill_frames=fill_frames, jitter=jitter,
                      support=support,
-                     clipped=(left <= 0) or (right >= sw - 1))
+                     clipped=(left <= 0) or (right >= sw - 1),
+                     clipped_left=(left <= 0), clipped_right=(right >= sw - 1))
 
 
 def calibrate_video(video: str, ffmpeg: str, client_size=None, ui_scaler: float = 1.0,
-                    size=None, frames: int = MAX_FRAMES, offset=None):
+                    size=None, frames: int = MAX_FRAMES, offset=None, stride: int = 1,
+                    strip_fn=None, info=None):
     """量一段录像，返回一份校准报告（dict）；量不出来返回 None。
 
     client_size  客户区尺寸 (w, h)。不传就当成「这段录像正好就是客户区」。
@@ -143,10 +150,16 @@ def calibrate_video(video: str, ffmpeg: str, client_size=None, ui_scaler: float 
                  （align.detect_offset）。自动对齐会**自己解**这个原点，
                  所以那份报告里的锚点（距底 / 距右）不能当真，只有条宽可信 ——
                  报告里用 auto_offset 标出来。
+    stride       每 stride 帧取一帧来量（默认 1 = 连着取）。录像开头是菜单 / 剧情
+                 的时候，连着取的前几百帧里根本没有费用条，放大步长才能扫到后面。
+                 代价是要解码整段录像，所以只在前一种量不出来时再用。
+    strip_fn     换帧来源用（录像 = ffmpeg 抽，窗口 = 屏幕抓）；info 传 probe_video 的
+                 结果可以省一次探测（窗口没有文件可探）。
     """
     from .align import detect_offset
 
-    info = probe_video(ffmpeg, video)
+    if info is None:
+        info = probe_video(ffmpeg, video)
     if size is None:
         size = info.size
     if not size:
@@ -158,7 +171,8 @@ def calibrate_video(video: str, ffmpeg: str, client_size=None, ui_scaler: float 
     auto = offset is None
     if auto:
         found = detect_offset(video, ffmpeg, client_size=(cw, ch),
-                              ui_scaler=ui_scaler, size=(vw, vh))
+                              ui_scaler=ui_scaler, size=(vw, vh),
+                              strip_fn=strip_fn, info=info)
         if found is None:
             return None
         ox, oy = int(found[0]), int(found[1])
@@ -173,8 +187,8 @@ def calibrate_video(video: str, ffmpeg: str, client_size=None, ui_scaler: float 
     if x1 - x0 < 16 or y1 - y0 < 8:
         return None
     rect = Rect(x0, y0, x1 - x0, y1 - y0)
-    strip = extract_strip(ffmpeg, video, rect, 1, frames=frames)
-    slot = measure_slot(strip, base_v.bar, x0, y0)
+    strip = strip_fn or (lambda r, st, n: extract_strip(ffmpeg, video, r, st, n))
+    slot = measure_slot(strip(rect, stride, frames), base_v.bar, x0, y0)
     if slot is None:
         return None
 
@@ -205,6 +219,9 @@ def calibrate_video(video: str, ffmpeg: str, client_size=None, ui_scaler: float 
         'fill_frames': slot.fill_frames,
         'probe': rect,
         'clipped': slot.clipped,
+        # 量出来的条槽本体（左 / 右 / 条身上下行）。调用方要靠它把费用条 ROI 钉到
+        # 像素上 —— 报告里那些 client/offset 是「拍」出来的，slot 才是尺子本身。
+        'slot': slot,
     }
 
 

@@ -100,6 +100,18 @@ BAR_PRESENT_STATES = ('TRACK', 'MAX', 'MAX_FADE')
 PIXEL_TRACK_MODES = ('pixel', 'pixel-jump', 'bar-reject', 'wrap', 'wrap-missed')
 BATTLE_HOLD_FRAMES = 120     # 1..2 秒 @60Hz 采样：足够覆盖关卡内的短暂读不到
 
+# ---- 关卡判定的第二道闸：游戏 HUD 还在不在 ----
+# 只有「费用条被画出来」不够，两层理由都有实测：
+#   ① 菜单 / 仓库 / 切场景的条 ROI 会压到别的高亮 UI，读出一条**死的**假白条
+#      （2026-10-05 11:02 那段会话的 CSV：fill=154 连着 3.1 秒、fill=215 连着 1.5 秒，
+#      条状态是 TRACK）—— 只按「条在不在」判就会一路放行；
+#   ② 换一条仿真更狠：关卡外的画面（桌面 / OBS 窗口 / 加载 / 选关）在**倍速键**的
+#      箭头带里也有 0.028~0.093 的亮点占比，旧代码据此判成子弹时间。
+# 关卡里 HUD 一定画着：暂停键的 ▶ / ❚❚ 字形（实测两段共 3092 帧，0 帧缺失，
+# 最弱一帧的实心占比 0.031），或者倍速键的数字 / 实心箭头。
+# 所以「从关卡外进关卡」只认 HUD；已经在关卡里才放宽成「HUD 或者条在动」。
+BAR_MOVE_HOLD = 60           # 条「动过」之后还算在动的拍数（1 秒 @60Hz）
+
 PROBE_MIN_SECONDS = 2.0      # 实测帧率探针至少要攒这么多「未暂停」等效秒才敢报数
 
 
@@ -125,6 +137,8 @@ class FrameResult:
     phase: float = 0.0   # 本帧相位（调试用，不进 CSV）
     err: int = 0         # 相位重同步的匹配误差 px（调试用，不进 CSV）
     elapsed_f: float = 0.0   # 累计逻辑帧（带小数）：满费挂钟攒下的不足 1 帧的余量
+    pause_drawn: bool = True   # 暂停键画出来了没有（面板要能说「按钮 未画出」）
+    pause_solid: float = 0.0   # 上面那个判定用的实心占比（面板显示，方便对着调阈值）
 
     def as_row(self) -> list:
         return [self.idx, '%.4f' % self.t, self.fill, self.bar_state,
@@ -188,6 +202,10 @@ class Counter:
         self._run_prev = None      # 上一拍的运行/暂停判定（滞回用）
         self._clock_frac = 0.0     # 满费挂钟通道余量（单位：逻辑帧，跨暂停接着攒）
         self._battle_hold = 0      # 还要多少拍之内算「在关卡里」（见 BAR_PRESENT_STATES）
+        self._move_hold = 0        # 「条在动」还剩多少拍（见 BAR_MOVE_HOLD）
+        self._last_fill = None     # 上一拍的条宽 / 状态：用来判「条这一拍动没动」
+        self._last_state = None
+        self._bullet = False       # 这一拍的子弹时间判定（判据在 read_speed 里）
         self._started = False
         # 清零之后的第一拍「起锚」不许把清零**之前**数过的帧补回来：清零的语义是
         # 「从这一刻起从 0 开始数」。不拦的话数字会停在 1/2 上不动
@@ -236,9 +254,18 @@ class Counter:
         self._since_accept += dt
 
         # 倍速读数**只**给满费挂钟通道定速率，不参与像素通道（像素通道天然免疫倍速）。
-        # 注意「倍速键上没画数字」只能推出「这一刻不知道倍速」，不能据此当成 0.2 倍速：
-        # 暂停菜单里也只剩三条箭头（实测 23.53 那段录像全程如此），
-        # 按 1/5 打折就是 5 倍的系统偏差，比不计数严重得多。
+        # 三种情况分得很开，判据全在 read_speed 里（都用**实心**占比，不用亮点占比）：
+        #   画着数字      -> 30 x 数字
+        #   只有实心箭头  -> 子弹时间，恒 6 帧/秒，与倍速设置无关
+        #   什么都没有    -> 不知道速率，冻结不猜
+        # 「倍速键上没画数字」**不等于**子弹时间：暂停菜单里也只剩三条箭头（实测 23.53
+        # 那段录像全程如此），按 1/5 打折就是 5 倍的系统偏差，比不计数严重得多。
+        # 这里不加「数字消失够久才算子弹时间」那种时间闸：实测两段录像里子弹时间的
+        # 进出都是**一拍之内**完成的（22-20-20 第 100 帧 2X->>>>、第 1091 帧 >>>->2X：
+        # 数字带占比 0.2721 -> 0.0014、实心箭头 0.0499 -> 0.0316，同一拍切换）。
+        # 加时间闸只会把每次进子弹时间的前 0.25 秒（1 倍速 7.5 帧、2 倍速 15 帧）
+        # 按正常倍速记错 —— 那正是「一费 30 帧变成 62 帧」这一类偏差的来源。
+        self._bullet = bool(speed.bullet)
         m_now = float(speed.m) if speed.m == speed.m else None
         if m_now is not None:
             self.last_m = m_now
@@ -281,14 +308,28 @@ class Counter:
                 grey146=bar.grey146, grey88=bar.grey88,
                 pause_ratio=pause.ratio, running=running,
                 digit_ratio=speed.digit_ratio, corr_2x=speed.corr_2x,
-                has_digit=speed.has_digit, m=m, bullet=speed.bullet,
+                has_digit=speed.has_digit, m=m, bullet=self._bullet,
                 mode='manual-pause', delta=0, elapsed=self.elapsed,
                 elapsed_f=self.elapsed_f, warn='',
-                phase=(self.timing.phase() if self.timing else 0.0), err=0)
+                phase=(self.timing.phase() if self.timing else 0.0), err=0,
+                pause_drawn=pause.drawn, pause_solid=pause.solid)
 
         # ---- 关卡判定 ----
-        # 只有「费用条被画出来」才算在关卡里。关卡外一帧都不记（见 BAR_PRESENT_STATES）。
-        if bar.state in BAR_PRESENT_STATES:
+        #   ① 费用条被画出来（BAR_PRESENT_STATES）；
+        #   ② 游戏 HUD 画着（暂停键的 ▶/❚❚ 字形，或倍速键的数字 / 实心箭头）。
+        # 「从关卡外**进**关卡」只认 ②：菜单 / 仓库 / 切场景压出来的亮块是死的 ——
+        # 它可能让条读数动起来，但画不出游戏 HUD，所以永远进不来。这条就是根治
+        # 「在别的界面也计数」的那条规则。进了关卡之后放宽成「② 或条这一拍确实在动」，
+        # 兜住关卡内 HUD 偶尔读不到的那么一两拍（实测 22-20-20 第 55~56 帧就是）。
+        bar_moving = (bar.state != self._last_state) or (bar.fill != self._last_fill)
+        self._last_state, self._last_fill = bar.state, bar.fill
+        if bar_moving:
+            self._move_hold = BAR_MOVE_HOLD
+        elif self._move_hold > 0:
+            self._move_hold -= 1
+        hud = bool(pause.drawn or speed.drawn)
+        keep = hud or (self._battle_hold > 0 and self._move_hold > 0)
+        if bar.state in BAR_PRESENT_STATES and keep:
             self._battle_hold = BATTLE_HOLD_FRAMES
         elif self._battle_hold > 0:
             self._battle_hold -= 1
@@ -299,6 +340,10 @@ class Counter:
             if self._prev_mode != 'idle':
                 self.resync()
             mode, delta = 'idle', 0
+            if bar.state in BAR_PRESENT_STATES:
+                # 画面里「有东西」但不是关卡（菜单 / 仓库 / 切场景压到高亮 UI）。
+                # 单独标一下：面板能直接说「不在关卡里」，而不是让人以为条真读到了。
+                warn = 'not-battle'
         elif not self._started:
             k = self._start(bar.fill)
             mode, delta, warn = self._anchor_result(k)
@@ -309,21 +354,28 @@ class Counter:
             # 速率优先取「确定的那一个」，顺序不能换（子弹时间下倍速键上是没有数字的）：
             #   1) 子弹时间：>>> 是**确定**的读数 —— 恒为 6 逻辑帧/秒（= 30/5），
             #      与倍速设置无关（实测见 BULLET_FPS 上面那段）。
-            #   2) 倍速键上画着数字：30 x 数字。
-            #   3) 两者都没有（按钮淡出 / 被部署遮罩糊掉）：不知道速率，**冻结**绝不猜。
+            #   2) 倍速键上画着数字、模板也认得出：30 x 数字。
+            #   3) 数字**画着**、模板认不出（corr 低）：沿用上次的倍速（见下面 else-if 的说明）。
+            #   4) 什么都没画（按钮淡出 / 被部署遮罩糊掉）：不知道速率，**冻结**绝不猜。
             #
             # 速率读得到就**一拍都不放过**：满费期间的帧操很短（17~67ms），不足 1 个
             # 逻辑帧，靠 _clock() 里的余量接着攒（见 _clock 的说明）。
             if paused:
                 mode, delta = 'pause', 0
-            elif speed.bullet:
+            elif self._bullet:
                 mode, delta = self._clock(BULLET_FPS, dt)
-            elif m_now is None or not speed.has_digit:
-                # 倍速键上这一刻没画数字、也不是子弹时间：不知道速率，冻结。
+            elif m_now is not None or speed.has_digit:
+                # 数字**画着**但模板对不上（corr 低、m 读成 nan）时沿用上次的倍速：
+                # 按钮确实画着、画的又不是子弹时间的箭头，只是这一拍字形糊了 ——
+                # 沿用比冻结少丢帧。实测这种读数占真实会话 2898/20436 拍（docs 第 23 节）。
+                # last_m 的初值是 1X（最常见的档），所以「从没读到过倍速」也不会瞎猜 2X。
+                mode, delta = self._clock(LOGICAL_FPS * m, dt)
+                if m_now is None:
+                    warn = 'speed-memory'
+            else:
+                # 倍速键上数字没画、箭头也不实心：真不知道速率，冻结不猜。
                 mode, delta = 'bar-reject', 0
                 warn = 'speed-unknown'
-            else:
-                mode, delta = self._clock(LOGICAL_FPS * m_now, dt)
         elif empty and not wrap_pending:
             # (b)：条这一拍压根没画出来。冻结，等条重新出现时相位重同步自己接上。
             # 这里**不再**要求「运行中」连续确认（原来那道理由上面 wrap_pending 接管了）：
@@ -374,7 +426,7 @@ class Counter:
         self.elapsed_f = self.pixel_frames + self.clock_frames + self._clock_frac
         # 探针只统计「游戏确实在跑」的样本：帧操时条会动但游戏是暂停的，
         # 那种样本会把实测帧率拉低，不代表真实逻辑帧率。
-        if mode == 'pixel' and not speed.bullet and not paused:
+        if mode == 'pixel' and not self._bullet and not paused:
             # 探针只累计「条在动、未暂停、非子弹时间」的样本。
             # 注意这个比值**天生有 ±1 帧/秒的量化误差**（窗口头尾各差半帧，1 秒的窗口
             # 就是 ±3%）：实测同一段 1 倍速录像，1 秒窗口给 29.5、8 秒窗口给 29.9，
@@ -394,11 +446,11 @@ class Counter:
             grey146=bar.grey146, grey88=bar.grey88,
             pause_ratio=pause.ratio, running=running,
             digit_ratio=speed.digit_ratio, corr_2x=speed.corr_2x,
-            has_digit=speed.has_digit, m=m, bullet=speed.bullet,
+            has_digit=speed.has_digit, m=m, bullet=self._bullet,
             mode=mode, delta=delta, elapsed=self.elapsed, elapsed_f=self.elapsed_f,
             warn=warn,
             phase=(self.timing.phase() if self.timing else 0.0),
-            err=self.last_k)
+            err=self.last_k, pause_drawn=pause.drawn, pause_solid=pause.solid)
 
     def probe(self) -> tuple:
         """实测逻辑帧率探针。
@@ -508,6 +560,12 @@ class Counter:
         self._cycle_ref = None
         self._since_accept = 0.0
         self._reject_s = 0.0
+        # 「条动没动」的历史也作废：重新起锚之后的第一拍不该因为旧读数而算「在动」。
+        self._last_state = None
+        self._last_fill = None
+        self._move_hold = 0
+        # 子弹时间的判定也作废：重新拿到画面后，第一拍重新读倍速键。
+        self._bullet = False
         # 注意：清零那对状态（_no_catchup / _zero_phase）这里**故意不动**。
         # set_layout / set_frames_per_cost 都会走一遍 resync，而真正的清零是在
         # set_layout 之后才调 mark_zero_start —— 清了的话标志就活不到下一拍起锚。

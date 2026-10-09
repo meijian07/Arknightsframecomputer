@@ -27,11 +27,18 @@ _kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
 SRCCOPY = 0x00CC0020
 DIB_RGB_COLORS = 0
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+SPI_GETWORKAREA = 0x0030              # SystemParametersInfoW：主屏可用区（扣掉任务栏）
 
 GWL_EXSTYLE = -20
 WS_EX_LAYERED = 0x00080000
 WS_EX_TRANSPARENT = 0x00000020
 WS_EX_TOOLWINDOW = 0x00000080
+
+# SetWindowPos：只改 Z 序那三个标志（见 set_topmost）
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_NOACTIVATE = 0x0010
+GA_ROOT = 2                           # GetAncestor：一直往上找到所在的那个顶层窗口
 
 
 def enable_dpi_awareness() -> str:
@@ -169,6 +176,20 @@ def virtual_screen_bounds() -> tuple:
     return (x, y, w, h)
 
 
+def work_area() -> tuple:
+    """桌面**可用**区域 (x, y, w, h)：屏幕减去任务栏 / 停靠窗口。
+
+    为什么不用 tk 的 winfo_screenheight：它报的是整块屏幕，任务栏那几十像素也算在
+    里面 —— 面板贴底就会被任务栏压住（实测展开态底边落在 1592，屏幕 1600）。
+    多显示器时这里返回的是**主屏**的可用区（SPI_GETWORKAREA 的语义）。
+    """
+    r = wt.RECT()
+    ok = _user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(r), 0)
+    if not ok or r.right <= r.left or r.bottom <= r.top:
+        return virtual_screen_bounds()
+    return (int(r.left), int(r.top), int(r.right - r.left), int(r.bottom - r.top))
+
+
 def set_click_through(hwnd: int) -> None:
     """给窗口加上「鼠标穿透 + 分层」样式，让它只显示不挡鼠标。"""
     get = _user32.GetWindowLongPtrW
@@ -179,6 +200,61 @@ def set_click_through(hwnd: int) -> None:
     setl.argtypes = [wt.HWND, ctypes.c_int, ctypes.c_ssize_t]
     ex = get(hwnd, GWL_EXSTYLE)
     setl(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW)
+
+
+def is_window(hwnd: int) -> bool:
+    """这个句柄现在还是一个活着的窗口吗？
+
+    为什么置顶那条链路需要它：播放器切全屏 / 换下一段视频时会**重建窗口**，旧句柄
+    当场失效（SetWindowPos 会失败，或者更糟 —— 句柄被系统回收给了别的窗口）。
+    每拍先问一句，就能把「窗口换了」和「窗口被别人盖住了」分开报。
+    """
+    return bool(_user32.IsWindow(ctypes.c_void_p(int(hwnd))))
+
+
+def set_topmost(hwnd: int, on: bool = True) -> bool:
+    """把一个窗口钉到最上层（on=False 恢复原样）。返回系统有没有接受。
+
+    为什么「读窗口」这条链路需要它：抓屏只能取到**屏幕上真实显示**的像素（见模块开头
+    第 2 条）—— 目标窗口一旦被别的窗口盖住一角，盖住的那块读到的就是别人的画面。
+    费用条在右下角、按钮在右上角，被盖住就等于整条链路瞎了。
+
+    只改 Z 序、不挪窗口、不改大小、也不抢焦点（SWP_NOACTIVATE）：用户把录屏窗口摆在
+    哪儿就还在哪儿，只是压在最上面。HWND_TOPMOST = -1、HWND_NOTOPMOST = -2，
+    在 64 位下必须按**全宽 -1/-2** 传（c_void_p(-1)），传成 32 位的 0xFFFFFFFF 不是同一个值。
+    """
+    flags = SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
+    return bool(_user32.SetWindowPos(ctypes.c_void_p(int(hwnd)),
+                                     ctypes.c_void_p(-1 if on else -2),
+                                     0, 0, 0, 0, flags))
+
+
+def top_level(hwnd: int) -> int:
+    """把任意窗口句柄换成它所在的那个**顶层窗口**。
+
+    为什么需要：Tk 的 winfo_id() 给的是里面的 TkChild 客户窗口（实测 class=TkChild），
+    真正带标题栏 / 边框、也在窗口管理器里排 Z 序的是它父窗口（class=TkTopLevel）。
+    要动 Z 序就得动顶层那一个 —— 动 TkChild 只会把客户区从边框里挪开。
+    """
+    _user32.GetAncestor.restype = ctypes.c_void_p
+    _user32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    return int(_user32.GetAncestor(ctypes.c_void_p(int(hwnd)), GA_ROOT) or 0)
+
+
+def raise_window(hwnd: int) -> bool:
+    """把窗口抬到**它所在那一层**的最上面（不动大小 / 位置，也不抢焦点）。
+
+    为什么「读窗口」这条链路要用它抬**自己**：置顶是一个「层」的概念，同一层里最后被
+    抬起来的那个在最上面。我们每 0.7 秒把目标窗口 SetWindowPos(HWND_TOPMOST) 一次
+    （见 ui.MonitorApp._keep_pin），目标窗口就顺势压到我们面板上面 —— 面板每 0.7 秒被
+    盖回去一次，用户根本读不到数。所以钉完目标要顺手把面板再抬一次：目标在最上层
+    （不会被动地窗盖住），面板在目标之上（用户看得见）。
+
+    HWND_TOP = 0：放在自己那一层的最上面，**不改变**「是不是置顶」。
+    """
+    flags = SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
+    return bool(_user32.SetWindowPos(ctypes.c_void_p(int(hwnd)),
+                                     ctypes.c_void_p(0), 0, 0, 0, 0, flags))
 
 
 class _BITMAPINFOHEADER(ctypes.Structure):

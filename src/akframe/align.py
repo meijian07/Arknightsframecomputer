@@ -57,11 +57,14 @@ SUSTAIN_LEVEL = 0.5  # 判定「填充覆盖到了这一列」用峰值频率的
 MIN_SUSTAIN_FRAC = 0.4   # 边缘右边连续这么多列都得被填充覆盖过（占条槽宽的比例）
 
 
-def extract_strip(ffmpeg, video, rect, stride=1, frames=None):
+def extract_strip(ffmpeg, video, rect, stride=1, frames=None, seek=None):
     """抽 rect 这一块的灰度原始流。stride > 1 时每 stride 帧取一帧。
 
     frames 给一个整数就只抽前 frames 帧（校准工具用：它只统计白块出现过的最左 /
     最右列，多解几十秒只是白花时间）。
+    seek 给秒数就从那儿附近开抽（放在 -i 前面 = 快速定位）：只判「这一段时间里画面对不
+    对」时用它，省掉从头解到那儿的时间；stride 仍按**从头算**的帧号取模，所以抽样点的
+    相位和整段一致，不会跟着 seek 跑。
     """
     vf = 'format=gray,%s' % rect.crop_filter()
     if stride > 1:
@@ -70,9 +73,11 @@ def extract_strip(ffmpeg, video, rect, stride=1, frames=None):
     tail = ['-vsync', '0', '-f', 'rawvideo', '-pix_fmt', 'gray', '-y', path]
     if frames:
         tail = ['-frames:v', str(int(frames))] + tail
+    head = [ffmpeg, '-hide_banner', '-loglevel', 'error']
+    if seek:
+        head += ['-ss', '%.3f' % float(seek)]
     try:
-        subprocess.run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-i', video,
-                        '-vf', vf] + tail, check=True)
+        subprocess.run(head + ['-i', video, '-vf', vf] + tail, check=True)
         data = np.fromfile(path, dtype=np.uint8)
     finally:
         if os.path.isfile(path):
@@ -84,57 +89,66 @@ def extract_strip(ffmpeg, video, rect, stride=1, frames=None):
     return data[:n * per].reshape(n, rect.h, rect.w)
 
 
-def detect_offset(video, ffmpeg, client_size=None, ui_scaler=1.0, size=None,
-                  samples=SAMPLES, dx_range=DX_RANGE, dy_range=DY_RANGE):
-    """找一个 (dx, dy)，让 layout_for(客户区) 的三个 ROI 落到画面里正确的位置。
+def offset_from_frames(frames, base, x0: int, y0: int,
+                       dx_range: int = DX_RANGE, dy_range: int = DY_RANGE,
+                       min_sustain_frac: float = MIN_SUSTAIN_FRAC):
+    """在一块**已经抽好**的灰度原始流里找 (dx, dy)。
 
-    返回 (dx, dy, 阶跃强度, 填充出现频率)，认不出来时返回 None。
+    frames = (n, h, w)，左上角在画面 (x0, y0)；base 是客户区坐标下的预测 layout。
+    返回 (dx, dy, 阶跃强度, 填充出现频率, 平台列数)；认不出来返回 None。
+
+    第五个数是「白块平台」量到的列数（右端上限是搜索框右边缘）。录像那条链路不用它，
+    窗口那条链路要靠它定「量条槽」的探针框该有多宽 —— 播放器把画面缩放多少倍是未知量。
+
+    把这一段从「怎么拿到帧」里拆出来，是为了让**读窗口**那条链路复用同一份判据：
+    录像那边喂 ffmpeg 抽的帧，窗口那边喂屏幕抓的帧，算法一个字都不用改。
+
+    白电平（hi）取两个口径里**高**的那一个：
+        * 所有像素的 p99 —— 填充在一小块里占多数时（录像链路抽的就是条周围那一小块）
+          就是它；
+        * **每一列最亮值的 p99.9** —— 填充只占这一块百分之几的时候只有它认得出来：
+          窗口链路要在 ±120 行的框里搜，块里绝大多数是背景，实测整窗 p99 = 0（阈值
+          掉到背景上，阶跃整个消失）。为什么是「每列最亮」而不是「所有像素」：
+          填充在时间上是稀疏的（条一格一格长，每一列只在部分帧里是白的），按所有像素
+          取分位会被自己的稀疏性稀释掉。
+    为什么还要取 99.9 而不是 99：块被搜索框切掉一部分时（条只露出一截）「条槽底色
+    （灰 55）」会占掉 top 1%，于是 hi 落到 55 —— 灰轨道也被当成亮点，整块变成一个
+    假的「完美阶跃」，而且**纵向位置完全不受约束**（实测：这样找出来的 dy 偏 5px，
+    后面读条读到 0）。取 99.9 之后白填充（占 0.98%）重新成为最亮的那一档。
+
+    min_sustain_frac 是「平台至少要占条槽宽的几成」。默认值照录像链路标定过的那份；
+    窗口链路把预测的条宽当分母，而播放器把画面缩放多少倍是未知量（实测预测 129px、
+    真条 114px），所以那边会放宽 —— 真正的判据是第二级的「条在不在动」。
     """
-    info = probe_video(ffmpeg, video)
-    if size is None:
-        size = info.size
-    if not size:
+    if frames.ndim != 3 or frames.shape[0] < 8:
         return None
-    vw, vh = int(size[0]), int(size[1])
-    cw, ch = (int(client_size[0]), int(client_size[1])) if client_size else (vw, vh)
-    base = layout_for(cw, ch, ui_scaler)
+    fh = int(frames.shape[1])
 
-    # 抽一块把整个搜索范围都包进去的小窗
-    x0 = max(0, base.bar.x - dx_range)
-    y0 = max(0, base.bar.y - dy_range)
-    x1 = min(vw, base.bar.x + base.bar.w + dx_range)
-    y1 = min(vh, base.bar.y + base.bar.h + dy_range)
-    if x1 - x0 < 8 or y1 - y0 < 16:
-        return None
-    rect = Rect(x0, y0, x1 - x0, y1 - y0)
-
-    total = int(round((info.duration or 0.0) * (info.fps or 60.0)))
-    stride = max(1, total // samples) if total > 0 else 1
-    frames = extract_strip(ffmpeg, video, rect, stride)
-    if frames.shape[0] < 8:
-        return None
-
-    # 阈值必须贴着这一块的白电平取（0.8），不能取中点：取中点会把游戏场景里
-    # 一片一片的中灰也当成「亮」，于是背景也能凑出很宽的「平台」，判据就废了。
-    # 实测（2026-10-04 15-54-49.mp4）：阈值取中点时场景行 y 990..1022 的假平台
-    # 宽 141 列、比真费用条的 125 列还宽；取 0.8 之后场景行的阶跃只有 0.04，
-    # 真条仍然是 0.28 —— 两者彻底分开。
+    # 暗电平必须取「所有像素的 p10」：换成 colmax 之后，凡是每一列都被填过的块
+    # （录像链路那种薄条块就是这样）lo 也会升到白电平，hi-lo = 0 反而把整块判成
+    # 「没对比度」——那是真坏，实测过。
     lo = float(np.percentile(frames, 10.0))
-    hi = float(np.percentile(frames, 99.0))
+    hi = max(float(np.percentile(frames, 99.0)),
+             float(np.percentile(frames.max(axis=0), 99.9)))
     if hi - lo < MIN_CONTRAST:
         return None
     band_h = BAR_BAND_BOTTOM - BAR_BAND_TOP
-    min_sustain = max(8, int(round(MIN_SUSTAIN_FRAC * base.bar.w)))
+    min_sustain = max(8, int(round(min_sustain_frac * base.bar.w)))
     span = float(base.bar.w) if base.bar.w > 0 else 1.0
     best = None
     for frac in THR_FRACS:
       bright = frames > (lo + frac * (hi - lo))
+      # 每一列「被亮点覆盖过」的频率。原来是对每个 dy 重算
+      # bright[:, r0:r1, :].mean(axis=(0, 1))，数学上完全等价（先按帧平均、再按行平均），
+      # 但把代价从「每个 dy 一遍 O(n x band_h x w)」降成只算一次 —— 窗口那条链路要把
+      # 搜索半径开到几百像素（播放器缩放过后 ROI 会偏很远），不这么改根本跑不动。
+      freq = bright.mean(axis=0)                  # (h, w)：每一列的覆盖频率
       for dy in range(-dy_range, dy_range + 1):
         r0 = (base.bar.y + BAR_BAND_TOP + dy) - y0
         r1 = r0 + band_h
-        if r0 < 0 or r1 > rect.h:
+        if r0 < 0 or r1 > fh:
             continue
-        prof = bright[:, r0:r1, :].mean(axis=(0, 1))
+        prof = freq[r0:r1].mean(axis=0)
         if prof.size < 8:
             continue
         jump = np.diff(prof)
@@ -157,12 +171,61 @@ def detect_offset(video, ffmpeg, client_size=None, ui_scaler=1.0, size=None,
                 longest = run
         if longest < min_sustain:
             continue
+        # 平台到底铺了多宽：上面那一段只看 base.bar.w 列（判据用），这里放到整个右半边
+        # 再数一遍 —— 给窗口链路一个「实测平台宽」的旁证。多跑一趟很便宜。
+        wide = prof[j + 1:] >= (SUSTAIN_LEVEL * ref)
+        w_run = w_wide = 0
+        for ok in wide:
+            w_run = w_run + 1 if ok else 0
+            if w_run > w_wide:
+                w_wide = w_run
         score = step * after * (longest / span)
         if best is None or score > best[0]:
-            best = (score, dy, j, step, after, frac)
+            best = (score, dy, j, step, after, w_wide)
     if best is None:
         return None
 
-    _, dy, j, step, after, offset_frac = best
+    _, dy, j, step, after, platform = best
     dx = (x0 + j + 1) - base.bar.x
-    return (int(dx), int(dy), float(step), float(after))
+    return (int(dx), int(dy), float(step), float(after), int(platform))
+
+
+def detect_offset(video, ffmpeg, client_size=None, ui_scaler=1.0, size=None,
+                  samples=SAMPLES, dx_range=DX_RANGE, dy_range=DY_RANGE,
+                  strip_fn=None, info=None):
+    """找一个 (dx, dy)，让 layout_for(客户区) 的三个 ROI 落到画面里正确的位置。
+
+    返回 (dx, dy, 阶跃强度, 填充出现频率, 平台列数)，认不出来时返回 None。
+
+    strip_fn(rect, stride, frames) -> (n, h, w) 灰度栈：换帧来源用（录像 = ffmpeg 抽，
+    窗口 = 屏幕抓）。info 传 probe_video 的结果可以省一次探测 —— 窗口没有文件可探，
+    这时 stride / frames 按「抓 samples 张连续画面」解释。
+    """
+    given_info = info is not None
+    if info is None:
+        info = probe_video(ffmpeg, video)
+    if size is None:
+        size = info.size
+    if not size:
+        return None
+    vw, vh = int(size[0]), int(size[1])
+    cw, ch = (int(client_size[0]), int(client_size[1])) if client_size else (vw, vh)
+    base = layout_for(cw, ch, ui_scaler)
+
+    # 抽一块把整个搜索范围都包进去的小窗
+    x0 = max(0, base.bar.x - dx_range)
+    y0 = max(0, base.bar.y - dy_range)
+    x1 = min(vw, base.bar.x + base.bar.w + dx_range)
+    y1 = min(vh, base.bar.y + base.bar.h + dy_range)
+    if x1 - x0 < 8 or y1 - y0 < 16:
+        return None
+    rect = Rect(x0, y0, x1 - x0, y1 - y0)
+
+    strip = strip_fn or (lambda r, st, n: extract_strip(ffmpeg, video, r, st, n))
+    if given_info:
+        frames = strip(rect, 1, samples)          # 没有「整段时长」：抓 samples 张连着看
+    else:
+        total = int(round((info.duration or 0.0) * (info.fps or 60.0)))
+        stride = max(1, total // samples) if total > 0 else 1
+        frames = strip(rect, stride, None)
+    return offset_from_frames(frames, base, x0, y0, dx_range, dy_range)

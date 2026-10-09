@@ -10,10 +10,10 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .geometry import (ARROW_MIN_CONTRAST, ARROW_RATIO_MIN, ARROW_REL, CORR_2X_MIN,
-                       DIGIT_RATIO_MIN, PAUSE_SHAPE_BAND, RUN_PAUSE_RATIO_MIN,
-                       SPEED_ARROW_BAND, SPEED_DIGIT_BAND, SPEED_DIGIT_COLS,
-                       Layout)
+from .geometry import (ARROW_MIN_CONTRAST, ARROW_RATIO_MIN, ARROW_REL, ARROW_SOLID_MIN,
+                       CORR_2X_MIN, DIGIT_RATIO_MIN, PAUSE_GLYPH_MIN, PAUSE_SHAPE_BAND,
+                       RUN_PAUSE_RATIO_MIN, SPEED_ARROW_BAND, SPEED_DIGIT_BAND,
+                       SPEED_DIGIT_COLS, Layout)
 
 # ---- 阈值 ----
 # 纯白下限：实测填充恒为 255，用 250 而不是 240（240 会把接近白的场景像素也算进去）
@@ -75,6 +75,14 @@ class PauseReading:
     """暂停键读数。"""
     ratio: float     # 形状特征占比
     running: bool    # True = 正在运行，False = 已暂停
+    # 这个键**画出来了没有**（实心字形在形状带里的占比，阈值见 PAUSE_GLYPH_MIN）。
+    # 为什么必须有它：菜单 / 加载 / 桌面 / 切场景这些画面上，ROI 里根本没有按钮，
+    # 形状占比只有 0.000~0.0146，和「已暂停」（0.064）分不开 —— 旧代码只能当成
+    # 「已暂停」，于是分不清「关卡里按了暂停」和「压根不在关卡里」。
+    # 默认 True：老调用方不知道这件事时，行为跟以前完全一样。
+    drawn: bool = True
+    solid: float = 0.0   # 上面那个判据用的**实心占比**（3x3 腐蚀一遍后的），
+                         # 自检 / 面板显示用：ratio 到 0.24 也可能一个实心块都没有。
 
 
 @dataclass
@@ -86,6 +94,9 @@ class SpeedReading:
     m: float              # 倍速；子弹时间时沿用上一次已知值
     bullet: bool          # 是否子弹时间（>>>）
     conf: str             # 倍速判断的置信度：ok / low
+    # 倍速键画出来了没有（有数字，或者箭头带里有**实心**箭头块）。默认 True，理由同上。
+    drawn: bool = True
+    solid: float = 0.0   # 箭头带的实心占比（判 drawn / bullet 用的那个数），自检用
 
 
 def rel_threshold(roi: np.ndarray) -> float:
@@ -97,6 +108,36 @@ def rel_threshold(roi: np.ndarray) -> float:
     med = float(np.median(roi))
     mx = float(roi.max())
     return med + REL_THR * (mx - med)
+
+
+def erode3(mask: np.ndarray) -> np.ndarray:
+    """3x3 全邻域腐蚀一次：只有「自己和周围八格都亮」的像素留下。
+
+    为什么要这一步：rel_threshold 是跟着画面自己的电平走的，细笔画 / 噪点在暗画面上
+    很容易被放大成「亮点」。腐蚀一遍之后细笔画全没了，只有**画上去的实心形状**
+    （▶ / ❚❚ / 箭头 / 数字笔画）活得下来 —— 「这块地方到底画没画东西」才判得准。
+    用切片实现，不依赖 scipy（打包出来的 exe 里只有 numpy）。
+    """
+    e = mask.copy()
+    e[1:, :] &= mask[:-1, :]
+    e[:-1, :] &= mask[1:, :]
+    e[:, 1:] &= mask[:, :-1]
+    e[:, :-1] &= mask[:, 1:]
+    e[1:, 1:] &= mask[:-1, :-1]
+    e[:-1, :-1] &= mask[1:, 1:]
+    e[1:, :-1] &= mask[:-1, 1:]
+    e[:-1, 1:] &= mask[1:, :-1]
+    return e
+
+
+def solid_frac(mask: np.ndarray, times: int = 1) -> float:
+    """亮块占比：连续 times 次 3x3 腐蚀之后还剩多少像素（占整块面积的比例）。"""
+    m = mask
+    for _ in range(max(1, int(times))):
+        m = erode3(m)
+        if not m.any():
+            return 0.0
+    return float(m.mean())
 
 
 def _band_is_grayscale(band: np.ndarray) -> bool:
@@ -245,14 +286,24 @@ def _dim_anchor(row: np.ndarray):
     return hi
 
 
-def brighten_row(row: np.ndarray):
+def brighten_row(row: np.ndarray, roi: np.ndarray = None):
     """按白电平等比抬亮一行（只抬不压）；判断为不需要时返回 None。
 
     只给「填充」判据用：填充就是白电平附近的一整块，等比抬亮之后阈值等价于
     0.965×白，比 PQ 还原稳 —— PQ 在白色附近斜率极大，编码上 122±2 的抖动
     还原出来是 214..255，填充边界会碎掉。
+
+    roi 给了就多一条兜底（只在这一行自己判不出「被压暗」时才用）：**条画满的时候
+    整行都是白，行内一点对比度都没有**（实测 HDR 录像里 226 列全是 124），
+    _dim_anchor 的对比度闸会把这种行判掉 —— 于是「条正好画满」的那几帧读成 EMPTY。
+    代价是实打实的：那几帧本来该按「相位贴在 1.0」处理（回费边界），读成空条之后
+    会提前一拍触发 wrap 判定，边界归属就差 1 帧。
+    兜底用整个 ROI 的电平：ROI 里除了条身还有上下那几行暗轨道/背景，对比度一直存在，
+    所以满条也能判出来；而空条时整个 ROI 都是暗的（p99 < DIM_HI_MIN），照样不还原。
     """
     hi = _dim_anchor(row)
+    if hi is None and roi is not None:
+        hi = _dim_anchor(np.asarray(roi).ravel())
     if hi is None:
         return None
     return np.clip(row.astype(np.float32) * (WHITE_REF / hi), 0, 255).astype(np.int16)
@@ -323,10 +374,16 @@ def read_bar(roi: np.ndarray, layout: Layout) -> BarReading:
         # 主路径一点东西都没读到：可能整幅画面被压暗（HDR / PQ 采集）。
         # 填充按白电平等比抬亮再扫一遍；灰底按 PQ 曲线还原再数一遍；
         # 两边都读不到就维持原判（EMPTY）。
-        bright = brighten_row(row)
+        bright = brighten_row(row, roi)
         if bright is not None:
             f2, m2 = _scan_fill(bright)
-            f2 = f2 if _row_is_step(bright, f2) else 0
+            # 台阶闸（_row_is_step）对「条画满」这一种情况天然判不过：整行都是白，
+            # 行内没有对比度，阈值取在哪儿都会把亮点比例压到 70% 以下。可是
+            # 「最右一列就是白的」本来就是主路径（SDR）认满条的判据（_scan_fill 直接
+            # 返回 n），没道理在压暗兜底这条路上反而不认。所以 f2 铺满整行时放行，
+            # 其余情况照旧要过台阶闸 —— 那道闸防的是「把场景杂色抬成假填充」，
+            # 而能走到兜底，说明 ROI 的电平已经确认过是被压暗的游戏 HUD（见 brighten_row）。
+            f2 = f2 if (f2 >= row.size or _row_is_step(bright, f2)) else 0
             fixed = restore_pq_row(row)
             if fixed is None:
                 g146 = g88 = 0
@@ -359,6 +416,8 @@ def read_pause(roi: np.ndarray, layout: Layout) -> PauseReading:
 
     只取字形顶部的条带：单三角（已暂停）顶部很窄，双竖条（运行中）顶部是两个整宽矩形，
     两者亮点数差约 4 倍（实测 0.063 vs 0.24），所以用占比判别很稳。
+
+    除此之外还单独回答「这个键画出来了没有」（drawn）：见 PauseReading.drawn。
     """
     if not layout.buttons_visible:
         # 画面里根本没有暂停键（截屏 / 放大 / 裁剪录像只截了右下角）：这是「读不到」，
@@ -370,8 +429,12 @@ def read_pause(roi: np.ndarray, layout: Layout) -> PauseReading:
     r0, r1 = layout.pause.band_rows(*PAUSE_SHAPE_BAND)
     band = roi[r0:r1 + 1, :]
     thr = rel_threshold(roi)
-    ratio = float((band > thr).sum()) / float(band.size)
-    return PauseReading(ratio=ratio, running=ratio >= RUN_PAUSE_RATIO_MIN)
+    mask = band > thr
+    ratio = float(mask.sum()) / float(mask.size)
+    solid = solid_frac(mask, 1)
+    drawn = solid >= PAUSE_GLYPH_MIN
+    return PauseReading(ratio=ratio, running=ratio >= RUN_PAUSE_RATIO_MIN,
+                        drawn=drawn, solid=solid)
 
 
 def read_speed(roi: np.ndarray, layout: Layout, templates=()) -> SpeedReading:
@@ -417,16 +480,25 @@ def read_speed(roi: np.ndarray, layout: Layout, templates=()) -> SpeedReading:
         med = float(np.median(roi))
         if hi - med >= ARROW_MIN_CONTRAST:
             thr_arrow = med + ARROW_REL * (hi - med)
-            arrow_ratio = float((arrow >= thr_arrow).sum()) / float(arrow.size)
+            arrow_mask = arrow >= thr_arrow
+            arrow_ratio = float(arrow_mask.sum()) / float(arrow_mask.size)
+            arrow_solid = solid_frac(arrow_mask, 1)
         else:
             # 整块 ROI 没有对比度（按钮淡出 / 被遮罩糊平）：画面上根本没画东西
             arrow_ratio = 0.0
-        if arrow_ratio >= ARROW_RATIO_MIN:
+            arrow_solid = 0.0
+        # 两条都要过：占比（够不够大）+ 实心（是不是真画出来的形状）。
+        # 只看占比会把「别的窗口 / 桌面 / 菜单里的细笔画」全认成子弹时间，见 ARROW_SOLID_MIN。
+        if arrow_ratio >= ARROW_RATIO_MIN and arrow_solid >= ARROW_SOLID_MIN:
             return SpeedReading(digit_ratio=digit_ratio, corr_2x=corr, has_digit=False,
-                                m=float('nan'), bullet=True, conf='ok')
-        # 倍速信息这一刻根本不存在于画面上：沿用上次已知倍速，也不按 1/5 打折
+                                m=float('nan'), bullet=True, conf='ok',
+                                solid=arrow_solid)
+        # 倍速信息这一刻根本不存在于画面上：沿用上次已知倍速，也不按 1/5 打折。
+        # drawn 必须用**实心**判据，不能用占比：关卡外那些细笔画占比能到 0.09（见
+        # ARROW_SOLID_MIN），拿占比当「按钮画着」等于给菜单开绿灯 —— 关卡判定就废了。
         return SpeedReading(digit_ratio=digit_ratio, corr_2x=corr, has_digit=False,
-                            m=float('nan'), bullet=False, conf='low')
+                            m=float('nan'), bullet=False, conf='low',
+                            drawn=arrow_solid >= ARROW_SOLID_MIN, solid=arrow_solid)
 
     # 归一化：按钮有亮/暗两种渲染，绝对值阈值和直接比较都会失效，
     # 用 (值 - 中位数) / (峰值 - 中位数) 归一化后再比形状。

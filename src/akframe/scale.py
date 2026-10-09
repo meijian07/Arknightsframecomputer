@@ -29,23 +29,28 @@ COST_FRAMES = 30       # 大刻度间隔：30 帧 = 1 费 = 1 秒
 
 @dataclass
 class Theme:
-    """刻度表的配色。要换风格只动这里，画的地方不用改。"""
+    """刻度表的配色。要换风格只动这里，画的地方不用改。
 
-    bg: str = '#0b0c0f'
-    ruler_bg: str = '#07080a'
-    rail: str = '#1f2b36'          # 刻度条右边缘那条竖线
-    tick: str = '#2b3947'
-    tick_major: str = '#46627a'
-    num: str = '#54677a'
-    accent: str = '#36c5f0'        # 「现在」线 / 青柱 / 下一条
-    text: str = '#eef6fb'
-    dim: str = '#7d93a6'
-    faint: str = '#3f5060'         # 已经过去的轴
-    mark_next: str = '#36c5f0'
-    mark_future: str = '#7d93a6'
-    mark_past: str = '#3f5060'
-    next_fill: str = '#16222b'     # 「下一条」那行的底色
-    connector: str = '#2c5f74'     # 标签被推开时连回真实刻度的细线
+    这一套是照游戏内 HUD 抄的：**只有白和灰两档**，靠线的粗细和明暗分层，不引入第二种
+    强调色。「现在」线和青柱（现在 -> 下一条）用纯白；「下一条」整行**反色**
+    （白底深字）—— 就是游戏里到帧那一下 flash 的做法，靠反色而不是靠颜色抓眼睛。
+    """
+
+    bg: str = '#141416'
+    ruler_bg: str = '#0d0d0f'
+    rail: str = '#3a3a3e'          # 刻度条右边缘那条竖线
+    tick: str = '#4a4a4f'
+    tick_major: str = '#8f8f95'
+    num: str = '#9b9ba0'
+    accent: str = '#ffffff'        # 「现在」线 / 青柱 / 下一条
+    text: str = '#ffffff'
+    dim: str = '#b9b9c0'
+    faint: str = '#616167'         # 已经过去的轴
+    mark_next: str = '#ffffff'
+    mark_future: str = '#b9b9c0'
+    mark_past: str = '#616167'
+    next_fill: str = '#2a2a2d'     # 「下一条」那行的底色（还没走到时）
+    connector: str = '#6a6a70'     # 标签被推开时连回真实刻度的细线
 
 
 @dataclass

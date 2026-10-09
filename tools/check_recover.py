@@ -236,25 +236,25 @@ def t_watchdog_ui():
         check('心跳一停下，看门狗就开始计时', app._stall_since != 0.0)
         time.sleep(1.05)                      # 超过 STALL_WARN_S = 1.0
         app._tick_body()
-        txt = app.lb_state.cget('text')
-        check('心跳停 1 秒以上 -> 状态行转红报「采样已停」',
-              '采样已停' in txt and app.lb_state.cget('fg') == ui_mod.ERR,
-              '%r fg=%s' % (txt, app.lb_state.cget('fg')))
+        txt = app.lb_warn.cget('text')
+        check('心跳停 1 秒以上 -> 告警行转红报「采样已停」',
+              '采样已停' in txt and app.lb_warn.cget('fg') == ui_mod.ERR,
+              '%r fg=%s' % (txt, app.lb_warn.cget('fg')))
         check('看门狗没冤枉读数（心跳确实没涨）', dm.stats.ticks == frozen,
               'ticks=%d frozen=%d' % (dm.stats.ticks, frozen))
 
         dm._thread = None                     # 线程直接没了 -> 不用等一秒
         app._tick_body()
         check('线程消失 -> 立刻报采样已停',
-              '采样已停' in app.lb_state.cget('text'), app.lb_state.cget('text'))
+              '采样已停' in app.lb_warn.cget('text'), app.lb_warn.cget('text'))
 
         dm._thread = AliveThread()
         app.recalibrate()
         check('重新校准后看门狗计时归零（不然刚重开又被「停了 8 秒」再报）',
               app._stall_since == 0.0, '_stall_since=%r' % app._stall_since)
         app._tick_body()
-        check('重新校准后状态行不再报采样已停',
-              '采样已停' not in app.lb_state.cget('text'), app.lb_state.cget('text'))
+        check('重新校准后告警行不再报采样已停',
+              '采样已停' not in app.lb_warn.cget('text'), app.lb_warn.cget('text'))
     finally:
         try:
             app.root.destroy()

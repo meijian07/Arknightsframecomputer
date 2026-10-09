@@ -58,6 +58,19 @@ ARROW_MIN_CONTRAST = 25      # 箭头带最亮处要比中位数亮这么多，�
                              # HDR 录像里 UI 白只有 122、箭头带 p99 只有 91，绝对阈值全废
 ARROW_REL = 0.60             # 「亮点」判据：median + ARROW_REL * (p99 - median)
 ARROW_RATIO_MIN = 0.02       # 箭头带里亮点占比达到这个数，才算「画着箭头」（0.2 倍速）
+ARROW_SOLID_MIN = 0.020      # 箭头还得是**实心块**：3x3 腐蚀一遍后剩下的占比。
+                             # 为什么不能只看 ARROW_RATIO_MIN：实测「根本没画箭头」的画面在
+                             # 箭头带里也有 0.028~0.093 的亮点（关卡外的加载 / 选关界面 0.073~0.093，
+                             # 桌面 / OBS 窗口 0.028~0.090）—— 细笔画一被相对阈值放大就过 0.02 了，
+                             # 于是整段被读成子弹时间（满费挂钟按 6 帧/秒算，整段差 5 倍）。
+                             # 实心块只有真箭头有：实测真箭头（22-20-20 共 1000 帧）
+                             # p5=0.0310 / 中位 0.0317 / max 0.0642，非箭头 max=0.0113。
+                             # 取 0.020：往下离噪声 1.8 倍，往上离真箭头 1.5 倍，两边都留够。
+PAUSE_GLYPH_MIN = 0.020      # 暂停键字形占形状带的**实心**占比（3x3 腐蚀一遍后的）。
+                             # 两个用处：① 判「这个键到底画出来没有」（features.read_pause）；
+                             # ② 关卡判定用它回答「游戏 HUD 还在不在」（state.Counter）。
+                             # 实测：关卡内 0.031~0.235（▶ 0.031~0.047，❚❚ 0.22）；
+                             # 关卡外（桌面 / OBS 窗口 / 黑屏 / 切场景）0.000~0.0146。
 
 # 暂停键形状占比带滞回：中间那条带里保持上一拍的状态。
 # 实测三个录像：已暂停 0.078 / 运行中 0.245，中间带里只是按钮淡入淡出的过渡。
@@ -376,6 +389,48 @@ def layout_for(width: int, height: int, ui_scaler: float = UI_SCALER_DEFAULT) ->
                  bar_width_frac=bar_frac)
     lay.validate()
     return lay
+
+
+def layout_from_bar_box(client_size, box: Rect, ui_scaler: float = None) -> tuple:
+    """用户框选的费用条 -> (客户区, 原点, Layout)。「手动框选」那条路共用这一份。
+
+    为什么窗口这条路必须有手动：播放器窗口里画面是缩放过、还可能带黑边的，客户区尺寸和
+    原点都推不出来（实测：2560x1600 的录屏放进 1378x844 的 VLC 窗口，画面缩到 0.4777 倍，
+    游戏客户区落在窗口里 (85,50) 的 1218x688）。而用户一眼就能指出费用条在哪 —— 让他框
+    一下，比在任何搜索空间里瞎猜都靠谱。
+
+    只有一条硬关系需要用户给准：**条槽宽 = 180 * s * edge**（s = 显示出来的客户区的缩放）。
+    所以框一定要贴住费用条的**两端**（框宽 = 条槽宽）；高度随便（只取中心线，ROI 固定
+    17 行照旧）。反推出 s 之后客户区 = 1920s x 1080s，三个 ROI 照 geometry 的规则推，
+    原点由框的位置定死。
+
+    ui_scaler 是游戏设置里的「UI 缩放」：窗口里读不到注册表（那不是本机在跑的游戏），
+    默认 1.0。
+    """
+    w = int(client_size[0])
+    h = int(client_size[1])
+    box = Rect(int(box.x), int(box.y), max(2, int(box.w)), max(2, int(box.h)))
+    scaler = 1.0 if ui_scaler is None else float(ui_scaler)
+    if box.x < 0 or box.y < 0 or box.x + box.w > w or box.y + box.h > h:
+        raise ValueError('框跑到窗口外面了：%s（窗口 %dx%d）' % (box, w, h))
+    edge = ui_edge_scale(scaler)
+    # 条槽右端被窗口切掉时，框量到的只是「看得见的那一段」—— 真宽按框宽算
+    # （和录像链路量到被裁的条槽时同一个取舍）。
+    s = box.w / (BAR_W_UNIT * edge)
+    cw = max(320, int(round(REF_W * s)))
+    ch = max(240, int(round(REF_H * s)))
+    base = layout_for(cw, ch, scaler)
+    dx = box.x - base.bar.x
+    dy = (box.y + box.h // 2) - (base.bar.y + base.bar.h // 2)
+    layout = reframe_layout(base, dx, dy, w, h)
+    # 费用条 ROI 直接按框钉死（1px 都不差）：左边缘用框的、宽用框宽、高照旧 17 行。
+    bar_w = min(box.w, w - box.x)
+    roi_y = max(0, min(box.y + box.h // 2 - BAR_ROI_H // 2, h - BAR_ROI_H))
+    layout = replace(layout, bar=Rect(box.x, roi_y, bar_w, BAR_ROI_H),
+                     scale=s, bar_width_frac=float(box.w))
+    layout.validate()
+    return (cw, ch), (int(dx), int(dy)), layout
+
 
 
 def bar_only_layout(width: int, height: int, bar: Rect) -> Layout:

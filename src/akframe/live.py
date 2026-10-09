@@ -20,7 +20,7 @@ import os
 import threading
 import time
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -28,7 +28,7 @@ from .features import read_bar, read_pause, read_speed
 from .geometry import UI_SCALER_DEFAULT, Layout, layout_for, union_rect
 from .cost_rate import RateEstimator
 from .settings import DEFAULT_FRAMES_PER_COST
-from .state import CSV_HEADER, Counter, FrameResult
+from .state import CSV_HEADER, LOGICAL_FPS, Counter, FrameResult
 from .win32 import (ScreenGrabber, WindowInfo, arknights_ui_scaler, client_rect,
                     find_window, is_minimized, to_gray)
 
@@ -96,6 +96,11 @@ class LiveMonitor:
     线程模型：run() 在后台线程里跑采样循环，latest / stats 随时可读（GIL 下赋值是原子的，
     只做「读最新值」的界面不需要加锁）。
     """
+
+    # 采样线程多久没有心跳就判「停了」（界面读这个值，见 ui.STALL_WARN_S 的说明）。
+    # 实时链路 120Hz，1 秒足够；录像链路一拍可能喂很久（全速 / 大跨度倒带），
+    # 覆盖成更大的值，否则「全速跑完整段」那一下会被当成采样线程死了。
+    stall_warn_s = 1.0
 
     def __init__(self, layout: Layout = None, *, exe: str = 'Arknights.exe',
                  title: str = None, pid: int = None, rate: float = 120.0,
@@ -249,6 +254,27 @@ class LiveMonitor:
             last = self.latest.result
             fill = int(last.fill) if last is not None else None
             self.counter.mark_zero_start(fill)
+        self.rezero_latest()
+
+    def rezero_latest(self) -> None:
+        """把缓存读数（latest.result）里的帧号按回 0。
+
+        为什么清零必须连这一份一起改：面板上那个大数字读的是 `latest.result.elapsed`，
+        而 `latest` **只在「这一拍真读到画面」时才刷新**（video.py 暂停那一拍、窗口链路
+        还没点开始计数、点了停止计数 —— 这三种情况下这一拍永远不来）。于是清零只改了
+        计数器，面板还挂着清零前的数字，用户看到的就是「清零没用 / 要等开始计数才生效」。
+
+        只动帧号（idx / delta / elapsed / elapsed_f），条宽 / 状态 / 模式照旧 ——
+        那些是"这一刻画面长什么样"，与第几帧无关。
+        """
+        upd = self.latest
+        if upd is None or upd.result is None:
+            return
+        res = upd.result
+        if not (res.idx or res.delta or res.elapsed or res.elapsed_f):
+            return
+        self.latest = replace(upd, result=replace(res, idx=0, delta=0, elapsed=0,
+                                                 elapsed_f=0.0))
 
     # ---------- 采样 ----------
 
@@ -366,6 +392,26 @@ class LiveMonitor:
         self.stats.resyncs += 1
         self.latest = LiveUpdate(t, None, None, None, None, 0.0, note, False)
         return self.latest
+
+    def perf_line(self, ui_hz: float, cur_m: float = 1.0) -> tuple:
+        """面板「性能」那一行的文本 + 要不要标黄。
+
+        为什么放在这里而不是界面里：录像监视器（video.VideoMonitor）要把它换成
+        「播放到哪一帧了」，界面只管显示、不用自己判类型。
+        """
+        st = self.stats
+        # 「最大间隔」的告警门限必须跟着当前倍速走：采样间隔一旦超过「一个逻辑帧在
+        # 屏幕上停留的时长」就会整帧漏采。停留时长 = 1000 / (30 x 倍速)：
+        # 1X -> 33.3ms、2X -> 16.7ms。门限写死 33.3ms 的话，2 倍速下明明在漏采
+        # 也不会报警。倍速读不到时按 1X 算（保守，宁可多报也不漏报）。
+        jam_thr = 1000.0 / (LOGICAL_FPS * max(1.0, cur_m))
+        jam = st.gap_max_ms >= jam_thr
+        text = ('采样 %.1f Hz ｜ 最大间隔 %s%.1f ms%s ｜ 面板 %.0f Hz ｜ 抓屏 %.1f ms '
+                '｜ 采样 %d 次 ｜ 心跳 %d ｜ 读不到累计 %.2f s'
+                % (st.hz, '⚠ ' if jam else '', st.gap_max_ms,
+                   '（超过 %.1f ms，可能漏采）' % jam_thr if jam else '',
+                   ui_hz, st.grab_ms, st.samples, st.ticks, st.unreadable_s))
+        return text, jam
 
     def _on_error(self, exc: BaseException, misses: int) -> None:
         """一次采样抛异常之后的收尾：记账 + 自愈 + 让界面看得见。

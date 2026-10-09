@@ -37,15 +37,27 @@ BAR_W = 240
 FPS = 60.0
 BULLET_FPS = 30.0 / 5.0     # 子弹时间下游戏被压到的速率：固定 6 逻辑帧/秒
 
-RUN = PauseReading(ratio=0.30, running=True)
-PAUSED = PauseReading(ratio=0.05, running=False)
+RUN = PauseReading(ratio=0.30, running=True)          # ❚❚：正在运行
+PAUSED = PauseReading(ratio=0.05, running=False)      # ▶：已暂停
+# 关卡外：HUD 根本没画（暂停键 ROI 压在菜单的文字 / 高亮块上）。
+# ratio 故意给 0.24（够到「运行中」那条线）：占比高不等于画着字形 ——
+# 密密麻麻的细笔画占比能到 0.24，但腐蚀一遍什么都剩不下（drawn=False）。
+NO_HUD = PauseReading(ratio=0.24, running=True, drawn=False)
+BLIND_SPEED = SpeedReading(digit_ratio=0.0, corr_2x=float('nan'), has_digit=False,
+                           m=float('nan'), bullet=False, conf='low', drawn=False)
 
 
-def speed_reading(m, bullet=False):
-    """倍速键读数：有数字 -> m；子弹时间 -> 没数字、只有箭头。"""
+def speed_reading(m, bullet=False, drawn=True):
+    """倍速键读数：有数字 -> m；子弹时间 -> 没数字、只有实心箭头。
+
+    drawn=False 表示这个键**根本没画出来**（按钮淡出 / 被部署遮罩糊掉 / 不在关卡里），
+    关卡判定要靠它把「不在关卡里」认出来（见 features.SpeedReading.drawn）。
+    """
     if bullet:
         return SpeedReading(digit_ratio=0.0, corr_2x=float('nan'), has_digit=False,
                             m=float('nan'), bullet=True, conf='ok')
+    if not drawn:
+        return BLIND_SPEED
     return SpeedReading(digit_ratio=0.30, corr_2x=0.99, has_digit=True, m=float(m),
                         bullet=False, conf='ok')
 
@@ -103,6 +115,25 @@ def simulate(segments):
                 fill = synthesized_width(BAR_W, float(BAR_W), phase_frac(frames))
                 c.step(idx, t, bar(fill, 'TRACK'), RUN, speed_reading(speed))
                 continue
+            if mode == 'blur':
+                # 倍速键上**画着数字**、但模板对不上（corr 低、m 读成 nan）：
+                # 应当沿用上次读到的倍速继续数，而不是冻结（实测真实会话里有
+                # 2898/20436 拍是这种读数，见 docs 第 23 节）。
+                frames += speed * 30.0 * dt
+                truth += speed * 30.0 * dt
+                fill = synthesized_width(BAR_W, float(BAR_W), phase_frac(frames))
+                c.step(idx, t, bar(fill, 'TRACK'), RUN,
+                       SpeedReading(digit_ratio=0.30, corr_2x=0.42, has_digit=True,
+                                    m=float('nan'), bullet=False, conf='low'))
+                continue
+            if mode.startswith('fake'):
+                # 关卡外：条 ROI 压在菜单 / 仓库的高亮 UI 上，读出一条亮块。HUD 没画出来，
+                # 所以**一拍都不许记**（真值 0）—— 这是「在别的界面也计数」那条回归。
+                #   fakebar     亮块是死的（宽度一点不变）
+                #   fakebarmove 亮块在动（滚动列表 / 动画），旧代码会跟着数
+                fill = 239 if mode == 'fakebar' else 100 + (idx % 40)
+                c.step(idx, t, bar(fill, 'TRACK'), NO_HUD, speed_reading(1.0, drawn=False))
+                continue
             if mode.startswith('max'):
                 # 满费：整条灰底，相位被游戏钉在 0；退出后从 0 重新涨（实测结论）。
                 # 倍速键这一刻的形态决定速率：
@@ -111,9 +142,7 @@ def simulate(segments):
                 #   maxblind   -> 按钮淡出 / 被遮罩糊掉，速率未知 -> 真值 0（计数器应冻结）
                 frames = 0.0
                 if mode.endswith('blind'):
-                    rd = SpeedReading(digit_ratio=0.0, corr_2x=float('nan'),
-                                      has_digit=False, m=float('nan'),
-                                      bullet=False, conf='low')
+                    rd = BLIND_SPEED
                 else:
                     rd = speed_reading(speed, bullet=mode.endswith('bullet'))
                     truth += (BULLET_FPS if rd.bullet else speed * 30.0) * dt
@@ -145,6 +174,12 @@ def main():
         ('手动暂停计数', [(300, 1.0, 'run'), (300, 1.0, 'manual'),
                                  (300, 1.0, 'run')]),
         ('关卡外 10 秒', [(600, 1.0, 'idle')]),
+        # 关卡外：条 ROI 压在菜单 / 仓库的高亮 UI 上（死的和在动的都来一遍）。
+        # HUD 没画出来 -> 从关卡外**进**不了关卡（state.Counter 里那条规则）。
+        ('关卡外假白条', [(600, 1.0, 'fakebar')]),
+        ('关卡外假白条在动', [(600, 1.0, 'fakebarmove')]),
+        # 倍速数字画着但模板对不上：沿用上次读到的倍速接着数，不要冻结丢帧。
+        ('2X 数字糊了', [(300, 2.0, 'run'), (300, 2.0, 'blur')]),
         ('混合', [(180, 1.0, 'run'), (180, 2.0, 'run'), (300, 0.2, 'run'),
                   (180, 1.0, 'pause'), (240, 1.0, 'max'),
                   (300, 1.0, 'run'), (180, 1.0, 'idle'), (300, 1.0, 'run')]),
@@ -168,6 +203,8 @@ def main():
     # 已知**故意**不记的情况：满费 + 倍速键上什么都没画（按钮淡出 / 被部署遮罩糊掉）。
     # 这时速率未知，冻结不猜 —— 猜 1 倍速和猜 0.2 倍速各错 5 倍。
     # 注意**子弹时间不算这一类**：>>> 本身就把速率定死在 6 帧/秒（见上面的用例）。
+    # 也注意**和「数字糊了」的区别**：那一种是「键画着、字形认不出来」，
+    # 这种是「键压根没画」—— 判据就是 features.SpeedReading.drawn。
     got, truth, _ = simulate([(300, 1.0, 'run'), (300, 1.0, 'maxblind'), (300, 1.0, 'run')])
     expect = 300          # 只有两段 1X（各 150 帧）该被记；中间 300 拍冻结
     ok = abs(got - expect) <= 2

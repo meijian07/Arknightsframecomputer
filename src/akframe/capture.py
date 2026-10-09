@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from typing import Iterator
 
@@ -22,6 +23,7 @@ import numpy as np
 
 from .geometry import (Layout, Rect, bar_only_layout, layout_for,
                        reframe_layout)
+from .paths import app_dir
 
 ROI_NAMES = ('bar', 'pause', 'speed')
 FFMPEG_LABELS = {'bar': 'b', 'pause': 'p', 'speed': 's'}
@@ -53,8 +55,35 @@ class VideoInfo:
     duration: float | None
 
 
+def _ffmpeg_candidates():
+    """ffmpeg 可能待的地方（按「越可能是本机装的那个」排序）。
+
+    为什么要猜这几个目录：这台机器上唯一一份 ffmpeg 是**哔哩哔哩客户端自带的**
+    （%APPDATA%\\bilibili\\ffmpeg\\ffmpeg.exe），既不在 PATH 里，用户也不知道它在那儿。
+    只认 PATH 的话，「打开录像」会直接报「找不到 ffmpeg」—— 而这跟用户做的事毫无关系。
+    """
+    home = os.path.expanduser('~')
+    appdata = os.environ.get('APPDATA') or os.path.join(home, 'AppData', 'Roaming')
+    local = os.environ.get('LOCALAPPDATA') or os.path.join(home, 'AppData', 'Local')
+    pf = os.environ.get('ProgramFiles') or r'C:\Program Files'
+    rel = ('ffmpeg.exe', os.path.join('bin', 'ffmpeg.exe'),
+           os.path.join('ffmpeg', 'ffmpeg.exe'),
+           os.path.join('ffmpeg', 'bin', 'ffmpeg.exe'))
+    roots = [
+        app_dir(),                                  # 放在程序旁边（打包后跟着 exe）
+        os.path.join(appdata, 'bilibili', 'ffmpeg'),
+        os.path.join(local, 'Microsoft', 'WinGet', 'Links'),
+        os.path.join(pf, 'ffmpeg'),
+        os.path.join(home, 'scoop', 'shims'),
+        os.path.join(local, 'Programs', 'ffmpeg'),
+    ]
+    for root in roots:
+        for r in rel:
+            yield os.path.join(root, r)
+
+
 def find_ffmpeg(explicit: str | None = None) -> str:
-    """找 ffmpeg：显式参数 > 环境变量 AKFRAME_FFMPEG > PATH。"""
+    """找 ffmpeg：显式参数 > 环境变量 AKFRAME_FFMPEG > 常见安装位置 > PATH。"""
     if explicit:
         if not os.path.isfile(explicit):
             raise FileNotFoundError('指定的 ffmpeg 不存在：%s' % explicit)
@@ -62,12 +91,17 @@ def find_ffmpeg(explicit: str | None = None) -> str:
     env = os.environ.get('AKFRAME_FFMPEG')
     if env and os.path.isfile(env):
         return env
+    for cand in _ffmpeg_candidates():
+        if os.path.isfile(cand):
+            return cand
     found = shutil.which('ffmpeg')
     if found:
         return found
     raise FileNotFoundError(
-        '找不到 ffmpeg。请把它加到 PATH，或设环境变量 AKFRAME_FFMPEG，'
-        '或用 --ffmpeg 指定完整路径。')
+        '找不到 ffmpeg（录像输入要用它把视频解码成三路 ROI 灰度流）。'
+        '三个办法任选：把 ffmpeg.exe 放到程序旁边；设环境变量 AKFRAME_FFMPEG=完整路径；'
+        '或把它加到 PATH。已经找过：程序目录、%APPDATA%\\bilibili\\ffmpeg、'
+        'winget / scoop 的 shims、C:\\Program Files\\ffmpeg、PATH。')
 
 
 def probe_video(ffmpeg: str, path: str) -> VideoInfo:
@@ -90,8 +124,14 @@ def probe_video(ffmpeg: str, path: str) -> VideoInfo:
     return VideoInfo(fps=fps, size=size, duration=duration)
 
 
-def extract(ffmpeg: str, video: str, layout: Layout, outdir: str, force: bool = False) -> dict:
-    """抽出三路 ROI 原始灰度流，返回 meta。已抽过且 ROI 一致则直接复用缓存。"""
+def extract(ffmpeg: str, video: str, layout: Layout, outdir: str, force: bool = False,
+            progress=None, total_frames: int = None) -> dict:
+    """抽出三路 ROI 原始灰度流，返回 meta。已抽过且 ROI 一致则直接复用缓存。
+
+    progress     进度回调 progress(frac, done_bytes, total_bytes)。frac = 0..1，
+                 总数不知道时给 -1。抽一段几十秒的录像要几十秒，界面必须能显示它在动。
+    total_frames 预期帧数（界面拿 duration x fps 估的），只用来把进度换算成百分比。
+    """
     os.makedirs(outdir, exist_ok=True)
     meta_path = os.path.join(outdir, 'meta.json')
 
@@ -120,7 +160,10 @@ def extract(ffmpeg: str, video: str, layout: Layout, outdir: str, force: bool = 
     for n in names:
         cmd += ['-map', '[%s]' % FFMPEG_LABELS[n], '-f', 'rawvideo', '-pix_fmt', 'gray',
                 '-y', os.path.join(outdir, n + '.raw')]
-    subprocess.run(cmd, check=True)
+    if progress is None:
+        subprocess.run(cmd, check=True)
+    else:
+        _run_with_progress(cmd, outdir, names, layout, total_frames, progress)
 
     frame_bytes = {n: getattr(layout, n).pixels for n in names}
     counts = {}
@@ -145,6 +188,51 @@ def extract(ffmpeg: str, video: str, layout: Layout, outdir: str, force: bool = 
     with open(meta_path, 'w', encoding='utf-8') as fh:
         json.dump(meta, fh, ensure_ascii=False, indent=2)
     return meta
+
+
+def _run_with_progress(cmd, outdir, names, layout, total_frames, progress) -> None:
+    """跑 ffmpeg 并汇报进度。
+
+    进度用**输出文件已经写出来的字节数**估：rawvideo 不压缩、ffmpeg 又是顺序按帧写，
+    所以「已写字节 / 单帧字节 = 已抽帧数」，除以预期帧数就是百分比。比解析 ffmpeg 的
+    -progress 输出简单，而且不用管三路输出（三个文件）之间的对齐。
+    stderr 转向文件而不是管道：一是避免管道写满 64KB 把 ffmpeg 堵死（那就永远不结束了），
+    二是失败时能把原因读出来，报给面板/控制台 —— 打包后没有控制台，不报出来就查不了。
+    """
+    err_path = os.path.join(outdir, 'ffmpeg.log')
+    per_frame = sum(getattr(layout, n).pixels for n in names)
+    total = float(per_frame) * float(total_frames) if total_frames else 0.0
+    outs = [os.path.join(outdir, n + '.raw') for n in names]
+    with open(err_path, 'wb') as err:
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=err)
+        try:
+            while True:
+                # 文件还没建出来是正常的（ffmpeg 先解码、后写）：不算进度就行
+                done = sum(os.path.getsize(p) for p in outs if os.path.isfile(p))
+                progress(min(1.0, done / total) if total > 0 else -1.0, done, total)
+                if proc.poll() is not None:
+                    break
+                time.sleep(0.15)
+        except BaseException:                    # 界面取消 / 进程被杀：别留下孤儿 ffmpeg
+            proc.kill()
+            proc.wait()
+            raise
+    if proc.returncode != 0:
+        raise RuntimeError('ffmpeg 抽流失败（exit %s）：%s'
+                           % (proc.returncode, _tail(err_path)))
+
+
+def _tail(path: str, lines: int = 4) -> str:
+    """读日志尾巴（失败时给人看的那几行）。"""
+    try:
+        with open(path, 'rb') as fh:
+            text = fh.read().decode('utf-8', 'replace')
+    except OSError:
+        return '(读不到日志)'
+    text = text.strip()
+    if not text:
+        return '(ffmpeg 没有输出任何错误信息)'
+    return ' | '.join(text.splitlines()[-lines:])
 
 
 def _probe_fps_or(ffmpeg: str, video: str) -> float:
