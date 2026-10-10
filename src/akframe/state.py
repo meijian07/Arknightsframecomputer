@@ -49,14 +49,15 @@ MAX_SPEED_M = 2.0     # 游戏内最高倍速（2X = 60 逻辑帧/秒），做�
 # 所以**不能**用 last_m / 5 去算（2X 下那样会整段多记一倍），也不能当「0.2 倍速」。
 # 倍速键子弹时间下只画 >>>、不画数字，这条固定速率正好补上这个信息缺失。
 BULLET_FPS = LOGICAL_FPS / 5.0
-# ---- 满费时倍速键「整块空白」：按子弹时间算（2026-10-10，用户要求）----
-# 为什么需要这条：拖干员进子弹时间时，游戏把那颗倍速键**整块收起来**。实测
-# `Desktop 2026.10.09 - 22.36.10.14`（2560x1600 桌面录像）拖干员那两段（7.0~16.5 秒、
-# 25.0~29.0 秒）倍速键 ROI 里只剩场景：单帧最亮 206、30 帧逐像素最大值合成也没有字形；
-# 而同一段录像画着 1X / 2X 时字形是 255。也就是说 `>>>` 这台机器 / 这一版界面上
-# **我们读不到**（用户说画着三个三角 —— 我们看不到不等于它不在）。
-# 后果：满费 + 拖干员时速率读不到 -> 挂钟通道冻结 -> 那一段一帧都不记
-# （用户报的「满费下子弹时间过帧无法识别」就是它）。
+# ---- 满费 + 倍速键读不出数字：按子弹时间兜底（2026-10-10，用户要求）----
+# 为什么需要兜底：拖干员进子弹时间时倍速键上只画 >>>、不画数字 —— 而「满费挂钟
+# 通道」要靠倍速才能把秒数换成逻辑帧（见 BULLET_FPS）。读不到就等于没信息，
+# 那一段会一帧都不记（用户报的「满费下子弹时间过帧无法识别」就是它）。
+# 这里记一笔**曾经写错的原因**，免得再被它带偏：2026-10-10 之前这段注释写的是
+# 「游戏把那颗键整块收起来、ROI 里只剩场景（最亮 206）」—— 那是因为旧判据锚在
+# 「箭头带」上，而三角比那条带高一截：同一套阈值在一个录像里 1277/1277 命中、
+# 在另一个里 0/583。**三角一直都在**，只是比数字暗一点（峰值 236~239 vs 255）。
+# 现在按形状认（features 里 SPEED_GLYPH_* 那段：两段录像 1186/1186 + 583/583、零误报）。
 #
 # 规则（用户给的）：**这一局里读到过倍速数字**之后（1X / 2X，模板认不出也算「画着」，
 # 见 features.SpeedReading.has_digit），倍速键再变成「什么都没画」就按子弹时间算 ——
@@ -177,6 +178,7 @@ class FrameResult:
     negative: bool = False     # 这一拍在按「局内负费」算（速度减半）
     sign_run: int = 0          # 减号扫框里实测的最长纯白连续段（调框用，不进 CSV）
     sign_thr: int = 0          # 上面那条的判定阈值（调框用，不进 CSV）
+    glyph: float = float('nan')   # 「三个三角」形状分（面板显示，方便对着调阈值）
 
     def as_row(self) -> list:
         return [self.idx, '%.4f' % self.t, self.fill, self.bar_state,
@@ -366,6 +368,7 @@ class Counter:
                 pause_ratio=pause.ratio, running=running,
                 digit_ratio=speed.digit_ratio, corr_2x=speed.corr_2x,
                 has_digit=speed.has_digit, m=m, bullet=self._bullet,
+                glyph=speed.glyph,
                 mode='manual-pause', delta=0, elapsed=self.elapsed,
                 elapsed_f=self.elapsed_f, warn='',
                 phase=(self.timing.phase() if self.timing else 0.0), err=0,
@@ -512,6 +515,7 @@ class Counter:
             pause_ratio=pause.ratio, running=running,
             digit_ratio=speed.digit_ratio, corr_2x=speed.corr_2x,
             has_digit=speed.has_digit, m=m, bullet=self._bullet,
+            glyph=speed.glyph,
             mode=mode, delta=delta, elapsed=self.elapsed, elapsed_f=self.elapsed_f,
             warn=warn,
             phase=(self.timing.phase() if self.timing else 0.0),

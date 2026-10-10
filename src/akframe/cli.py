@@ -14,7 +14,8 @@ import numpy as np
 
 from .capture import find_ffmpeg, open_images, open_video
 from .paths import templates_dir
-from .features import read_bar, read_pause, read_sign, read_speed
+from .features import (BULLET_TEMPLATE_MARK, read_bar, read_pause, read_sign,
+                       read_speed)
 from .cost_rate import collect_cycles, infer_rate
 from .settings import DEFAULT_FRAMES_PER_COST
 from .state import CSV_HEADER, PROBE_MIN_SECONDS, Counter
@@ -75,13 +76,19 @@ def load_templates(dirpath: str):
         if not fn.endswith('.npy'):
             continue
         m = re.match(r'^(\d+)', fn)
-        if not m:
+        if m:
+            value = float(m.group(1))
+        elif fn.startswith('bullet'):
+            # 形状模板（不是倍速数字）：给一个负数做标记，read_speed 拿它认
+            # 「三个三角（>>>）」= 子弹时间，见 features._glyph_score。
+            value = BULLET_TEMPLATE_MARK
+        else:
             continue
         try:
             arr = np.load(os.path.join(dirpath, fn))
         except (OSError, ValueError):
             continue
-        out.append((float(m.group(1)), fn, arr.astype(np.float32)))
+        out.append((value, fn, arr.astype(np.float32)))
     return out
 
 
@@ -198,8 +205,9 @@ def main(argv=None) -> int:
         print('注意      : 画面里没有暂停键 / 倍速键（截屏或放大裁剪过），这两个通道关闭。')
         print('            计数只由费用条驱动；满费那几秒没有相位信息，按挂钟补，')
         print('            此时若按了暂停会多记（条正常推进时不受影响）。')
-    print('倍速模板  : %s' % (', '.join('%s->%.0fX' % (n, v) for v, n, _ in templates)
-                              if templates else '无（全部标记 low，沿用初始 2X）'))
+    print('倍速模板  : %s' % (', '.join(
+        '%s->%s' % (n, '三个三角(子弹时间)' if v < 0 else '%.0fX' % v)
+        for v, n, _ in templates) if templates else '无（全部标记 low，沿用初始 2X）'))
     if args.print_layout:
         return 0
 

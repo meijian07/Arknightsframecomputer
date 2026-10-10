@@ -122,7 +122,10 @@ class SpeedReading:
     conf: str             # 倍速判断的置信度：ok / low
     # 倍速键画出来了没有（有数字，或者箭头带里有**实心**箭头块）。默认 True，理由同上。
     drawn: bool = True
-    solid: float = 0.0   # 箭头带的实心占比（判 drawn / bullet 用的那个数），自检用
+    solid: float = 0.0   # 箭头带的实心占比（判 drawn 用的那个数），自检用
+    # 「三个三角（>>>）」的形状分：跟 templates/bullet.npy 的最大相关系数（见
+    # GLYPH_NCC_MIN 那段）。子弹时间就是靠它认的；读得到数字时不算，是 nan。
+    glyph: float = float('nan')
 
 
 def rel_threshold(roi: np.ndarray) -> float:
@@ -493,17 +496,195 @@ def read_pause(roi: np.ndarray, layout: Layout) -> PauseReading:
                         drawn=drawn, solid=solid)
 
 
+# ---- 倍速键上的「三个三角（>>>）」= 子弹时间 ----
+# 子弹时间下倍速键上**没有数字**，画的是三个三角（亮度不是纯白 255：实测块内 p90
+# 234~238、峰值 236~239，画 1X / 2X 时才是 255）。真正坑人的是**位置**：三角最亮的
+# 那一块落在 ROI 行 40..81，而旧判据只扫「箭头带」行 70..115 —— 只有最下面十来行
+# 压进去，3x3 腐蚀一遍剩不下东西，于是同一套阈值在一个录像里靠**场景亮块**顶出
+# 1277/1277 命中（实心占比恒 0.044）、在另一个录像里 0/583。见 docs 第 32 节。
+#
+# 现在改成认**形状**：把这一小块归一化之后跟录下来的模板（templates/bullet.npy，从
+# 2026-10-09 那一帧裁的、连当时的场景背景一起）比相关系数（NCC）。模板带着当时的
+# 背景，换一段录像、背景和半像素对位一变，固定在原位一个窗口就只有 0.598（余量
+# 0.05）；在几档缩放 + 横纵平移里搜一遍是 0.686（余量 0.14）。
+#
+# 实测（两段录像共 3442 帧逐帧跑完，2026-10-10 复测；这条判据只在「读不到数字」时才走）：
+#     三个三角    a 1186 帧 0.597..1.000（t>=7s 的那 1020 帧 >= 0.755）
+#                 b  583 帧 0.686..0.698（旧判据在这一段 0/583，见 docs 第 32 节）
+#     都没有      a   91 帧 0.360..0.548（全在 1.6~6.7s：进关卡按钮淡入）
+#     有数字      a   717 帧 0.274..0.549 / b 865 帧 0.258..0.647
+#                 —— 跟三角**重叠**！所以判据只能挂在「读不到数字」那一支上，
+#                 它不去否决已经读到并匹配上的数字（那种情况有别的规则兜着）
+# 阈值取 0.55：正好夹在 a 的负类最高 0.548 和正类最低 0.597 之间（两边各 ~0.05）。
+# 那一段是按钮淡入、类别本身就在过渡，再调阈值也拉不开；稳定段（t>=7s）余量是 0.207。
+SPEED_GLYPH_BAND = (30 / 159.0, 100 / 159.0)   # 三角所在条带（占 ROI 高度）
+SPEED_GLYPH_COLS = (20 / 199.0, 180 / 199.0)   # 占 ROI 宽度
+# 模板缩放的几档。注意条带只占 ROI 宽的 80%（SPEED_GLYPH_COLS），所以窗口比条带还宽
+# 的时候（scale > 1.25）一个位置都摆不下 —— 1.3 / 1.45 这两档在 2560x1440 客户区上
+# 实测是空的（真正跑起来的只有 1.0 / 1.15）。留着是为了别的 ROI 尺寸，代价只是两次
+# 查表。
+SPEED_GLYPH_SCALES = (1.0, 1.15, 1.3, 1.45)    # 模板缩放的几档
+SPEED_GLYPH_SHIFTS = (-0.125, 0.0, 0.125)   # 横向平移（占条带宽度 = 参照分辨率 20px）
+SPEED_GLYPH_ROWSHIFT = (-0.143, 0.0, 0.143)   # 纵向平移（占条带高度 = 参照分辨率 10px）
+# 两边都先降采样一半再比：实测 _glyph_score 一次从 1.42ms 掉到 0.30ms（4.7 倍），
+# 而形状分只差 +-0.014（三角 0.686 -> 0.672、淡入那一帧 0.548 -> 0.560）。实时链路
+# 默认 120Hz 采样、一拍只有 8.3ms 预算，而这条路在子弹时间里是**每拍都走**的。
+SPEED_GLYPH_DOWN = True
+GLYPH_NCC_MIN = 0.55
+# load_templates 给「形状模板」（不是倍速数字）的标记值：read_speed 把它当三角模板用。
+BULLET_TEMPLATE_MARK = -1.0
+
+
+def _glyph_templates(templates):
+    """从 templates 里挑出形状模板（值是负数的那几个，见 BULLET_TEMPLATE_MARK）。"""
+    return [arr for value, _name, arr in templates or () if value < 0]
+
+
+def _half2(img: np.ndarray):
+    """2x2 取均值降采样一半（奇数边丢掉最后一行 / 列；太小就返回 None）。
+
+    自己写而不是用 PIL：features 只依赖 numpy（和 _resize_nearest 一个理由）。
+    为什么要降：这一路在子弹时间里**每拍都走**，而实时链路默认 120Hz 采样（一拍 8.3ms）。
+    """
+    h, w = img.shape[0] // 2 * 2, img.shape[1] // 2 * 2
+    if h < 2 or w < 2:
+        return None
+    # 四个错位相加再乘 0.25：同样的事 reshape(...,2,2).mean(axis=(1,3)) 要 0.27ms，
+    # 这样写 0.03ms（实测；numpy 那两个轴一起规约很慢）。
+    return (img[:h:2, :w:2] + img[1:h:2, :w:2]
+            + img[:h:2, 1:w:2] + img[1:h:2, 1:w:2]) * 0.25
+
+
+def _glyph_level(img: np.ndarray) -> float:
+    """亮度基准 = 抽稀之后的中位数。
+
+    为什么抽稀：全量 np.median 实测一次 0.2ms，而这条路每拍要算好几遍（一拍 8.3ms）。
+    抽 1/4 的像素之后 0.02ms，对「减掉背景亮度」来说精度绰绰有余。
+    """
+    sample = img[::2, ::2] if img.ndim == 2 else img[::2]
+    return float(np.median(sample))
+
+
+def _glyph_norm(img: np.ndarray):
+    """按自己的亮度基准 / 峰值归一化到 0..1（不借整个 ROI 的亮度，换 HDR 档也不用改）。"""
+    med = _glyph_level(img)
+    span = max(1.0, float(img.max()) - med)
+    return np.clip((img - med) / span, 0.0, 1.0)
+
+
+def _glyph_score(roi: np.ndarray, templates) -> float:
+    """「三个三角（>>>）」的形状分：这一小块跟模板的最大相关系数（NCC）。
+
+    为什么不能只看亮度 / 面积：倍速键是半透明的，三种状态都透场景 —— 实测「内容区
+    实心占比」在有数字（p50 0.096）和三个三角（p50 0.102）之间根本分不开，场景亮块
+    还能顶到 0.478。形状是唯一分得开的东西（见上面那张实测表）。
+
+    模板只录了一个尺寸，所以要在几档缩放 + 横纵平移里取最大。实测（见 tools/fixtures
+    的 7 张真帧）：只比原位一个窗口时 2026-10-06 那段三角是 0.598（余量 0.05），
+    搜完 0.686（余量 0.14）；2026-10-09 那段一直是 0.755（模板就是从它身上裁的）。
+    模板存的是**原始灰度**，跟这一拍一样在比对时按自己归一化 —— 免得出现「模板是按
+    ROI 归一化的、这一拍是按条带归一化的」这种不对称。
+
+    模板那一侧的归一化结果是常量，缓存在 _glyph_tpl_flat 里 —— 实测这一步本来就占
+    一半（缓存前一次 1.9ms、缓存后 0.3ms）。
+    """
+    if not templates or roi is None or getattr(roi, 'size', 0) == 0:
+        return float('nan')
+    band = roi.mean(axis=2) if roi.ndim == 3 else roi
+    band = band.astype(np.float32)
+    if SPEED_GLYPH_DOWN:
+        band = _half2(band)
+        if band is None:
+            return float('nan')
+    h, w = band.shape
+    r0 = int(round(h * SPEED_GLYPH_BAND[0]))
+    r1 = max(r0 + 2, int(round(h * SPEED_GLYPH_BAND[1])))
+    c0 = int(round(w * SPEED_GLYPH_COLS[0]))
+    c1 = max(c0 + 2, int(round(w * SPEED_GLYPH_COLS[1])))
+    band_h, band_w = r1 - r0, c1 - c0
+    best = -2.0
+    for tpl in templates:
+        for scale in SPEED_GLYPH_SCALES:
+            th = max(4, int(round(band_h * scale)))
+            tw = max(4, int(round(band_w * scale)))
+            # 降采样 / 缩放 / 归一化只跟 (模板, 窗口尺寸) 有关，跟这一拍的像素无关：
+            # 第一次用到这个尺寸时算一遍存下来，之后每拍都是查表（见 _glyph_tpl_flat）。
+            flat = _glyph_tpl_flat(tpl, th, tw)
+            if flat is None:
+                continue
+            windows = []
+            for dy in SPEED_GLYPH_ROWSHIFT:
+                y0 = r0 + int(round(band_h * dy))
+                if y0 < 0 or y0 + th > h:
+                    continue
+                for dx in SPEED_GLYPH_SHIFTS:
+                    x0 = c0 + int(round(band_w * dx))
+                    if x0 < 0 or x0 + tw > w:
+                        continue
+                    windows.append(band[y0:y0 + th, x0:x0 + tw].ravel())
+            if not windows:
+                continue
+            # 一档里的几个平移**批量**算完，不逐个调用 _ncc：实测单次 _ncc 的调用开销
+            # 就要 0.034ms，9 个平移 x 4 档缩放 = 36 次 = 1.2ms，而一拍只有 8.3ms。
+            stack = _glyph_norm_flat(np.stack(windows))
+            den = np.sqrt((stack * stack).sum(axis=1)) * float(np.sqrt((flat * flat).sum()))
+            corr = np.zeros(stack.shape[0], dtype=np.float32)
+            ok = den > 0
+            corr[ok] = (stack[ok] @ flat) / den[ok]
+            top = float(corr.max())
+            if top > best:
+                best = top
+    return best
+
+
+def _glyph_norm_flat(rows: np.ndarray):
+    """按行归一化：每行减自己的亮度基准、除以自己的峰值-基准（给批量 NCC 用）。
+
+    基准同样抽稀（每 4 个像素取一个）—— 见 _glyph_level。
+    """
+    med = np.median(rows[:, ::4], axis=1, keepdims=True)
+    span = np.maximum(1.0, rows.max(axis=1, keepdims=True) - med)
+    return np.clip((rows - med) / span, 0.0, 1.0)
+
+
+# 模板那一侧的归一化结果缓存。键里用的是 id()，所以**值里必须回指模板对象本身** ——
+# 否则对象被回收之后 id 会被复用，缓存就串到别的模板上去了（ndarray 不可哈希，不能
+# 拿它本身当键）。模板是启动时从 templates/ 读一次、之后只读，缓存不会失效。
+_GLYPH_TPL_CACHE = {}
+
+
+def _glyph_tpl_flat(tpl, th: int, tw: int):
+    """模板一侧归一化之后的扁平向量（给批量 NCC 用）；同一个 (模板, 尺寸) 只算一次。"""
+    key = (id(tpl), th, tw)
+    hit = _GLYPH_TPL_CACHE.get(key)
+    if hit is not None and hit[0] is tpl:
+        return hit[1]
+    base = np.asarray(tpl, dtype=np.float32)
+    if SPEED_GLYPH_DOWN:
+        base = _half2(base)
+        if base is None:
+            return None
+    base = _glyph_norm(base)
+    if base.shape != (th, tw):
+        base = _resize_nearest(base, th, tw)
+        if base is None:
+            return None
+    flat = _glyph_norm_flat(base.reshape(1, -1))[0]
+    _GLYPH_TPL_CACHE[key] = (tpl, flat)
+    return flat
+
+
 def read_speed(roi: np.ndarray, layout: Layout, templates=()) -> SpeedReading:
     """读倍速键。
 
     三种形态：
         2X + 双箭头   粗白、不透明
         1X + 单箭头   细、半透明
-        >>>          只有三条细箭头，不显示数字（子弹时间）
+        >>>          只有**三个三角**，不显示数字（子弹时间）
 
-    子弹时间下倍速信息根本不存在于画面上，只能沿用上一次已知值 —— 这是信息缺失，
-    不是实现问题。同理，字形处于过渡/异形状态（匹配不上任何模板）时也沿用上次值，
-    并标记 conf='low'，绝不瞎猜一个倍速。
+    子弹时间下屏幕上根本没画倍速数字（只有那三个三角），读不到就只能沿用上一次已知值 ——
+    这是信息缺失，不是实现问题。同理，字形处于过渡/异形状态（匹配不上任何模板）时也沿用
+    上次值，并标记 conf='low'，绝不瞎猜一个倍速。
 
     templates: [(倍速值, 名字, 归一化模板数组), ...]，由 cli 从 templates/ 目录加载。
     """
@@ -522,14 +703,16 @@ def read_speed(roi: np.ndarray, layout: Layout, templates=()) -> SpeedReading:
 
     corr = float('nan')
     if not has_digit:
-        # 没有数字有两种完全不同的情况，必须分开：
-        #   (a) 真子弹时间（>>>）：箭头带里画着三条锐利的白箭头（实测 255）；
-        #   (b) 按钮淡出/整块变暗（过场、部署慢动作、暂停遮罩）：什么都有没画。
-        # 旧逻辑一律当成 (a)，于是挂钟通道按 1/5 速率算 —— 实测一段 2 倍速录像里
-        # 有 713 拍被这样误判，白白少记 140 帧（56 秒里差了 2.3 秒）。
+        # 读不到数字有三条岔路，必须分开（这一段 2026-10-10 按两段录像的量重写过）：
+        #   (a) 真子弹时间（>>>）：键上画着**三个三角**（半透明，峰值 236~239），没有数字
+        #       —— 用户说的「这里有三个三角」。它扫不到的原因是**位置**：三角在 ROI
+        #       行 40..81，而下面那条箭头带是行 70..115。得认形状（_glyph_score）。
+        #   (b) 按钮淡出 / 整块变暗（进关卡淡入、过场、暂停遮罩）：什么都没画。
+        #   (c) 旧判据「箭头带里有实心白块」在亮背景关卡上会被场景顶过去：同一套阈值
+        #       在 2026-10-09 那段里 1277/1277 命中，在 2026-10-06 那段里 0/583 命中。
+        #       现在它只用来判 drawn（这颗键画出来没有）。
         # 箭头带里「亮」的判据必须是相对的：绝对阈值 200 在 HDR 录像上命中率 0.0000
-        # （实测 UI 白只有 122、箭头带 p99 只有 91），子弹时间永远认不出来。
-        # 相对判据 = 这一帧自己的白电平，换 HDR 亮度档 / 换 SDR 白电平都不用改常数。
+        # （实测 UI 白只有 122、箭头带 p99 只有 91），那样什么都认不出来。
         ar0, ar1 = layout.speed.band_rows(*SPEED_ARROW_BAND)
         arrow = roi[ar0:ar1 + 1, :]
         hi = float(np.percentile(roi, 99.0))
@@ -543,18 +726,19 @@ def read_speed(roi: np.ndarray, layout: Layout, templates=()) -> SpeedReading:
             # 整块 ROI 没有对比度（按钮淡出 / 被遮罩糊平）：画面上根本没画东西
             arrow_ratio = 0.0
             arrow_solid = 0.0
-        # 两条都要过：占比（够不够大）+ 实心（是不是真画出来的形状）。
-        # 只看占比会把「别的窗口 / 桌面 / 菜单里的细笔画」全认成子弹时间，见 ARROW_SOLID_MIN。
-        if arrow_ratio >= ARROW_RATIO_MIN and arrow_solid >= ARROW_SOLID_MIN:
+        # 子弹时间的判据：这三个三角的形状分（对缩放 / 平移不敏感）。
+        glyph = _glyph_score(roi, _glyph_templates(templates))
+        if glyph >= GLYPH_NCC_MIN:
             return SpeedReading(digit_ratio=digit_ratio, corr_2x=corr, has_digit=False,
                                 m=float('nan'), bullet=True, conf='ok',
-                                solid=arrow_solid)
+                                solid=arrow_solid, glyph=glyph)
         # 倍速信息这一刻根本不存在于画面上：沿用上次已知倍速，也不按 1/5 打折。
         # drawn 必须用**实心**判据，不能用占比：关卡外那些细笔画占比能到 0.09（见
         # ARROW_SOLID_MIN），拿占比当「按钮画着」等于给菜单开绿灯 —— 关卡判定就废了。
         return SpeedReading(digit_ratio=digit_ratio, corr_2x=corr, has_digit=False,
                             m=float('nan'), bullet=False, conf='low',
-                            drawn=arrow_solid >= ARROW_SOLID_MIN, solid=arrow_solid)
+                            drawn=arrow_solid >= ARROW_SOLID_MIN, solid=arrow_solid,
+                            glyph=glyph)
 
     # 归一化：按钮有亮/暗两种渲染，绝对值阈值和直接比较都会失效，
     # 用 (值 - 中位数) / (峰值 - 中位数) 归一化后再比形状。
@@ -566,6 +750,9 @@ def read_speed(roi: np.ndarray, layout: Layout, templates=()) -> SpeedReading:
     best_name = ''
     best_corr = -2.0
     for m_val, name, arr in templates:
+        if m_val < 0:
+            # 形状模板（三个三角）：形状跟数字条带完全不同，别拿它比数字。
+            continue
         # 模板是在某个特定窗口尺寸下采集的，形状不一定和当前 ROI 一致。
         # 直接按最近邻缩放过去再比：UI 是等比缩放的，这样换分辨率也能用同一批模板。
         tpl = arr if arr.shape == norm.shape else _resize_nearest(arr, *norm.shape)

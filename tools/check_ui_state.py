@@ -6,10 +6,14 @@
     假白条（2026-10-05 那段会话：fill=154 连着 3.1 秒、fill=215 连着 1.5 秒），
     状态是 TRACK —— 只按「条在不在」判就会一路放行；
   - 暂停键：那些画面上 ROI 里只有细笔画 / 底色，亮点占比能到 0.09，看着像「运行中」；
-  - 倍速键：同上，细笔画让「箭头亮点占比」过 0.02，被读成子弹时间（速率差 5 倍）。
-所以三个读数的判据都落到「**画出来没有**」—— 3x3 腐蚀一遍之后的实心占比：
+  - 倍速键：同上，场景亮块让「箭头带实心占比」过 0.02，被读成子弹时间（速率差 5 倍）。
+所以两个读数的判据都落到「**画出来没有**」—— 3x3 腐蚀一遍之后的实心占比：
   - 暂停键  >= PAUSE_GLYPH_MIN = 0.020（实测关卡内 0.031~0.235，关卡外 0.000~0.0146）
   - 倍速箭头 >= ARROW_SOLID_MIN  = 0.020（实测真箭头 p5=0.0310，非箭头 max=0.0113）
+    —— 2026-10-10 起它**只用来判「这颗键画出来没有」**（state 的关卡判定）。
+    子弹时间改用**三个三角的形状分**（features._glyph_score，阈值 GLYPH_NCC_MIN = 0.55）：
+    实心占比那条在亮背景关卡上两头不靠 —— 真三角在箭头带**上方**（ROI 行 40..81，
+    带是行 70..115），本文件下面留了一条**反例**钉着这件事。
 关卡判定（state.Counter）：从关卡外**进**关卡必须看到 HUD；菜单压出来的亮块是死的，
 画不出 HUD，所以永远进不来。已经在关卡里才放宽成「HUD 或者条这一拍确实在动」。
 
@@ -32,7 +36,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'src'))
 
 from akframe.cli import DEFAULT_TEMPLATES, load_templates            # noqa: E402
-from akframe.features import (BarReading, PauseReading,  # noqa: E402
+from akframe.features import (GLYPH_NCC_MIN, BarReading, PauseReading,  # noqa: E402
                               SpeedReading, read_bar, read_pause, read_speed)
 from akframe.geometry import ARROW_SOLID_MIN, PAUSE_GLYPH_MIN        # noqa: E402
 from akframe.state import Counter                                    # noqa: E402
@@ -144,8 +148,8 @@ def scan(path):
             r = c.step(i, i / src.fps, br, pr, sr)
             rows.append(dict(i=i, state=br.state, fill=br.fill, p_drawn=pr.drawn,
                              p_solid=pr.solid, s_drawn=sr.drawn, s_solid=sr.solid,
-                             has_digit=sr.has_digit, bullet=sr.bullet, mode=r.mode,
-                             delta=r.delta))
+                             has_digit=sr.has_digit, bullet=sr.bullet,
+                             s_glyph=sr.glyph, mode=r.mode, delta=r.delta))
     finally:
         src.close()
     return rows
@@ -191,26 +195,31 @@ def real_frames():
                   'min=%.4f 中位=%.4f max=%.4f（阈值 %.3f）'
                   % (min(solids), float(np.median(solids)), max(solids),
                      PAUSE_GLYPH_MIN))
-        # 3) 子弹时间：真箭头的实心占比 vs 非箭头的实心占比，中间要留出余量
-        #    只统计关卡内的帧（片尾那些界面里另有 >>> 按钮，不属于子弹时间）
+        # 3) 子弹时间：判据是倍速键上**三个三角的形状分**（features._glyph_score），
+        #    不是「箭头带里有没有实心白块」—— 后者为什么不行，看紧接着的那条反例。
+        #    只统计关卡内的帧（片尾那些界面里另有 >>> 按钮，不属于子弹时间）。
         batt = [r for r in rows if r['i'] not in dead]
-        arrow = [r['s_solid'] for r in batt if r['bullet']]
-        noise = [r['s_solid'] for r in rows if not r['has_digit'] and not r['bullet']]
-        if arrow and noise:
-            # 两边都要留余量：阈值 0.020 往下离噪声、往上离真箭头都不能太近。
-            # （只断言「min(arrow) >= 阈值」是废话：能进 arrow 的帧本来就过了阈值。）
-            check('实测·箭头的实心占比与「没画箭头」的帧分得开',
-                  min(arrow) >= 1.4 * max(noise) and max(noise) < ARROW_SOLID_MIN,
-                  '箭头 min=%.4f（%d 帧）｜没画箭头 max=%.4f（%d 帧）｜比值 %.2f'
-                  % (min(arrow), len(arrow), max(noise), len(noise),
-                     min(arrow) / max(max(noise), 1e-9)))
-        # 4) 钉住这一轮把阈值从 0.012 提到 0.020：中间那一段以前会被读成子弹时间
-        mid = [r for r in rows
-               if not r['has_digit'] and 0.012 <= r['s_solid'] < ARROW_SOLID_MIN]
-        if mid:
-            check('实测·实心占比落在 [0.012, 0.020) 的帧没被读成子弹时间',
-                  all(not r['bullet'] for r in mid),
-                  '%d 帧（帧号 %s）' % (len(mid), sorted(r['i'] for r in mid)[:10]))
+        tri = [r for r in batt if r['bullet']]
+        other = [r for r in batt if not r['bullet'] and not r['has_digit']]
+        if tri and other:
+            lo = min(r['s_glyph'] for r in tri)
+            hi = max(r['s_glyph'] for r in other)
+            check('实测·形状分把「三个三角」和「什么都没画」分开',
+                  lo > hi and lo - hi >= 0.03 and hi < GLYPH_NCC_MIN,
+                  '三角 min=%+.3f（%d 帧）｜其它 max=%+.3f（%d 帧）｜差 %.3f｜阈值 %.2f'
+                  % (lo, len(tri), hi, len(other), lo - hi, GLYPH_NCC_MIN))
+            if len(tri) <= 4:
+                print('     注意：这一段里只有 %d 帧判成三角（%s），是场面顶过去的误报，'
+                      '不是真子弹时间'
+                      % (len(tri), sorted(round(r['s_glyph'], 3) for r in tri)))
+        # 4) 反例（钉在这儿不许再回去）：老判据看的「箭头带实心占比」分不开这两类 ——
+        #    真三角帧的实心占比能低到 0.0000（三角在带**上方**），没画三角的帧能高到 0.5+
+        #    （亮背景关卡里场景亮块顶上来）。修之前就是靠它判子弹时间的。
+        if tri and other:
+            a_min = min(r['s_solid'] for r in tri)
+            b_max = max(r['s_solid'] for r in other)
+            check('实测·老判据（箭头带实心占比）分不开这两类（反例）', a_min <= b_max,
+                  '三角 min=%.4f｜其它 max=%.4f —— 真三角也能是 0.0000' % (a_min, b_max))
 
 
 def main() -> int:

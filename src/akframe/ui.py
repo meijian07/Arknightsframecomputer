@@ -2166,10 +2166,14 @@ class MonitorApp:
                 speed_text = '倍速 %.0fX' % res.m
             else:
                 speed_text = '倍速未画出（沿用上次）'
+            # glyph = 「三个三角（>>>）」的形状分：子弹时间就是这么认出来的。
+            # 认不出来时先看它离 GLYPH_NCC_MIN(0.55) 差多少（同「减号 run/thr」的路子）。
             self.lb_speed.configure(
-                text='%s  conf=%s  digit=%.3f corr=%s' % (
+                text='%s  conf=%s  digit=%.3f corr=%s glyph=%s' % (
                     speed_text, 'ok' if res.corr_2x == res.corr_2x else 'low',
-                    res.digit_ratio, '%.3f' % res.corr_2x if res.corr_2x == res.corr_2x else '—'))
+                    res.digit_ratio,
+                    '%.3f' % res.corr_2x if res.corr_2x == res.corr_2x else '—',
+                    '%.3f' % res.glyph if res.glyph == res.glyph else '—'))
             self.lb_warn.configure(text=('告警：' + res.warn) if res.warn else '',
                                    fg=WARN)
             self._update_cycle(res)
