@@ -134,6 +134,14 @@ def simulate(segments):
                 fill = 239 if mode == 'fakebar' else 100 + (idx % 40)
                 c.step(idx, t, bar(fill, 'TRACK'), NO_HUD, speed_reading(1.0, drawn=False))
                 continue
+            if mode == 'runblind':
+                # 条正常推进，但倍速键**整块没画**（从没见过数字的场景要用它）：
+                # 像素通道不看倍速，所以这一段照样该记 30 帧/秒。
+                truth += speed * 30.0 * dt
+                frames += speed * 30.0 * dt
+                fill = synthesized_width(BAR_W, float(BAR_W), phase_frac(frames))
+                c.step(idx, t, bar(fill, 'TRACK'), RUN, BLIND_SPEED)
+                continue
             if mode.startswith('max'):
                 # 满费：整条灰底，相位被游戏钉在 0；退出后从 0 重新涨（实测结论）。
                 # 倍速键这一刻的形态决定速率：
@@ -200,16 +208,28 @@ def main():
             for mode, speed, n, gotd, truthd in detail:
                 print('      %-8s %4.1fX %5d 拍  状态机 %6.1f  真值 %6.1f  差 %+6.1f'
                       % (mode, speed, n, gotd, truthd, gotd - truthd))
-    # 已知**故意**不记的情况：满费 + 倍速键上什么都没画（按钮淡出 / 被部署遮罩糊掉）。
-    # 这时速率未知，冻结不猜 —— 猜 1 倍速和猜 0.2 倍速各错 5 倍。
-    # 注意**子弹时间不算这一类**：>>> 本身就把速率定死在 6 帧/秒（见上面的用例）。
-    # 也注意**和「数字糊了」的区别**：那一种是「键画着、字形认不出来」，
+    # 满费 + 倍速键**整块空白**：这一条是**用户 2026-10-10 定的规则** ——
+    # 拖干员进子弹时间时游戏把那颗键整块收起来（>>> 我们读不到），所以改成
+    # 「这一局里读到过倍速数字」之后再空白就按子弹时间算（恒 BULLET_FPS = 6 帧/秒），
+    # 不再冻在那儿（用户报的「满费下子弹时间过帧无法识别」就是冻结那一段）。
+    # 注意**和「数字糊了」的区别**：那一种是「键画着、字形认不出来」（走记忆倍速），
     # 这种是「键压根没画」—— 判据就是 features.SpeedReading.drawn。
+    # 代价：万一某次空白其实是按钮淡出而不是子弹时间，这一段会按 1/5 记（少记 5 倍），
+    # 所以 warn 单列 bullet-assumed，面板 / CSV 上看得见。见 docs 第 32 节。
     got, truth, _ = simulate([(300, 1.0, 'run'), (300, 1.0, 'maxblind'), (300, 1.0, 'run')])
-    expect = 300          # 只有两段 1X（各 150 帧）该被记；中间 300 拍冻结
+    expect = 300 + 30     # 两段 1X 各 150 帧；中间满费空白 5 秒按 6 帧/秒 = 30 帧
     ok = abs(got - expect) <= 2
     print('%-18s %10d %10d %8s  %s'
-          % ('满费+倍速未知', got, expect, '%+d' % (got - expect), 'OK ' if ok else 'BAD'))
+          % ('满费+空白(见过数字)', got, expect, '%+d' % (got - expect), 'OK ' if ok else 'BAD'))
+    if not ok:
+        bad += 1
+    # 对照组：**从没见过**倍速数字（刚进关卡就是空白）-> 仍旧冻结，不许按 1/5 猜。
+    got, truth, _ = simulate([(300, 1.0, 'runblind'), (300, 1.0, 'maxblind'),
+                              (300, 1.0, 'runblind')])
+    expect = 300          # 两段 1X 各 150 帧；中间 300 拍冻结
+    ok = abs(got - expect) <= 2
+    print('%-18s %10d %10d %8s  %s'
+          % ('满费+空白(没见过数字)', got, expect, '%+d' % (got - expect), 'OK ' if ok else 'BAD'))
     if not ok:
         bad += 1
 

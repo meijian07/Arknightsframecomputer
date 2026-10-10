@@ -49,8 +49,9 @@ from . import boxpick
 from .geometry import (BAR_BAND_BOTTOM, BAR_BAND_TOP, Rect, apply_deltas, layout_for,
                        load_calibration)
 from .live import LiveMonitor
-from .settings import (COST_RATE_PRESETS, DEFAULT_FRAMES_PER_COST, clamp_frames_per_cost,
-                       format_frames_per_cost, save_cost_rate)
+from .settings import (COST_RATE_PRESETS, DEFAULT_FRAMES_PER_COST, NEGATIVE_LABELS,
+                       NEGATIVE_MODES, clamp_frames_per_cost, format_frames_per_cost,
+                       parse_negative, save_cost_rate, save_negative_mode)
 from .scale import ScaleGeom, Theme, build as build_scale, clip, one_line
 from .scale_render import render as render_scale
 from .state import LOGICAL_FPS
@@ -142,6 +143,8 @@ FULL_COST_HOLD_TICKS = 12
 # 「自己填一个数」的那个下拉项。选中它不切档，只把光标丢进输入框。
 RATE_CUSTOM_LABEL = '自定义（在右边输入）'
 AUTO_RATE_LABEL = '自动识别中…'
+# 负费档的下拉框用的是「说明文字」，要靠这张表翻回档名
+_NEG_BY_LABEL = {v: k for k, v in NEGATIVE_LABELS.items()}
 
 
 def _rate_label(frames: float) -> str:
@@ -496,7 +499,10 @@ class MonitorApp:
             templates = load_templates(DEFAULT_TEMPLATES)
         self.templates = list(templates)
         self.calib_path = calib_path
-        self.settings_path = settings_path      # 回费速率设置文件（改档时写回这里）
+        # 回费速率 + 局内负费两个设置共用一个文件（改档时写回这里）
+        # 负费档从监视器上取（--negative 已经解析过），面板只负责显示和改
+        self.settings_path = settings_path
+        self.negative_mode = parse_negative(getattr(monitor, 'negative_mode', 'auto'))
         self.poll_ms = poll_ms
         self.deltas = {k: [0, 0, 0, 0] for k in ROI_ORDER}
         self.calib_scale = None
@@ -999,6 +1005,28 @@ class MonitorApp:
         self.en_rate.bind('<Return>', lambda _e: self.apply_rate_entry())
         self._btn(rate_row, '应用', self.apply_rate_entry).pack(side='left', padx=3)
 
+        # ---- 局内负费（费用条上出现减号）：一费 30 -> 60 逻辑帧 ----
+        # 默认「自动」= 按画面判（费用数字左边那条纯白横杠，见 features.read_sign）。
+        # 认不出来时能强制开 / 关，把计数救回来 —— 那个扫描框是照抄前人的
+        # （geometry.sign_rect），还没拿真录像钉过，所以下面「费用周期」那行会摆一个
+        # 「减号 run/thr」：run 是框里实测最长的纯白横杠，离 thr 差多少一眼就看得出
+        # （正常画面 run 应当明显小于 thr，见 docs 第 31 节）。
+        neg_row = tk.Frame(self.fr_more, bg=UI_BG)
+        neg_row.pack(fill='x', **pad)
+        self._label(neg_row, '局内负费', 10).pack(side='left')
+        self.neg_var = tk.StringVar(value=NEGATIVE_LABELS[self.negative_mode])
+        self.neg_menu = tk.OptionMenu(
+            neg_row, self.neg_var, *[NEGATIVE_LABELS[m] for m in NEGATIVE_MODES],
+            command=self._on_negative_pick)
+        self.neg_menu.config(bg=CARD_HI, fg=UI_FG, activebackground=CARD_HI,
+                             activeforeground=UI_FG, relief='flat', highlightthickness=0,
+                             font=(FONT_UI, 9), width=26, anchor='w', padx=4, pady=2)
+        self.neg_menu['menu'].config(bg=CARD, fg=UI_FG, activebackground=RULE,
+                                     activeforeground=UI_BG, relief='flat',
+                                     font=(FONT_UI, 9))
+        self.neg_menu.pack(side='left', padx=(6, 6))
+        self._label(neg_row, '负费时每逻辑帧只攒一半', 9, UI_DIM).pack(side='left')
+
         # ---- 诊断：费用周期 / 性能 / 当前输入，以及三个 ROI 的实时预览 ----
         # 这三张预览是**调 ROI 用的**（红框 = 特征真正在取样的那条带），平时不用看，
         # 所以跟着展开区一起收起来。
@@ -1287,6 +1315,25 @@ class MonitorApp:
             return
         self.apply_cost_rate(v)
 
+    def _on_negative_pick(self, label):
+        self.apply_negative(_NEG_BY_LABEL.get(label, 'auto'))
+
+    def apply_negative(self, mode):
+        """切「局内负费」档：立刻生效（相位不断）+ 写回设置文件。
+
+        换档不重新起锚：负费的进场 / 离场在游戏里就是「累加器接着走、只换速度」，
+        重新起锚反而会在那一帧丢掉 / 多记一帧（见 Counter._boundary_correction）。
+        """
+        mode = self.monitor.set_negative_mode(mode)
+        self.negative_mode = mode
+        self.neg_var.set(NEGATIVE_LABELS[mode])
+        note = '局内负费 = %s' % NEGATIVE_LABELS[mode]
+        try:
+            save_negative_mode(self.settings_path, mode)
+            self._set_note('%s，已存到 %s' % (note, os.path.abspath(self.settings_path)))
+        except OSError as exc:
+            self._set_note('%s，但存盘失败：%s' % (note, exc))
+
     def apply_cost_rate(self, value):
         """切到某个回费速率：立刻生效（已数的像素帧按比例换算）+ 写回设置文件。"""
         v = clamp_frames_per_cost(value)
@@ -1513,6 +1560,7 @@ class MonitorApp:
         old = self.monitor
         csv_path = getattr(old, '_csv_path', None)
         rate = getattr(old, 'cost_rate', DEFAULT_FRAMES_PER_COST)
+        neg = parse_negative(getattr(old, 'negative_mode', 'auto'))
         paused = bool(getattr(old, 'manual_pause', False))
         old_counter = old.counter if was_running else None
         try:
@@ -1534,7 +1582,8 @@ class MonitorApp:
             self.live_monitor = old             # 实时那条链路留着，等「切回实时」
 
         mon = WindowMonitor(win, source=src, layout=src.auto_layout,
-                            templates=self.templates, csv_path=csv_path, cost_rate=rate)
+                            templates=self.templates, csv_path=csv_path, cost_rate=rate,
+                            negative=neg)
         mon.set_manual_pause(paused)            # 「暂停计数」是跨来源的开关，别被切没了
         if old_counter is not None:
             # 重新校准不该把数出来的帧数清掉；只搬 elapsed 会被下一拍覆盖，见 Counter.adopt
@@ -1737,7 +1786,8 @@ class MonitorApp:
         px, py = self.root.winfo_rootx(), self.root.winfo_rooty()
         pw, ph = self.root.winfo_width(), self.root.winfo_height()
         hits = []
-        for name, label in (('bar', '费用条'), ('pause', '暂停键'), ('speed', '倍速键')):
+        for name, label in (('bar', '费用条'), ('pause', '暂停键'), ('speed', '倍速键'),
+                            ('sign', '减号框')):
             r = getattr(lay, name, None)
             if r is None:
                 continue
@@ -2180,6 +2230,14 @@ class MonitorApp:
         per = float(counter.frames_per_cost) if counter is not None else LOGICAL_FPS
         into = int(round(res.phase * per))
         parts = []
+        # 局内负费（费用条上出现减号）：这一拍按速度减半在算（一费 60 逻辑帧）。
+        if getattr(res, 'negative', False):
+            parts.append('局内负费（每逻辑帧只攒一半）')
+        # 减号框的原始证据：run = 框里实测最长的纯白横杠，thr = 判定用的宽度阈值。
+        # 自动档下这两个数就是「框对不对」唯一的凭据（认不出来时先看差多少，
+        # 比猜阈值省事；见 docs 第 31 节）。
+        if self.negative_mode == 'auto' and getattr(res, 'sign_thr', 0):
+            parts.append('减号 %d/%d' % (res.sign_run, res.sign_thr))
         # 回费速率（减费 tag）：手工设置的档位，或「自动识别」认准后自动切的档
         est = getattr(self.monitor, 'rate_estimate', None)
         auto_ok = est is not None and est.frames_per_cost

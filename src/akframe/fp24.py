@@ -21,7 +21,17 @@ from __future__ import annotations
 LOGICAL_FPS = 30          # 游戏内时钟恒为 30 帧/秒，和画面帧数设置无关
 SCALE = 1 << 24           # 1.0 的定点表示
 EPSILON_RAW = 167         # 回费判定容差，约 1e-5
+# 「回费变慢」在游戏里是**两条不同的路**，不能混：
+#   * 战前 tag（突袭 / 磨难 / 合约词条）改 required（一费要攒多少）—— required_from_frames
+#     走的就是这条；
+#   * 战斗中才生效的（局内负费 / 可露希尔 / 忍冬）改 speed（每逻辑帧攒多快）——
+#     负费就是把 speed 减半，一费从 30 逻辑帧变成 60 逻辑帧。
+# 前人 fp24 的 NORMAL_SPEED / NEGATIVE_SPEED（SCALE/30 与 SCALE/60）就是这个分法。
+# 为什么不能把负费写成「required 翻倍」：一费几帧确实都对，但**边界周期**（第几费会
+# 多出 1 帧）落在哪一费上不一样；而且负费是局内随时变的，改 required 就得重新起锚，
+# 相位会断（实测转场那一帧会丢 1 帧）。
 SPEED_NORMAL = SCALE // 30      # 559240，正常：1 秒 1 费
+SPEED_NEGATIVE = SCALE // 60    # 279620，局内负费（费用条上出现减号）：2 秒 1 费
 
 
 def required_from_frames(frames: float) -> int:

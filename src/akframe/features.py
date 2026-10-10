@@ -54,6 +54,19 @@ PQ_C2 = 18.8515625
 PQ_C3 = 18.6875
 SDR_BREAK = 0.0031308  # sRGB 编码的分段点
 GRAY_TOL = 20        # 灰度校验：R/G/B 两两之差超过它就不算灰度像素
+
+# ---- 局内负费：费用数字左边那个「减号」 ----
+# 判据照抄前人（cost_bar.rs 的 is_cost_negative），只有三条：
+#   ① 纯白：> WHITE_MIN(250)。数字的抗锯齿边只有「亮」，凑不出一条长纯白横杠；
+#   ② 这条纯白横杠要**连续**够长（SIGN_MIN_RUN_UNIT）—— 数字的竖笔画只有 5~8px，
+#      而减号本身就是一条横杠，整条都是纯白；
+#   ③ 有一行满足就够（720p 下减号的纯白芯只有一行高，分辨率越高越厚）。
+# 前人在 1280x720 上量出来的下限是 14px，换成 s = 1（1920x1080）就是 21px。
+# 实测依据（用户截图 屏幕截图 2026-10-02 104850.png，客户区 1905x1085）：
+# 「22」这两个数字最长的纯白横杠是 18px（y=804，阈值 21），判定为「不是负费」——
+# 正常画面下留了 3px 余量，见 docs 第 31 节。
+SIGN_MIN_RUN_UNIT = 21.0
+SIGN_MIN_ROWS = 1
 VALIDITY_LEFT_INSET = 1   # 判「条还在不在」时跳过最左 1px（HUD 高光高发区）
 
 
@@ -68,6 +81,19 @@ class BarReading:
     masked: bool = False   # 是不是按「整体压暗」那一遍扫出来的
     gray_ok: bool = True   # 彩色输入时的灰度校验有没有通过
     dim: bool = False      # 是不是靠「亮度自适应」那一遍读出来的（HDR / 压暗画面）
+
+
+@dataclass
+class SignReading:
+    """局内负费读数（费用数字左边那个减号）。
+
+    negative 是给状态机用的那一个；run / rows / thr 是给面板调框用的原始证据 ——
+    认不出负费时，先看 run 离 thr 差多少，比猜阈值省事。
+    """
+    negative: bool    # 扫框里出现了那条够长的纯白横杠
+    run: int          # 扫框里实测的**最长**纯白连续段（像素）
+    rows: int         # 有多少行出现了够长的横杠
+    thr: int          # 这一拍用的宽度阈值（= SIGN_MIN_RUN_UNIT x scale，四舍五入）
 
 
 @dataclass
@@ -409,6 +435,36 @@ def read_bar(roi: np.ndarray, layout: Layout) -> BarReading:
         state = 'TRACK'
     return BarReading(fill=fill, grey146=grey146, grey88=grey88, state=state, row=row,
                       masked=masked, gray_ok=gray_ok, dim=dim)
+
+
+def read_sign(roi: np.ndarray, layout: Layout) -> SignReading:
+    """读「费用数字左边的减号」—— 局内负费唯一的像素判据。
+
+    为什么必须有它：负费期间每逻辑帧只攒一半，一费从 30 逻辑帧变成 60。不认出来的话
+    相位模型会按 1/30 往前推，`_resync` 只能挑到真值一半的 k —— 计数器直接把那一段
+    数成一半（不是「多记」也不是「少记一帧」，是整段 2 倍偏差）。见 docs 第 31 节。
+
+    roi 是 geometry.sign_rect 那个框的灰度图（一行一行扫，够小，不用向量化）。
+    """
+    thr = max(6, int(round(SIGN_MIN_RUN_UNIT * float(getattr(layout, 'scale', 1.0) or 1.0))))
+    if roi is None or getattr(roi, 'size', 0) == 0:
+        return SignReading(negative=False, run=0, rows=0, thr=thr)
+    band = roi.mean(axis=2) if roi.ndim == 3 else roi
+    lit = band > WHITE_MIN
+    best_run, rows = 0, 0
+    for y in range(lit.shape[0]):
+        run = 0
+        longest = 0
+        for value in lit[y]:
+            run = run + 1 if value else 0
+            if run > longest:
+                longest = run
+        if longest > best_run:
+            best_run = longest
+        if longest >= thr:
+            rows += 1
+    return SignReading(negative=rows >= SIGN_MIN_ROWS, run=int(best_run), rows=rows,
+                       thr=thr)
 
 
 def read_pause(roi: np.ndarray, layout: Layout) -> PauseReading:

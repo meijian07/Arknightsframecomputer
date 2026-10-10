@@ -37,9 +37,11 @@ import numpy as np
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'src'))
 
-from akframe.features import BarReading, PauseReading, SpeedReading   # noqa: E402
+from akframe.features import (BarReading, PauseReading, SignReading,  # noqa: E402
+                              SpeedReading)
+from akframe.fp24 import SCALE, SPEED_NEGATIVE, SPEED_NORMAL, CostTiming  # noqa: E402
 from akframe.state import (ANCHOR_MAX_CATCHUP, BULLET_FPS,  # noqa: E402
-                           REJECT_RESYNC_SECONDS, Counter)
+                           LOGICAL_FPS, REJECT_RESYNC_SECONDS, Counter)
 from akframe.synthesis import synthesized_width                       # noqa: E402
 
 BAR_W = 120
@@ -478,6 +480,178 @@ def rate_switch_rescale(fps=60.0):
     return bad
 
 
+def _negative_run(samples, neg_of, fps=60.0, show_sign=True):
+    """负费合成信号：游戏侧那个定点累加器按 speed 换挡，像素只从它的相位画出来。
+
+    返回 (计数器, 那一拍画面里到底有没有减号)。
+
+    真值就是**采样拍数**（60Hz + 1X -> 每拍正好 1 个逻辑帧，和 simulate() 同一套
+    约定）：负费只改变「一费几个逻辑帧」（30 -> 60），**不改变逻辑帧率**。
+    """
+    game = CostTiming(SCALE)
+    c = Counter(BAR_W, fps=fps)
+    dt = 1.0 / fps
+    t = 0.0
+    for i in range(samples):
+        neg = bool(neg_of(i))
+        game.advance_one_frame(SPEED_NEGATIVE if neg else SPEED_NORMAL)
+        fill = synthesized_width(BAR_W, float(BAR_W), game.phase())
+        t += dt
+        lit = neg and show_sign
+        # 有减号时框里那条纯白横杠实测 40px 上下（阈值 21）；没有减号时正常画面最长
+        # 只有 ~18px（用户截图实测，见 features.SIGN_MIN_RUN_UNIT）。
+        sign = SignReading(negative=lit, run=40 if lit else 18,
+                           rows=3 if lit else 0, thr=21)
+        c.step(i + 1, t, bar(fill, 'TRACK'), RUN, SPEED, sign)
+    return c, samples
+
+
+def negative_cost_timing(fps=60.0):
+    """局内负费：一费 30 -> 60 逻辑帧，进场 / 离场（含压回费边界）一帧都不丢。
+
+    为什么这条是**必须**做的：不认减号时，相位按 1/30 往前推，_resync 只能挑到真值
+    一半的 k —— 整段负费被数成一半（不是差一两帧）。下面「对照组」就是同一段信号
+    把减号抹掉再跑一遍，差多少直接摆出来。
+    返回 (失败项列表, 报告行列表)。
+    """
+    bad, lines = [], []
+
+    cases = [
+        ('全负费 300 拍', 300, lambda i: True),
+        ('正 -> 负(第120拍) -> 正(第300拍) 420 拍', 420, lambda i: 120 <= i < 300),
+        ('负 -> 正(第150拍) 300 拍', 300, lambda i: i < 150),
+        ('转场正好压在回费边界上 400 拍', 400, lambda i: 30 <= i < 45),
+    ]
+    for name, n, fn in cases:
+        c, truth = _negative_run(n, fn, fps)
+        mark = 'OK' if c.elapsed == truth else 'BAD'
+        lines.append('  %-4s %-34s elapsed=%4d 真值=%4d 差 %+d  周期=%s'
+                     % (mark, name, c.elapsed, truth, c.elapsed - truth,
+                        sorted(set(c.cycle_lengths))[:4]))
+        if c.elapsed != truth:
+            bad.append((name, c.elapsed, truth))
+
+    # 长跑：负费期间的「61 帧那一费」也要和 fp24 算得一样。定点累加器每帧少攒
+    # 16/2^24（60 x SCALE//60 = SCALE - 16），攒够 EPSILON(167) 就要多花一帧，
+    # 所以第 11 费是 61 帧（16 x 11 = 176 > 167）；多花那一帧把残余一次顶高，
+    # 下一个 61 要等约 3.5 万个周期 —— 前人的 fp24 单测也是这么写的
+    # （lengths[34962] == 31）。起锚那一拍是从条宽反推的相位、不是累加器原点，
+    # 所以第一个 61 会提前一两格：只断言「前 12 个周期里出现一次」+「1800 拍里只出现 1 次」。
+    long_n = 1800
+    cl = _negative_run(long_n, lambda i: True, fps)[0].cycle_lengths
+    n61 = cl.count(61)
+    if sorted(set(cl)) != [60, 61]:
+        bad.append(('长跑逐周期长度', cl[:12], '只有 60 / 61'))
+    elif 61 not in cl[:12]:
+        bad.append(('前 12 个周期里应当出现一次 61 帧', cl[:12], '含 61'))
+    elif n61 != 1:
+        bad.append(('1800 拍（30 个周期）里 61 帧的周期数', n61, 1))
+    lines.append('  %-4s %-34s elapsed=%4d 真值=%4d  61 帧在第 %s 个周期，共 %d 个'
+                 % ('OK' if not bad else 'BAD', '全负费 1800 拍（第 11 费该多 1 帧）',
+                    long_n, long_n, [i + 1 for i, v in enumerate(cl) if v == 61], n61))
+
+    # 对照组：同一段信号，把画面里的减号抹掉（= 不认负费）
+    ctrl, truth = _negative_run(300, lambda i: True, fps, show_sign=False)
+    lines.append('  ---- 对照组：不认减号（同一条信号）elapsed=%d 真值=%d 差 %+d'
+                 % (ctrl.elapsed, truth, ctrl.elapsed - truth))
+    if ctrl.elapsed * 2 != truth:
+        bad.append(('不认减号时应当正好数成一半', ctrl.elapsed, truth // 2))
+    return bad, lines
+
+
+BLIND = SpeedReading(digit_ratio=0.02, corr_2x=float('nan'), has_digit=False,
+                     m=float('nan'), bullet=False, conf='low', drawn=False, solid=0.0)
+DIGIT_1X = SpeedReading(digit_ratio=0.30, corr_2x=1.0, has_digit=True, m=1.0,
+                        bullet=False, conf='ok')
+DIGIT_2X = SpeedReading(digit_ratio=0.30, corr_2x=1.0, has_digit=True, m=2.0,
+                        bullet=False, conf='ok')
+
+
+def bullet_assumed_at_max(fps=60.0, seconds=1.0):
+    """满费 + 倍速键「整块空白」：读到过数字就按子弹时间算，从没读到过才冻结。
+
+    实测背景（见 state.BULLET_ASSUMED_WARN 上面那段）：拖干员进子弹时间时游戏把那颗
+    倍速键整块收起来，`>>>` 在像素上读不到 —— 满费时速率就没有来源了。用户给的规则是
+    「读到过 1X 之后识别不到就按子弹时间算」。这里验四条：
+
+        (a) 先看到 1X，再整块空白 -> 按 6 帧/秒记（不是 30、也不是「凍结 0」）；
+        (b) 先看到 2X，再整块空白 -> 还是 6 帧/秒（**不能**拿 last_m/5 算成 12）；
+        (c) 从没读到过数字 -> 仍旧冻结 0 帧、warn=speed-unknown（宁可少记不瞎猜）；
+        (d) 空白结束、倍速键又画回 2X -> 恢复 60 帧/秒。
+
+    返回 (失败项列表, 说明行列表)。
+    """
+    dt = 1.0 / fps
+    beats = int(round(fps * seconds))
+    bad = []
+    lines = []
+
+    def at_max(c, idx, t, sp):
+        """喂 `beats` 拍满费，返回 (idx, t, 新增整数帧, 新增带小数帧, warn, mode)。
+
+        带小数的那个用于断言速率：60 拍 x (1/60) 秒在浮点下差最后一点，
+        整数部分会少 1 帧而余量留在 _clock_frac 里（下一拍就还回来了）。
+        """
+        before, before_f = c.elapsed, c.elapsed_f
+        for _ in range(beats):
+            idx += 1
+            t += dt
+            r = c.step(idx, t, bar(0, 'MAX'), RUN, sp)
+        return idx, t, c.elapsed - before, c.elapsed_f - before_f, r.warn, r.mode
+
+    def warm(c, sp, idx, t, n=30):
+        """起锚 + 进关卡：喂 n 拍正常推进的条（像素通道不看倍速）。"""
+        phase = 0.0
+        for _ in range(n):
+            idx += 1
+            t += dt
+            phase += 1.0
+            fill = synthesized_width(BAR_W, float(BAR_W), phase_frac(phase))
+            c.step(idx, t, bar(fill, 'TRACK'), RUN, sp)
+        return idx, t
+
+    # (a) 1X 之后空白
+    c = Counter(BAR_W, fps=fps)
+    idx, t = warm(c, DIGIT_1X, 0, 0.0)
+    idx, t, _, _, _, _ = at_max(c, idx, t, DIGIT_1X)          # 先真的看到 1X
+    idx, t, blind, blind_f, b_warn, b_mode = at_max(c, idx, t, BLIND)
+    want = BULLET_FPS * seconds
+    lines.append('  (a) 1X -> 空白 %d 拍：%.2f 帧（期望 %.2f = 6 帧/秒），warn=%s mode=%s'
+                 % (beats, blind_f, want, b_warn, b_mode))
+    if abs(blind_f - want) > 0.05 or b_warn != 'bullet-assumed':
+        bad.append('(a) 1X 之后空白应记 %.2f 帧 / bullet-assumed，实际 %.2f / %s'
+                   % (want, blind_f, b_warn))
+
+    # (b) 2X 之后空白：仍是 6 帧/秒
+    c = Counter(BAR_W, fps=fps)
+    idx, t = warm(c, DIGIT_2X, 0, 0.0)
+    idx, t, _, _, _, _ = at_max(c, idx, t, DIGIT_2X)
+    idx, t, blind2, blind2_f, b_warn2, b_mode2 = at_max(c, idx, t, BLIND)
+    lines.append('  (b) 2X -> 空白 %d 拍：%.2f 帧（期望 %.2f；拿 last_m/5 算会是 %.2f）'
+                 % (beats, blind2_f, want, LOGICAL_FPS * 2.0 / 5.0 * seconds))
+    if abs(blind2_f - want) > 0.05:
+        bad.append('(b) 2X 之后空白应记 %.2f 帧（固定 6 帧/秒），实际 %.2f'
+                   % (want, blind2_f))
+
+    # (c) 从没读到过数字：冻结
+    c = Counter(BAR_W, fps=fps)
+    idx, t = warm(c, BLIND, 0, 0.0)
+    idx, t, frozen, frozen_f, c_warn, c_mode = at_max(c, idx, t, BLIND)
+    lines.append('  (c) 从没读到过数字 -> 满费空白 %d 拍：%d 帧（期望 0），warn=%s'
+                 % (beats, frozen, c_warn))
+    if frozen_f != 0.0 or c_warn != 'speed-unknown':
+        bad.append('(c) 没读到过数字时应冻结（0 帧 / speed-unknown），实际 %.2f / %s'
+                   % (frozen_f, c_warn))
+
+    # (d) 空白之后倍速键又画回 2X
+    idx, t, back, back_f, d_warn, _ = at_max(c, idx, t, DIGIT_2X)
+    want2 = LOGICAL_FPS * 2.0 * seconds
+    lines.append('  (d) 空白之后画回 2X：%.2f 帧（期望 %.2f = 60 帧/秒）' % (back_f, want2))
+    if abs(back_f - want2) > 0.05:
+        bad.append('(d) 画回 2X 应记 %.2f 帧，实际 %.2f' % (want2, back_f))
+    return bad, lines
+
+
 def main():
     segs = []
     for _ in range(60):
@@ -595,8 +769,33 @@ def main():
         print('  ✅ 通过（30 -> 60 时已数的 30 帧换算成 60 帧，绝对帧号不从头偏）')
     ok9 = not bad_switch
 
+    bad_neg, neg_lines = negative_cost_timing()
+    print()
+    print('局内负费（费用条上出现减号：每逻辑帧只攒一半，一费 30 -> 60 逻辑帧）：')
+    for line in neg_lines:
+        print(line)
+    if bad_neg:
+        for b in bad_neg:
+            print('  ❌ %s：实际 %s，期望 %s' % b)
+    else:
+        print('  ✅ 通过（负费期间一费 60 帧；进场 / 离场 / 压在回费边界上都不丢帧；'
+              '不认减号会整整少一半）')
+    ok12 = not bad_neg
+
+    bad_blind, blind_lines = bullet_assumed_at_max()
+    print()
+    print('满费 + 倍速键「整块空白」（拖干员：>>> 读不到，按子弹时间算）：')
+    for line in blind_lines:
+        print(line)
+    if bad_blind:
+        for b in bad_blind:
+            print('  ❌ %s' % b)
+    else:
+        print('  ✅ 通过（读到过数字之后按固定 6 帧/秒；从没读到过就冻结不猜）')
+    ok13 = not bad_blind
+
     return 0 if (ok and ok2 and ok3 and ok4 and ok5 and ok6 and ok7
-                 and ok8 and ok9 and ok10 and ok11) else 1
+                 and ok8 and ok9 and ok10 and ok11 and ok12 and ok13) else 1
 
 
 if __name__ == '__main__':

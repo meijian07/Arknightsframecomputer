@@ -94,14 +94,18 @@ def rescaled_layout(layout: Layout, width: int, height: int) -> Layout:
     """
     fx = float(width) / float(layout.width)
     fy = float(height) / float(layout.height)
-    kw = {}
-    for name in ROI_NAMES:
-        r = getattr(layout, name)
+
+    def scaled(r) -> Rect:
         x = max(0, min(int(round(r.x * fx)), width - 1))
         y = max(0, min(int(round(r.y * fy)), height - 1))
         w = max(1, min(int(round(r.w * fx)), width - x))
         h = max(1, min(int(round(r.h * fy)), height - y))
-        kw[name] = Rect(x, y, w, h)
+        return Rect(x, y, w, h)
+
+    kw = {name: scaled(getattr(layout, name)) for name in ROI_NAMES}
+    # 减号框不在 ROI_NAMES 里（那三个是抓屏通道），但它和它们一样锚在客户区右下角，
+    # 窗口尺寸一变就得一起缩 —— 不缩的话它会留在旧位置上（偏多少 = 窗口差多少）。
+    kw['sign'] = scaled(layout.sign)
     out = replace(layout, width=int(width), height=int(height),
                   scale=float(layout.scale) * (fx + fy) / 2.0, **kw)
     if layout.bar_width_frac > 0:
@@ -230,7 +234,7 @@ class WindowMonitor(LiveMonitor):
     def __init__(self, win, *, source=None, layout: Layout = None, rate: float = 120.0,
                  templates=(), csv_path: str = None,
                  cost_rate=DEFAULT_FRAMES_PER_COST, ui_scaler: float = None,
-                 profiles_path: str = None):
+                 profiles_path: str = None, negative: str = 'auto'):
         # 先摆好自己的字段：LiveMonitor.__init__ 里会调 build_layout，那个要读它们
         self.src = source                  # 校准用的 WindowSource（没有就是 None）
         self.calib = None                  # 校准表 / 分辨率表给的那份（不含人工微调）
@@ -239,7 +243,8 @@ class WindowMonitor(LiveMonitor):
         scaler = default_ui_scaler(win.exe) if ui_scaler is None else float(ui_scaler)
         super().__init__(None, exe=win.exe, pid=win.pid, rate=rate,
                          templates=templates, csv_path=csv_path, cost_rate=cost_rate,
-                         ui_scaler=scaler, build_layout=self._layout_for_size)
+                         ui_scaler=scaler, build_layout=self._layout_for_size,
+                         negative=negative)
         self.window = win
         self.set_layout(layout if layout is not None
                         else self._layout_for_size(win.client[2], win.client[3]))

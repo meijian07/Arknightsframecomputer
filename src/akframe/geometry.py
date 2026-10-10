@@ -34,6 +34,21 @@ BAR_ROI_H = 17                        # 条 ROI 高度（固定像素，容错 �
 BAR_BAND_TOP = 5                      # ROI 内取第 5..12 行做逐列中位数
 BAR_BAND_BOTTOM = 13                  # （左闭右开）
 
+# ---- 局内负费（费用数字左边那个减号）的扫描框 ----
+# 数值照抄前人 ArknightsCostBarRuler（crates/ruler-core/src/analysis/scanner/cost_bar.rs）。
+# 他们是在 1280x720 上量出来的四对边距：右边距 70..42、底边距 208..201，单位是
+# 「720p 下的像素」。乘 1.5 就是这里的 s = 1（1920x1080）单位值 —— 因为他们的
+# scale = 1.5 x 本模块的 ui_scale()（两条规则的换算系数都是 1.5，见 ui_scale 的说明）。
+# 框**不在面板上挪**（没有手动微调那一项）：它只跟客户区尺寸有关（费用数字永远贴在
+# 右下角那个位置），所以由 layout_for 按客户区算出来。但它是个**一等 ROI**，画面里
+# 有桌面 / 播放器黑边（客户区带原点）时必须跟着一起平移缩放 —— 见 sign_from_bar
+# 与 docs 第 31 节：按画面右下角硬算，实测桌面录像里会整块偏 50px 以上，落到
+# 「剩余可放置角色」那行文字上，36% 的帧被误读成负费。
+SIGN_RIGHT_LEFT_UNIT = 105.0      # 框左边界距**客户区**右边（= 前人 70 x 1.5）
+SIGN_RIGHT_RIGHT_UNIT = 63.0      # 框右边界距**客户区**右边（= 前人 42 x 1.5）
+SIGN_FROM_BOTTOM_HIGH_UNIT = 312.0    # 框上边界距**客户区**底边（= 前人 208 x 1.5）
+SIGN_FROM_BOTTOM_LOW_UNIT = 301.5     # 框下边界距**客户区**底边（= 前人 201 x 1.5）
+
 BTN_W_UNIT = 150.0                    # 右上角按钮宽
 BTN_H_UNIT = 120.0                    # 右上角按钮高
 BTN_TOP_UNIT = 30.0                   # 按钮顶边距窗口上边
@@ -126,6 +141,66 @@ class Rect:
         return Rect(d['x'], d['y'], d['w'], d['h'])
 
 
+def _clamp_box(left: int, top: int, right: int, bottom: int,
+               width: int, height: int) -> Rect:
+    """把四条边夹进画面，保证至少 1x1。所有 ROI 都必须这么收口：越界的框交给
+    win32 / ffmpeg 会被**悄悄裁掉**，读数就对不上了（见 sign_rect 的注释）。"""
+    left = min(max(0, left), max(0, width - 1))
+    right = min(max(left + 1, right), width)
+    top = min(max(0, top), max(0, height - 1))
+    bottom = min(max(top + 1, bottom), height)
+    return Rect(left, top, right - left, bottom - top)
+
+
+def sign_rect(width: int, height: int, scale: float, edge: float = 1.0) -> Rect:
+    """局内负费减号的扫描框（右下角，费用数字那一行）—— 锚在**客户区**右下角。
+
+    edge 是游戏内「UI 缩放」系数（ui_edge_scale）：它只改 HUD 元素**离锚点的距离**，
+    不改变元素本身大小，所以乘在四条边距上、不乘在框的宽高上 —— 和费用条、右上角
+    那两个按钮同一个口径。
+
+    这个函数只负责「客户区就是整幅画面」那条路（实时读游戏窗口）。画面里有别的东西
+    （桌面录像、播放器窗口里那段被缩放的画面）时客户区带平移，必须用 reframe_layout
+    或 layout_from_bar_box 给的那一份，别拿画面底边硬算 —— 实测桌面录像里两者差 50px
+    以上，框会整块落到「剩余可放置角色」那一行文字上（那是纯白横杠，会被读成负费）。
+    """
+    u = float(scale) * float(edge)
+    return _clamp_box(int(round(width - SIGN_RIGHT_LEFT_UNIT * u)),
+                      int(round(height - SIGN_FROM_BOTTOM_HIGH_UNIT * u)),
+                      int(round(width - SIGN_RIGHT_RIGHT_UNIT * u)),
+                      int(round(height - SIGN_FROM_BOTTOM_LOW_UNIT * u)),
+                      width, height)
+
+
+def sign_from_bar(bar: Rect, scale: float, edge: float = 1.0,
+                  width: int = 0, height: int = 0) -> Rect:
+    """从**费用条 ROI** 反推减号框（锚在条槽右端 + 条中心）。
+
+    为什么还要有这一份：减号框和费用条是同一块 HUD 上的两个元素，四条边距锚的都是
+    客户区的右边 / 底边（前人 1280x720 的实测值 x1.5 换成这里的单位）：
+
+        条槽右端距客户区右边      1u   -> 客户区右边 = 条槽右端 + 1u
+        减号框   距客户区右边  105u..63u
+        条中心   距客户区底边    268u   -> 客户区底边 = 条中心 + 268u
+        减号框   距客户区底边 312u..301.5u （左闭右开）
+
+    只要费用条 ROI 是对的，条在哪减号框就跟到哪 —— 这两种场合非用它不可：
+      * 画面被放大 / 裁剪过（bar_only_layout 只拿到条框，客户区尺寸推不出来）；
+      * 读一份**整体平移过**的布局（桌面录像 / 播放器窗口），按画面底边算会偏。
+    框一律夹进 (width, height)（给 0 = 不夹）。
+    """
+    u = float(scale) * float(edge)
+    slot_right = float(bar.x + bar.w)
+    bar_cy = float(bar.y) + float(bar.h) / 2.0
+    left = int(round(slot_right - (SIGN_RIGHT_LEFT_UNIT - 1.0) * u))
+    right = int(round(slot_right - (SIGN_RIGHT_RIGHT_UNIT - 1.0) * u))
+    top = int(round(bar_cy - (SIGN_FROM_BOTTOM_HIGH_UNIT - BAR_CENTER_FROM_BOTTOM_UNIT) * u))
+    bottom = int(round(bar_cy - (SIGN_FROM_BOTTOM_LOW_UNIT - BAR_CENTER_FROM_BOTTOM_UNIT) * u))
+    if width > 0 and height > 0:
+        return _clamp_box(left, top, right, bottom, width, height)
+    return Rect(left, top, max(1, right - left), max(1, bottom - top))
+
+
 @dataclass(frozen=True)
 class Layout:
     width: int
@@ -139,6 +214,23 @@ class Layout:
     # 画面里到底有没有右上角那两个按钮。截屏 / 放大 / 裁剪过的录像只截到右下角一块时
     # 设 False —— 这时暂停 / 倍速是「画面上没这个东西」，不是「读数为 0」，两者不能混。
     buttons_visible: bool = True
+    # 局内负费减号的扫描框（见 features.read_sign）。**是个一等 ROI，不是派生量**：
+    # 画面里客户区带平移时必须跟着一起平移（reframe_layout / layout_from_bar_box），
+    # 按画面右下角硬算的话，桌面录像 / 播放器窗口里会整块偏 50px 以上。给 None 时按
+    # 「客户区 = 整幅画面」兜底（实时读游戏窗口那条路就是这样）。
+    sign: 'Rect' = None
+
+    def __post_init__(self):
+        """sign 留空（None）时按「客户区 = 整幅画面」补一个。
+
+        为什么用 None 兜底、而不是做成 property：property 每次读都按当前 width /
+        height 重算，于是 reframe_layout / layout_from_bar_box 平移过的框会被丢掉
+        —— 而那正是减号框最需要跟着走的时候。做成字段之后，replace() 会原样带过去
+        （dataclasses.replace 复制每个字段，__post_init__ 见到非 None 就不动它）。
+        """
+        if self.sign is None:
+            object.__setattr__(self, 'sign',
+                               sign_rect(self.width, self.height, self.scale))
 
     @property
     def bar_w(self) -> int:
@@ -179,7 +271,7 @@ class Layout:
         ffmpeg 的 crop 在 x+w 超出帧宽时会静默左移 x（本机踩过：2200 被改成 2160），
         越界不会报错、只会让数据对不上，所以这里必须硬断言。
         """
-        for name in ('bar', 'pause', 'speed'):
+        for name in ('bar', 'pause', 'speed', 'sign'):
             r = getattr(self, name)
             if r.x < 0 or r.y < 0 or r.x2 >= self.width or r.y2 >= self.height:
                 raise ValueError(
@@ -196,19 +288,38 @@ class Layout:
             'speed': self.speed.to_dict(),
             'bar_width_frac': self.bar_width_frac,
             'buttons_visible': self.buttons_visible,
+            'sign': self.sign.to_dict(),
         }
 
     @staticmethod
     def from_dict(d: dict) -> 'Layout':
+        """读一份布局。sign 缺失（旧校准文件 / 旧缓存）时按**费用条**反推。
+
+        为什么不退回「按画面右下角算」：那份 dict 里的 bar 可能已经被平移过
+        （录像 / 播放器窗口），客户区底边在哪只有条自己知道 —— 按条反推至少和条
+        是自洽的（见 sign_from_bar），实测比按画面底边算准 50px 以上。
+        """
+        bar = Rect.from_dict(d['bar'])
+        scale = float(d['scale'])
+        sign = None
+        raw = d.get('sign')
+        if isinstance(raw, dict):
+            try:
+                sign = Rect.from_dict(raw)
+            except (KeyError, TypeError, ValueError):
+                sign = None
+        if sign is None:
+            sign = sign_from_bar(bar, scale)
         return Layout(
             width=d['width'],
             height=d['height'],
-            scale=d['scale'],
-            bar=Rect.from_dict(d['bar']),
+            scale=scale,
+            bar=bar,
             pause=Rect.from_dict(d['pause']),
             speed=Rect.from_dict(d['speed']),
             bar_width_frac=float(d.get('bar_width_frac') or 0.0),
             buttons_visible=bool(d.get('buttons_visible', True)),
+            sign=sign,
         )
 
 
@@ -385,8 +496,10 @@ def layout_for(width: int, height: int, ui_scaler: float = UI_SCALER_DEFAULT) ->
     speed = Rect(width - int(round(SPEED_RIGHT_MARGIN_UNIT * s * edge)) - btn_w,
                  btn_y, btn_w, btn_h)
 
+    # sign 锚的是**客户区**右下角（这条路 width/height 就是客户区），所以直接算；
+    # 画面里带桌面 / 窗口边框时由 reframe_layout 或 layout_from_bar_box 平移过去。
     lay = Layout(width=width, height=height, scale=s, bar=bar, pause=pause, speed=speed,
-                 bar_width_frac=bar_frac)
+                 bar_width_frac=bar_frac, sign=sign_rect(width, height, s, edge))
     lay.validate()
     return lay
 
@@ -426,8 +539,14 @@ def layout_from_bar_box(client_size, box: Rect, ui_scaler: float = None) -> tupl
     # 费用条 ROI 直接按框钉死（1px 都不差）：左边缘用框的、宽用框宽、高照旧 17 行。
     bar_w = min(box.w, w - box.x)
     roi_y = max(0, min(box.y + box.h // 2 - BAR_ROI_H // 2, h - BAR_ROI_H))
-    layout = replace(layout, bar=Rect(box.x, roi_y, bar_w, BAR_ROI_H),
-                     scale=s, bar_width_frac=float(box.w))
+    bar_roi = Rect(box.x, roi_y, bar_w, BAR_ROI_H)
+    # 减号框按**条**反推（sign_from_bar），不用上面 reframe_layout 平移过来的那一份：
+    # 那一份的横向位置锚在「客户区右边」，而录像里唯一实测到的只有这条框 —— 客户区的
+    # 宽（1920s）和原点都是从框宽 / 条槽右端距边**推**出来的，带着校准表的误差。
+    # 实测 2560x1600 的桌面负费录像（client 2560x1440 @(0,54)、条槽 240px）里那一份
+    # 偏右 9px（= 减号宽度的 20%），框只剩 33px 压在减号上（阈值 28）；按条推是 41px。
+    layout = replace(layout, bar=bar_roi, scale=s, bar_width_frac=float(box.w),
+                     sign=sign_from_bar(bar_roi, s, edge, w, h))
     layout.validate()
     return (cw, ch), (int(dx), int(dy)), layout
 
@@ -450,10 +569,14 @@ def bar_only_layout(width: int, height: int, bar: Rect) -> Layout:
     roi_y = bar.y + bar.h // 2 - BAR_ROI_H // 2
     roi_y = max(0, min(int(roi_y), int(height) - BAR_ROI_H))
     placeholder = Rect(0, 0, 1, 1)
+    # 减号框按**条**反推（客户区尺寸 / 原点都推不出来，只有条是实测的）：
+    # 框在条中心往上 45u、条槽右端往左 104u..62u，见 sign_from_bar。
     lay = Layout(width=int(width), height=int(height), scale=bar.w / BAR_W_UNIT,
                  bar=Rect(int(bar.x), roi_y, int(bar.w), BAR_ROI_H),
                  pause=placeholder, speed=placeholder,
-                 bar_width_frac=float(bar.w), buttons_visible=False)
+                 bar_width_frac=float(bar.w), buttons_visible=False,
+                 sign=sign_from_bar(bar, bar.w / BAR_W_UNIT, 1.0,
+                                    int(width), int(height)))
     lay.validate()
     return lay
 
@@ -471,15 +594,19 @@ def reframe_layout(layout: Layout, dx: int, dy: int, width: int, height: int) ->
     合成模型按真实宽度算，画出来的宽度截到看得见的那一段。
     """
     def shift(r: Rect) -> Rect:
-        x0 = max(0, r.x + dx)
-        y0 = max(0, r.y + dy)
-        x1 = min(width, r.x + dx + r.w)
-        y1 = min(height, r.y + dy + r.h)
+        # 必须夹得干干净净：客户区原点可能整个落在画面外（播放器窗口里那段画面又小又有
+        # 黑边），那时某个 ROI 会一个像素都落不进来。留一个越界的空框比留一个画内的空框
+        # 糟得多 —— validate() 会直接拦下（这才是对的），而 win32 / ffmpeg 拿到越界框
+        # 只会悄悄裁掉。左 / 上先夹到 width-1 / height-1，再算右 / 下，保证永远 x2 < width。
+        x0 = min(max(0, r.x + dx), max(0, width - 1))
+        y0 = min(max(0, r.y + dy), max(0, height - 1))
+        x1 = min(width, max(x0, r.x + dx + r.w))
+        y1 = min(height, max(y0, r.y + dy + r.h))
         return Rect(x0, y0, max(0, x1 - x0), max(0, y1 - y0))
 
     out = replace(layout, width=width, height=height,
                               bar=shift(layout.bar), pause=shift(layout.pause),
-                              speed=shift(layout.speed))
+                              speed=shift(layout.speed), sign=shift(layout.sign))
     out.validate()
     return out
 
@@ -510,6 +637,12 @@ def apply_deltas(base: Layout, deltas: dict, src_scale: float | None = None) -> 
 
     zero = (0, 0, 0, 0)
     bar = adj(base.bar, deltas.get('bar', zero))
+    # 面板上按方向键把费用条挪几像素时，减号框跟着挪同样的量 —— 两个元素在同一块 HUD 上，
+    # 条挪了框不挪就等于把「框对准」这件事又交回给用户。
+    dxb, dyb = [int(round(v * k)) for v in deltas.get('bar', zero)][:2]
+    sign = _clamp_box(base.sign.x + dxb, base.sign.y + dyb,
+                      base.sign.x + dxb + base.sign.w, base.sign.y + dyb + base.sign.h,
+                      base.width, base.height)
     # ROI 被人工改小时，真实条槽宽按同样比例跟着变（纯平移 dw=0 时不变）
     frac = base.bar_width_frac
     if frac > 0 and base.bar.w > 0:
@@ -518,7 +651,7 @@ def apply_deltas(base: Layout, deltas: dict, src_scale: float | None = None) -> 
                  bar=bar,
                  pause=adj(base.pause, deltas.get('pause', zero)),
                  speed=adj(base.speed, deltas.get('speed', zero)),
-                 bar_width_frac=frac)
+                 bar_width_frac=frac, sign=sign)
     lay.validate()
     return lay
 

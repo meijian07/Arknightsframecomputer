@@ -24,10 +24,10 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from .features import read_bar, read_pause, read_speed
+from .features import read_bar, read_pause, read_sign, read_speed
 from .geometry import UI_SCALER_DEFAULT, Layout, layout_for, union_rect
 from .cost_rate import RateEstimator
-from .settings import DEFAULT_FRAMES_PER_COST
+from .settings import DEFAULT_FRAMES_PER_COST, negative_override, parse_negative
 from .state import CSV_HEADER, LOGICAL_FPS, Counter, FrameResult
 from .win32 import (ScreenGrabber, WindowInfo, arknights_ui_scaler, client_rect,
                     find_window, is_minimized, to_gray)
@@ -105,7 +105,8 @@ class LiveMonitor:
     def __init__(self, layout: Layout = None, *, exe: str = 'Arknights.exe',
                  title: str = None, pid: int = None, rate: float = 120.0,
                  templates=(), csv_path: str = None, build_layout=None,
-                 cost_rate=DEFAULT_FRAMES_PER_COST, ui_scaler: float = None):
+                 cost_rate=DEFAULT_FRAMES_PER_COST, ui_scaler: float = None,
+                 negative: str = 'auto'):
         self.exe = exe
         self.title = title
         self.pid = pid
@@ -131,6 +132,9 @@ class LiveMonitor:
         # 120 = -75%）。给 'auto' 才开自动识别（见 cost_rate.py），那是可选功能：
         # 认错档会让绝对帧号整段漂移，所以默认不认。
         self.cost_rate = cost_rate
+        # 局内负费：'auto' 按画面判（费用数字左边的减号），'on' / 'off' 强制。
+        # 默认 auto —— 这一档错了整段就是 2 倍偏差，所以手动档只当兜底（见 settings）。
+        self.negative_mode = parse_negative(negative)
         self.rate_est = None       # 自动识别器（手工指定速率时是 None）
         self.rate_estimate = None  # 最近一次识别结果（界面显示用）
         self._rate_locked = False  # 已经认准过速率就不再改（防两段样本来回翻）
@@ -158,7 +162,9 @@ class LiveMonitor:
         old = self.counter if keep_elapsed else None
         manual = _manual_cost_rate(self.cost_rate)
         self.layout = layout
-        self._union = union_rect([layout.bar, layout.pause, layout.speed])
+        # 减号扫描框也一起框进外接矩形：它落在「条到按钮」这条竖直带里，
+        # 实测（1905x1085）外接矩形一点没变，等于白捡（见 geometry.sign_rect）。
+        self._union = union_rect([layout.bar, layout.pause, layout.speed, layout.sign])
         self.counter = Counter(layout.model_bar_w, fps=max(1.0, self.rate or 60.0),
                                frames_per_cost=manual or DEFAULT_FRAMES_PER_COST,
                                bar_width_frac=layout.bar_width_f, visible_w=layout.bar.w)
@@ -166,9 +172,21 @@ class LiveMonitor:
             self.counter.adopt(old)
         self.counter.resync()
         self.counter.set_manual_pause(self.manual_pause)
+        self.counter.set_negative_override(negative_override(self.negative_mode))
         self._apply_cost_rate()
         # 外接矩形变了，之前按尺寸缓存的 DIB 不再需要（ScreenGrabber 自己按尺寸复用）
         self._grabber = None
+
+    def set_negative_mode(self, mode) -> str:
+        """切「局内负费」手动档（auto / on / off）。返回归一之后的档名。
+
+        换档**不重新起锚**（相位是连续的）：下一拍起按新速度走，那一拍会被当成
+        负费转场帧做亚帧修正（见 Counter._boundary_correction）。
+        """
+        self.negative_mode = parse_negative(mode)
+        if self.counter is not None:
+            self.counter.set_negative_override(negative_override(self.negative_mode))
+        return self.negative_mode
 
     def set_cost_rate(self, spec) -> float:
         """改回费速率：数字 = 手工档（一费几个逻辑帧）；'auto' = 开自动识别。
@@ -343,12 +361,16 @@ class LiveMonitor:
         bar_img = to_gray(cut(lay.bar))
         pause_img = to_gray(cut(lay.pause))
         speed_img = to_gray(cut(lay.speed))
+        sign_img = to_gray(cut(lay.sign))
 
         bar = read_bar(bar_img, lay)
         pause = read_pause(pause_img, lay)
         speed = read_speed(speed_img, lay, self.templates)
+        # 局内负费：费用数字左边的减号。负费期间每逻辑帧只攒一半（一费 30 -> 60 帧），
+        # 不认出来这一段会被数成一半，见 features.read_sign / state._pixel。
+        sign = read_sign(sign_img, lay)
         self._track_cost_rate(bar)
-        res = self.counter.step(self._idx, t, bar, pause, speed)
+        res = self.counter.step(self._idx, t, bar, pause, speed, sign)
 
         note = ''
         if res.mode == 'manual-pause':
@@ -358,10 +380,14 @@ class LiveMonitor:
         elif not res.running:
             # 帧操：采样这一瞬图标是「暂停」，但两次采样之间游戏跑过了、条动过了
             note = '暂停键=暂停，但费用条在动 —— 按费用条计数'
+        elif res.negative:
+            note = '局内负费：每逻辑帧只攒一半，一费 60 逻辑帧'
         elif res.mode.startswith('clock'):
             note = '满费中，按挂钟 × 倍速估算（小数 = 不足一帧的余量）'
         elif res.warn == 'speed-unknown':
-            note = '满费中，但倍速键上没画数字 —— 冻结不猜'
+            note = '满费中，但倍速键上没有数字 —— 冻结不猜（从没读到过倍速数字）'
+        elif res.warn == 'bullet-assumed':
+            note = '满费中，倍速键整块空白 —— 按子弹时间 6 帧/秒估（拖干员）'
 
         self.stats.samples += 1
         self._hz_window.append(t)

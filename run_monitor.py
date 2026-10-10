@@ -33,7 +33,8 @@ from akframe.geometry import apply_deltas, layout_for, load_calibration  # noqa:
 from akframe.live import LiveMonitor                                # noqa: E402
 from akframe.paths import data_path                                 # noqa: E402
 from akframe.settings import (DEFAULT_FRAMES_PER_COST, clamp_frames_per_cost,  # noqa: E402
-                              format_frames_per_cost, load_cost_rate)
+                              format_frames_per_cost, load_cost_rate,
+                              load_negative_mode, parse_negative)
 from akframe.win32 import (arknights_ui_scaler, enable_dpi_awareness,  # noqa: E402
                            find_window, list_windows)
 
@@ -60,8 +61,11 @@ def build_parser() -> argparse.ArgumentParser:
                         '30 = 正常（1 秒 1 费）；60 = 回费速度 -50%%；120 = -75%%。'
                         'auto = 开自动识别（可选功能：从费用条一个周期里出现过多少种'
                         '宽度自己认，认错档会让绝对帧号整段漂移，所以默认不用）')
+    p.add_argument('--negative', default=None,
+                   help='局内负费（费用条上出现减号，一费 30 -> 60 帧）：'
+                        'auto = 按画面判（默认，读设置文件）；on / off = 强制开 / 关')
     p.add_argument('--settings', default=data_path('cost_rate.json'),
-                   help='回费速率设置文件（默认和程序放一起；界面里改档会写回这里）')
+                   help='设置文件（默认和程序放一起）：回费速率 + 局内负费都写回这里')
     p.add_argument('--csv', default=None, help='把逐帧读数记录到这个 CSV')
     p.add_argument('--list', action='store_true', help='列出可见窗口后退出')
     p.add_argument('--no-ui', action='store_true', help='不开图形界面，控制台打印')
@@ -105,7 +109,14 @@ def resolve_cost_rate(args):
     return (clamp_frames_per_cost(v), None)
 
 
-def build_monitor(args, cost_rate=DEFAULT_FRAMES_PER_COST) -> LiveMonitor:
+def resolve_negative(args) -> str:
+    """命令行 --negative 优先；没给就读设置文件。"""
+    if args.negative is None or str(args.negative).strip() == '':
+        return load_negative_mode(args.settings)
+    return parse_negative(args.negative)
+
+
+def build_monitor(args, cost_rate=DEFAULT_FRAMES_PER_COST, negative='auto') -> LiveMonitor:
     templates = load_templates(args.templates)
     deltas, calib_scale = load_calibration(args.calib)
     ui_scaler = args.ui_scaler if args.ui_scaler is not None else arknights_ui_scaler()
@@ -122,7 +133,7 @@ def build_monitor(args, cost_rate=DEFAULT_FRAMES_PER_COST) -> LiveMonitor:
     mon = LiveMonitor(layout, exe=args.exe, title=args.title, pid=args.pid,
                       rate=args.rate, templates=templates, csv_path=args.csv,
                       build_layout=build_layout, cost_rate=cost_rate,
-                      ui_scaler=ui_scaler)
+                      ui_scaler=ui_scaler, negative=negative)
     # 把刚找到的窗口交给监视器：不然 main() 里判 mon.window 永远是 None，
     # 明明找到了也会打印「找不到窗口」，白白吓人一跳
     mon.window = win
@@ -224,7 +235,10 @@ def main(argv=None) -> int:
         print(why)
         return 2
 
-    mon = build_demo(args, cost_rate) if args.demo_axis else build_monitor(args, cost_rate)
+    negative = resolve_negative(args)
+
+    mon = (build_demo(args, cost_rate) if args.demo_axis
+           else build_monitor(args, cost_rate, negative))
     if args.demo_axis:
         print('演示模式：没有游戏输入，帧号由合成的费用条推出来（刻度表预览 / 调界面用）')
         print('假世界  : %s' % mon.describe())
@@ -242,6 +256,8 @@ def main(argv=None) -> int:
         format_frames_per_cost(fpc),
         '（自动识别已开启，认准后自动切换）' if mon.rate_est is not None else
         '，改档在界面「回费速率」那行，会写回 %s' % args.settings))
+    print('局内负费: %s（费用条上出现减号时每逻辑帧只攒一半，一费 30 -> 60 帧）'
+          % mon.negative_mode)
     print('DPI 感知: %s' % dpi)
 
     if args.no_ui:

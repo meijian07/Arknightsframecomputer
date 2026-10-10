@@ -25,8 +25,10 @@ from .geometry import (Layout, Rect, bar_only_layout, layout_for,
                        reframe_layout)
 from .paths import app_dir
 
-ROI_NAMES = ('bar', 'pause', 'speed')
-FFMPEG_LABELS = {'bar': 'b', 'pause': 'p', 'speed': 's'}
+# sign = 费用数字左边那个减号（局内负费唯一的像素判据，见 features.read_sign）。
+# 它和另外三路一样抽成一路灰度流：多出来的是 43x11 px/帧，抽流耗时可以忽略。
+ROI_NAMES = ('bar', 'pause', 'speed', 'sign')
+FFMPEG_LABELS = {'bar': 'b', 'pause': 'p', 'speed': 's', 'sign': 'g'}
 
 
 def roi_names(layout) -> tuple:
@@ -46,6 +48,7 @@ class Frame:
     bar: np.ndarray
     pause: np.ndarray
     speed: np.ndarray
+    sign: np.ndarray
 
 
 @dataclass
@@ -267,8 +270,8 @@ def iter_cached(outdir: str) -> Iterator[Frame]:
                 imgs[n] = np.frombuffer(buf, dtype=np.uint8).reshape(rect.h, rect.w)
             if truncated:
                 break
-            yield Frame(index=i, t=i / fps,
-                        bar=imgs['bar'], pause=imgs['pause'], speed=imgs['speed'])
+            yield Frame(index=i, t=i / fps, bar=imgs['bar'], pause=imgs['pause'],
+                        speed=imgs['speed'], sign=imgs['sign'])
     finally:
         for h in handles.values():
             h.close()
@@ -357,5 +360,5 @@ def _iter_images(paths, layout: Layout, fps: float) -> Iterator[Frame]:
                              % (i, img.shape[1], img.shape[0], layout.width, layout.height))
         def cut(r):
             return img[r.y:r.y2 + 1, r.x:r.x2 + 1].copy()
-        yield Frame(index=i, t=i / fps,
-                    bar=cut(layout.bar), pause=cut(layout.pause), speed=cut(layout.speed))
+        yield Frame(index=i, t=i / fps, bar=cut(layout.bar), pause=cut(layout.pause),
+                    speed=cut(layout.speed), sign=cut(layout.sign))

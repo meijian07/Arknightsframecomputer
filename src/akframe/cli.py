@@ -14,7 +14,7 @@ import numpy as np
 
 from .capture import find_ffmpeg, open_images, open_video
 from .paths import templates_dir
-from .features import read_bar, read_pause, read_speed
+from .features import read_bar, read_pause, read_sign, read_speed
 from .cost_rate import collect_cycles, infer_rate
 from .settings import DEFAULT_FRAMES_PER_COST
 from .state import CSV_HEADER, PROBE_MIN_SECONDS, Counter
@@ -279,7 +279,8 @@ def main(argv=None) -> int:
                 fr, bar = item, read_bar(item.bar, layout)
             pause = read_pause(fr.pause, layout)
             speed = read_speed(fr.speed, layout, templates)
-            res = counter.step(fr.index, fr.t, bar, pause, speed)
+            sign = read_sign(fr.sign, layout)
+            res = counter.step(fr.index, fr.t, bar, pause, speed, sign)
             writer.writerow(res.as_row())
 
             n += 1

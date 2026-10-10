@@ -32,9 +32,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .fp24 import (SCALE, SPEED_NORMAL, CostTiming,
+from .fp24 import (SCALE, SPEED_NEGATIVE, SPEED_NORMAL, CostTiming,
                     frames_from_required, required_from_frames)
-from .features import BarReading, PauseReading, SpeedReading
+from .features import BarReading, PauseReading, SignReading, SpeedReading
 from .geometry import PAUSE_RUN_RATIO, PAUSE_STOP_RATIO
 from .synthesis import synthesized_width
 
@@ -49,6 +49,25 @@ MAX_SPEED_M = 2.0     # 游戏内最高倍速（2X = 60 逻辑帧/秒），做�
 # 所以**不能**用 last_m / 5 去算（2X 下那样会整段多记一倍），也不能当「0.2 倍速」。
 # 倍速键子弹时间下只画 >>>、不画数字，这条固定速率正好补上这个信息缺失。
 BULLET_FPS = LOGICAL_FPS / 5.0
+# ---- 满费时倍速键「整块空白」：按子弹时间算（2026-10-10，用户要求）----
+# 为什么需要这条：拖干员进子弹时间时，游戏把那颗倍速键**整块收起来**。实测
+# `Desktop 2026.10.09 - 22.36.10.14`（2560x1600 桌面录像）拖干员那两段（7.0~16.5 秒、
+# 25.0~29.0 秒）倍速键 ROI 里只剩场景：单帧最亮 206、30 帧逐像素最大值合成也没有字形；
+# 而同一段录像画着 1X / 2X 时字形是 255。也就是说 `>>>` 这台机器 / 这一版界面上
+# **我们读不到**（用户说画着三个三角 —— 我们看不到不等于它不在）。
+# 后果：满费 + 拖干员时速率读不到 -> 挂钟通道冻结 -> 那一段一帧都不记
+# （用户报的「满费下子弹时间过帧无法识别」就是它）。
+#
+# 规则（用户给的）：**这一局里读到过倍速数字**之后（1X / 2X，模板认不出也算「画着」，
+# 见 features.SpeedReading.has_digit），倍速键再变成「什么都没画」就按子弹时间算 ——
+# 恒 BULLET_FPS = 6 帧/秒，不再冻结。
+# 为什么「读到过数字」是必要条件：关卡外菜单 / 切场景那种空白也是「什么都没画」，
+# 但那些画面里 HUD（暂停键）和费用条都不在，关卡判定先挡掉了；关卡内、运行中还
+# 能让倍速键整块空白的，实测只有拖干员这一种。
+# 代价说清楚：万一某次空白其实是「按钮淡出」而不是子弹时间，这段会按 1/5 记
+# （比冻结少记 5 倍）。所以这一路的 warn 单列 `bullet-assumed`，面板 / CSV 上看得见，
+# 真出问题一眼认得出。见 docs 第 32 节。
+BULLET_ASSUMED_WARN = 'bullet-assumed'
 # 【已删除，2026-10-06】「条不可读 + 运行中」连续 5 拍确认门（原 CLOCK_ARM_FRAMES = 5）。
 #
 # 它原来是防这个的：暂停时右上角继续按钮会以 2~3 个渲染帧为单位闪回「运行中」形状，
@@ -83,6 +102,22 @@ ANCHOR_MAX_CATCHUP = 2   # 起锚那一拍最多补回几帧「费用周期开�
 # 最长是 **0** 拍（屏幕上出现过 119 连拒，但那全是 EMPTY，走的是关卡判定那条路，
 # 它自己有关卡滞回兜底，不经过这里）。
 REJECT_RESYNC_SECONDS = 0.2
+
+# ---- 局内负费（费用条上出现减号）----
+# 负费期间**每逻辑帧只攒一半**（1/60 费/帧），一费从 30 逻辑帧变成 60 逻辑帧。
+# 照抄前人：fp24 的 NEGATIVE_SPEED = SCALE/60、engine.rs 的 speed_for_cost_state。
+# 相位本身**不重置** —— 进场 / 离场都只是换速度，累加器接着走。
+TRANS_ENTER_NEG = 'enter'
+TRANS_EXIT_NEG = 'exit'
+
+
+def speed_for_cost_state(neg: bool) -> int:
+    """这一拍该用哪个每逻辑帧增量：负费减半，其余 SCALE/30。
+
+    只和「画面里有没有减号」有关，和倍速、画面帧率都无关（它们不改变逻辑帧率，
+    也不改变一费要攒多少）。
+    """
+    return SPEED_NEGATIVE if neg else SPEED_NORMAL
 
 # 「在关卡里」的证据：费用条这一段被画出来了。三种状态都算画出来：
 #     TRACK     正常推进
@@ -139,6 +174,9 @@ class FrameResult:
     elapsed_f: float = 0.0   # 累计逻辑帧（带小数）：满费挂钟攒下的不足 1 帧的余量
     pause_drawn: bool = True   # 暂停键画出来了没有（面板要能说「按钮 未画出」）
     pause_solid: float = 0.0   # 上面那个判定用的实心占比（面板显示，方便对着调阈值）
+    negative: bool = False     # 这一拍在按「局内负费」算（速度减半）
+    sign_run: int = 0          # 减号扫框里实测的最长纯白连续段（调框用，不进 CSV）
+    sign_thr: int = 0          # 上面那条的判定阈值（调框用，不进 CSV）
 
     def as_row(self) -> list:
         return [self.idx, '%.4f' % self.t, self.fill, self.bar_state,
@@ -187,6 +225,11 @@ class Counter:
         self.last_m = 1.0          # 读不到倍速时的沿用值：初值必须是 1X（最常见的档），
                                    # 不能是 2X —— 曾经写成 2.0，加上挂钟兜底之后
                                    # 「一费 30 帧」直接被算成 62 帧（挂钟按 60 帧/秒走）
+        # 局内负费：画面里出现减号时每逻辑帧只攒一半（一费 30 -> 60 帧）。
+        # _neg 是「已采纳」的状态（只有读数被采纳时才更新），_neg_override 是面板上的
+        # 手动档（None = 按画面判）。见 set_negative_override / _pixel。
+        self._neg = False
+        self._neg_override = None
         self.elapsed = 0
         # 带小数的累计值（满费挂钟的余量）。__init__ 里就要有：第一拍就开着
         # 「暂停计数」时，手动暂停分支会读它、而那时还没走过任何一次赋值。
@@ -206,6 +249,9 @@ class Counter:
         self._last_fill = None     # 上一拍的条宽 / 状态：用来判「条这一拍动没动」
         self._last_state = None
         self._bullet = False       # 这一拍的子弹时间判定（判据在 read_speed 里）
+        # 「这一局里读到过倍速数字」：拖干员时倍速键整块空白，靠它判子弹时间
+        # （见 BULLET_ASSUMED_WARN 上面那段）。重新起锚 / 出关卡会作废。
+        self._digit_seen = False
         self._started = False
         # 清零之后的第一拍「起锚」不许把清零**之前**数过的帧补回来：清零的语义是
         # 「从这一刻起从 0 开始数」。不拦的话数字会停在 1/2 上不动
@@ -244,7 +290,8 @@ class Counter:
     # ---------- 对外 ----------
 
     def step(self, idx: int, t: float, bar: BarReading,
-             pause: PauseReading, speed: SpeedReading) -> FrameResult:
+             pause: PauseReading, speed: SpeedReading,
+             sign: SignReading = None) -> FrameResult:
         dt = 1.0 / self.fps if self._prev_t is None else (t - self._prev_t)
         if dt <= 0:
             dt = 1.0 / self.fps
@@ -265,7 +312,17 @@ class Counter:
         # 数字带占比 0.2721 -> 0.0014、实心箭头 0.0499 -> 0.0316，同一拍切换）。
         # 加时间闸只会把每次进子弹时间的前 0.25 秒（1 倍速 7.5 帧、2 倍速 15 帧）
         # 按正常倍速记错 —— 那正是「一费 30 帧变成 62 帧」这一类偏差的来源。
+        # 局内负费：费用数字左边出现减号时，每逻辑帧只攒一半（一费 30 -> 60 帧）。
+        # 手动档优先（认不出减号时能强开强关，也是面板上的测试开关），否则看像素。
+        # 传 None 的老调用方（录像链路 / 各种自检）行为完全不变。
+        neg = (self._neg_override if self._neg_override is not None
+               else bool(sign is not None and sign.negative))
+        sign_run = int(sign.run) if sign is not None else 0
+        sign_thr = int(sign.thr) if sign is not None else 0
         self._bullet = bool(speed.bullet)
+        if speed.has_digit:
+            # 倍速键上画着数字 —— 把这件事记下来（模板认不出也没关系，只看「画没画」）。
+            self._digit_seen = True
         m_now = float(speed.m) if speed.m == speed.m else None
         if m_now is not None:
             self.last_m = m_now
@@ -312,7 +369,8 @@ class Counter:
                 mode='manual-pause', delta=0, elapsed=self.elapsed,
                 elapsed_f=self.elapsed_f, warn='',
                 phase=(self.timing.phase() if self.timing else 0.0), err=0,
-                pause_drawn=pause.drawn, pause_solid=pause.solid)
+                pause_drawn=pause.drawn, pause_solid=pause.solid,
+                negative=neg, sign_run=sign_run, sign_thr=sign_thr)
 
         # ---- 关卡判定 ----
         #   ① 费用条被画出来（BAR_PRESENT_STATES）；
@@ -345,7 +403,7 @@ class Counter:
                 # 单独标一下：面板能直接说「不在关卡里」，而不是让人以为条真读到了。
                 warn = 'not-battle'
         elif not self._started:
-            k = self._start(bar.fill)
+            k = self._start(bar.fill, speed=speed_for_cost_state(neg))
             mode, delta, warn = self._anchor_result(k)
             self._started = True
         elif bar.state in ('MAX', 'MAX_FADE'):
@@ -372,8 +430,15 @@ class Counter:
                 mode, delta = self._clock(LOGICAL_FPS * m, dt)
                 if m_now is None:
                     warn = 'speed-memory'
+            elif self._digit_seen:
+                # 倍速键上数字没画、箭头也不实心，但**这一局里刚刚还读到过数字**：
+                # 关卡内、运行中还能让那颗键整块空白的只有「拖干员」—— 那是子弹时间
+                # （1/5，恒 6 帧/秒），不是「不知道」。用户 2026-10-10：「识别到 1X 之后
+                # 识别不到就按子弹时间算」。绝不拿 last_m / 5 去算：2X 下那样会多记一倍。
+                mode, delta = self._clock(BULLET_FPS, dt)
+                warn = BULLET_ASSUMED_WARN
             else:
-                # 倍速键上数字没画、箭头也不实心：真不知道速率，冻结不猜。
+                # 从没读到过倍速数字（刚进关卡、或一直在别的界面）：真不知道速率，冻结不猜。
                 mode, delta = 'bar-reject', 0
                 warn = 'speed-unknown'
         elif empty and not wrap_pending:
@@ -383,7 +448,7 @@ class Counter:
             # 而且回费后相位立刻掉下来，同一段暂停里最多只放行一帧。
             mode, delta = ('pause', 0) if paused else ('bar-reject', 0)
         else:
-            mode, delta, warn = self._pixel(bar.fill, dt, paused)
+            mode, delta, warn = self._pixel(bar.fill, dt, paused, neg)
             if empty:
                 # 能走到这儿的空条只可能是「刚回费」（wrap_pending 是唯一入口）：
                 # 单独一个通道名，面板 / CSV / 统计里能直接看出「归零那一帧记到了」。
@@ -450,7 +515,8 @@ class Counter:
             mode=mode, delta=delta, elapsed=self.elapsed, elapsed_f=self.elapsed_f,
             warn=warn,
             phase=(self.timing.phase() if self.timing else 0.0),
-            err=self.last_k, pause_drawn=pause.drawn, pause_solid=pause.solid)
+            err=self.last_k, pause_drawn=pause.drawn, pause_solid=pause.solid,
+            negative=neg, sign_run=sign_run, sign_thr=sign_thr)
 
     def probe(self) -> tuple:
         """实测逻辑帧率探针。
@@ -479,8 +545,8 @@ class Counter:
     def set_frames_per_cost(self, frames: float, rescale: bool = True) -> None:
         """换回费速率：一费几个逻辑帧。
 
-        required 就是「一费要攒多少」，所以换速率只换 required —— speed 永远是
-        每逻辑帧 SCALE//30（逻辑帧率恒为 30，和游戏倍速无关，也和回费速度无关）。
+        required 就是「一费要攒多少」，所以换速率只换 required —— speed 就是每逻辑帧
+        SCALE//30（负费时才减半，见 _speed；逻辑帧率恒为 30，和游戏倍速无关）。
         战前 tag（突袭 / 磨难 / 合约词条）改的正是 required，这一点和前人的 fp24 一致。
 
         rescale=True 会把**已经数出来的**像素通道帧数按新旧速率换算一遍。为什么必须
@@ -503,6 +569,19 @@ class Counter:
             self.cycle_lengths = [int(round(v * ratio)) for v in self.cycle_lengths]
         self.elapsed = self.pixel_frames + self.clock_frames
         self.resync(keep_battle=True)
+
+    def set_negative_override(self, value) -> None:
+        """手动指定「局内负费」：True 强开 / False 强关 / None 按画面判（默认）。
+
+        为什么留这一手：减号那个框是照抄前人的（见 geometry.sign_rect），本机还没有
+        一段真实的负费录像能对着钉它。认不出来时用户至少能强制开一格，把计数救回来；
+        画面判据本身也能用面板上那行「减号 N/thr」当场核对。
+
+        换速度**不重新起锚** —— 相位是连续的，_pixel 会在下一拍按新速度走，
+        并且把这一拍当转场帧做亚帧修正（见 _boundary_correction）。
+        """
+        value = None if value is None else bool(value)
+        self._neg_override = value
 
     def set_manual_pause(self, on: bool) -> None:
         """开关「暂停计数」（手动，给测试用）。
@@ -540,6 +619,7 @@ class Counter:
         self.cycle_lengths = list(other.cycle_lengths)
         self._cycle_seen = other._cycle_seen
         self.last_m = other.last_m
+        self._digit_seen = other._digit_seen
 
     def resync(self, keep_battle: bool = False) -> None:
         """重新锚定。
@@ -566,6 +646,10 @@ class Counter:
         self._move_hold = 0
         # 子弹时间的判定也作废：重新拿到画面后，第一拍重新读倍速键。
         self._bullet = False
+        # 「读到过倍速数字」也一起作废：它是「这一局里」的事实，中间断了一段就得重新认。
+        self._digit_seen = False
+        # 负费状态也**故意不动**：它记的是「画面里有没有减号」这个事实，和「相位模型
+        # 可不可信」无关；重新起锚后的第一拍会按新读数重新判（且不判转场，见 _transition）。
         # 注意：清零那对状态（_no_catchup / _zero_phase）这里**故意不动**。
         # set_layout / set_frames_per_cost 都会走一遍 resync，而真正的清零是在
         # set_layout 之后才调 mark_zero_start —— 清了的话标志就活不到下一拍起锚。
@@ -575,27 +659,38 @@ class Counter:
             self._battle_hold = 0
         self._prev_mode = None
 
+    @property
+    def negative(self) -> bool:
+        """最近一次被采纳的读数说「局内负费」（面板要显示这个）。
+
+        不是 _neg_override：手动档只是「下一拍按什么速度算」，真正的状态要等读数被
+        采纳（和前人 engine.rs 的 last_cost_is_negative 一个语义）。
+        """
+        return bool(self._neg)
+
     # ---------- 相位模型 ----------
 
     def _speed(self) -> int:
-        """每逻辑帧的 fp24 增量。
+        """每逻辑帧的 fp24 增量（默认值；_pixel 会按**这一拍读到的**负费状态传进来）。
 
-        注意这是「逻辑帧」的速度，和游戏倍速无关：倍速只改变每秒有多少逻辑帧，
-        不改变一费需要多少逻辑帧。所以 1X / 2X / 子弹时间都用 SPEED_NORMAL。
+        这是「逻辑帧」的速度，和游戏倍速无关：倍速只改变每秒有多少逻辑帧，
+        不改变一费需要多少逻辑帧。所以 1X / 2X / 子弹时间都用同一个速度。
 
-        回费速度 tag 走的是**另一条路**：它改的是 required（一费要攒多少），不是
-        每帧攒多快。两种写法「一费几帧」都对得上，但**边界周期**（第几费会多 1 帧）
-        不一样；前人文档给的表是按 required 算的，照抄它才对得上游戏。
-        见 fp24.required_from_frames 和 tools/check_cost_rate.py。
+        回费变慢有**两条路**，都通向「一费更多帧」，但改的量不一样：
+          * 战前 tag（突袭 / 磨难 / 合约词条）改 required（一费要攒多少）——
+            见 fp24.required_from_frames 和 tools/check_cost_rate.py；
+          * 局内负费改 speed（每逻辑帧攒多快）—— 就是这里的 SPEED_NEGATIVE。
+        两种写法「一费几帧」都对，但**边界周期**（第几费会多 1 帧）不一样，
+        照抄前人各自的那一张表才对得上游戏。
         """
-        return SPEED_NORMAL
+        return SPEED_NEGATIVE if self._neg else SPEED_NORMAL
 
     def _width(self, phase: float) -> int:
         """这个相位在画面上应该有多少像素宽（截到实际能看到的宽度）。"""
         w = synthesized_width(self.model_w, self.bar_width_frac, phase)
         return w if w <= self.visible_w else self.visible_w
 
-    def _start(self, observed: int) -> int:
+    def _start(self, observed: int, speed: int = None) -> int:
         """起锚：把累加器放到一个「画出来正好是 observed 宽」的相位上。
 
         返回 k：起锚这一拍是**当前费用周期的第几帧**（第 1 帧 = 条刚归零、还没长出
@@ -603,7 +698,7 @@ class Counter:
         「周期开头那几帧」是读数证明过的，可以补；补多少见 _anchor_result。
         """
         self.timing = CostTiming(self.required)
-        k, _, timing = self._resync(observed, allow_wrap=True, base=self.timing)
+        k, _, timing = self._resync(observed, allow_wrap=True, base=self.timing, speed=speed)
         self.timing = timing
         # 累加器是新建的，cycles 从 0 重新开始数：周期基准必须跟着同步，
         # 否则「上次锚定记过的回费次数」比新累加器大，之后再也不会有周期被记下来。
@@ -670,7 +765,8 @@ class Counter:
             return 'anchor', 0, 'anchor-late'
         return 'anchor', 0, ''
 
-    def _resync(self, observed: int, allow_wrap: bool, base: CostTiming = None) -> tuple:
+    def _resync(self, observed: int, allow_wrap: bool, base: CostTiming = None,
+                speed: int = None, transition: str = '') -> tuple:
         """相位重同步：找出「从 base 往前推 k 个逻辑帧」里画出来最接近 observed 的 k。
 
         返回 (k, 误差px, 推完之后的累加器)。
@@ -693,7 +789,7 @@ class Counter:
         base = base if base is not None else self.timing
         if base is None:
             return 0, 0, CostTiming(self.required)
-        speed = self._speed()
+        speed = self._speed() if speed is None else int(speed)
         period = CostTiming(base.required).frames_until_recovery(speed) or int(LOGICAL_FPS)
         max_advance = period + 1
 
@@ -708,11 +804,40 @@ class Counter:
             err = abs(self._width(trial.phase()) - observed)
             if err < best_err:
                 best_err, best_k, best_timing = err, k, trial.copy()
+        if transition:
+            best_timing, best_err = self._boundary_correction(best_timing, best_err,
+                                                              observed, transition)
         return best_k, best_err, best_timing
+
+    def _boundary_correction(self, timing: CostTiming, err: int, observed: int,
+                             transition: str) -> tuple:
+        """负费转场那一帧的**亚帧**修正：相位挪半格，帧数一帧不动。
+
+        为什么需要：转场那一帧的速度到底算旧的还是新的，取决于游戏是在「这一拍的画面
+        取到之前」还是「之后」换的速 —— 我们看到的只有一帧像素，分不出来，于是累加器
+        可能比真值多 / 少**半个负费增量**（= 半个正常帧，约 4px）。它不影响已经数出来
+        的帧数（k 不变），只会让**之后**每一帧的相位偏一点，越攒越对不上。
+
+        做法（照抄前人 engine.rs 的 apply_boundary_subframe_correction）：两个方向都试
+        一遍，谁让**这一拍**的相位像素误差更小就用谁；误差打平时按转场方向挑 ——
+        负费 -> 正常、且读数就是 0 宽时偏向 +（真值是 1/60 相位，画出来也是 0 宽，
+        取 + 才能让后面每帧差 1px 的可见宽度序列对上）。
+        """
+        half = int(SPEED_NEGATIVE)
+        preferred = half if (transition == TRANS_EXIT_NEG and observed == 0) else None
+        best_timing, best_err = timing, err
+        for delta in (half, -half):
+            nudged = timing.copy()
+            nudged.accumulator += delta
+            e = abs(self._width(nudged.phase()) - observed)
+            if e < best_err or (e == best_err and preferred is not None
+                                and delta == preferred):
+                best_timing, best_err = nudged, e
+        return best_timing, best_err
 
     # ---------- 计数通道 ----------
 
-    def _pixel(self, observed: int, dt: float, paused: bool) -> tuple:
+    def _pixel(self, observed: int, dt: float, paused: bool, neg: bool = False) -> tuple:
         """像素通道：这一拍前进了几个逻辑帧，只由条画出来的宽度决定。
 
         读不准就**冻结**（delta = 0），绝不用挂钟补帧：挂钟要乘倍速，
@@ -722,16 +847,21 @@ class Counter:
         """
         # 相位模型连续这么久都匹配不上 -> 模型已经不可信：按当前读数重新起锚，
         # 这一拍 delta = 0（丢掉的帧无法证明，宁可少记也不猜）。见 REJECT_RESYNC_SECONDS。
+        speed = speed_for_cost_state(neg)
         stale = self._reject_s > REJECT_RESYNC_SECONDS
+        # 负费的转场判据必须在重新起锚**之前**取：起锚会把 last_phase 重新写上，
+        # 之后就没法和「上一拍」比了（前人 engine.rs 比的也是 last_accepted_phase）。
+        transition = self._transition(neg, self.last_phase is not None)
         if stale:
-            self._start(observed)
+            self._start(observed, speed=speed)
         allow_wrap = self.last_phase is not None and self.last_phase > WRAP_MIN_PREV_PHASE
         base = self.timing
         # 上一拍是不是正好停在「画满」那一帧（= 游戏刚回费那一帧）：
         # 它的下一拍一定是「条归零」那一帧，也就是新一费的第 1 帧。
         was_full = bool(base is not None and base.cycles > 0
                         and base.frames_since_cycle_start == 0)
-        k, err, timing = self._resync(observed, allow_wrap)
+        k, err, timing = self._resync(observed, allow_wrap, speed=speed,
+                                      transition=transition)
         if err > MATCH_TOLERANCE_PX:
             # 读数被遮挡 / 条换了渲染 / 相位对不上：这条读数不含位移信息
             self._reject_s += dt
@@ -768,6 +898,9 @@ class Counter:
         self._reject_s = 0.0
         self.last_phase = timing.phase()
         self.last_k = k
+        # 负费状态**只在采纳之后**才更新（和前人 engine.rs 的 last_cost_is_negative
+        # 一样）：被拒的那一拍读数本身不可信，不该让它把速度改掉。
+        self._neg = neg
         # 这 k 帧里跨过回费边界了吗？两条路：
         #   上一拍就是「画满」那一帧 -> 下一拍（k>=1）必跨；
         #   更靠前的位置起步（比如 n=28）走 k 帧时累加器自己回卷 -> cycles 涨了。
@@ -782,6 +915,20 @@ class Counter:
             self._cycle_ref = end
             self._cycle_seen = timing.cycles
         return 'pixel', k, ('phase-resync' if stale else '')
+
+    def _transition(self, neg: bool, had_phase: bool) -> str:
+        """这一拍是不是「局内负费」的转场帧（进场 / 离场）。
+
+        had_phase=False（上一拍还没认下过任何相位，比如刚起锚 / 刚重新校准）时不判 ——
+        没有可比的对象，也就没有「转场」这回事。
+        """
+        if not had_phase:
+            return ''
+        if self._neg and not neg:
+            return TRANS_EXIT_NEG
+        if neg and not self._neg:
+            return TRANS_ENTER_NEG
+        return ''
 
     def _clock(self, rate: float, dt: float) -> tuple:
         """满费挂钟通道：这一拍的墙钟时间折成逻辑帧，**带小数余量**。
