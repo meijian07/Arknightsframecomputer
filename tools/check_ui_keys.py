@@ -22,17 +22,30 @@
     7. 诊断那一层删掉了（2026-10-11）：按钮 / 折叠方法没了，fr_diag 一直不 pack；
     8. 刻度表的「回看」：build(now=...) 时多画一条「现在」灰线（画出来的图不一样）；
     9. 拖动标题栏：位移精确（收起 / 展开各一次 —— 展开态竖直拖不动 = _anchor_bottom
-       没跟着挪），松手结束「拖动中」。
+       没跟着挪），松手结束「拖动中」；以及**绕开面板**把窗口挪走（系统标题栏 / 系统
+       贴边 / 换分辨率）之后，下一次布局重算不许把它拽回去（见 9b）。
 
     10. A 方案（2026-10-11）：展开区拆两块 —— 打轴器（fr_more_top）展开时插到
-        **大数字上面**，手动校准（fr_more）留在最末尾；收起 -> 展开 -> 收起
-        y 回原处（没有新漂移）。
+        **大数字上面**；收起 -> 展开 -> 收起 y 回原处（没有新漂移）。
+    11. 读窗口那个键（2026-10-11 第四轮）：「框选费用条」改名「手动校准」，**并进控制
+        行**（两种模式面板尺寸一模一样，不用展开）；「置顶」键第五轮删掉，改成**默认
+        置顶**（选完窗口就钉）；窗口那一行下面的多行「教程」删掉，改由「告警：」那一
+        行在面板压住 ROI 时说话。
+    12. 第五轮：模式名换成「PC端 / 窗口」；「手动校准」**两种模式都有**（PC端开二级
+        窗口、窗口走参照图取景器，按模式分派 manual_calib）；底部那一行平时写**短状态**
+        （未开始 / 正在计数… / 已暂停 / 正在校准…），动作反馈说完自己让位。
+    13. 第六轮（41）：切模式**自动清零**（切过去是待命态，点「开始」才数）；取景器
+        **取消**之后引用要清掉（否则「手动校准」再也点不动）；「置顶」键删掉、窗口模式
+        **默认置顶**（选完窗口就钉，钉完把面板抢回来）。
 
 用法：python tools/check_ui_keys.py
 """
 
+import ast
+import io
 import os
 import sys
+import time
 import types
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -396,15 +409,15 @@ def _btn_texts(widget):
 def t_calib_dialog(app):
     """8：手动校准二级窗口（2026-10-11 用户：「改成手动校准」）。
 
-    面板上只剩一个入口按钮；「目标 / 微调 / 保存校准 / 恢复默认 / ROI 框 / 换窗口」
-    全搬进窗口里。这里不抓图，只钉「面板只剩一个按钮 + 窗口里该有的都在」。
+    二级窗口本身还在（自检直接调 open_calib_dialog），但面板上已经没有入口了；
+    「目标 / 微调 / 保存校准 / 恢复默认 / ROI 框 / 换窗口」全在窗口里。
     """
     from akframe import ui as ui_mod
 
-    check('面板上只有一个「手动校准」按钮', '手动校准' in app.btn_calib.cget('text'),
-          app.btn_calib.cget('text'))
-    panel_btns = _btn_texts(app.fr_more)
-    check('面板展开区没有「保存校准 / 恢复默认」了（搬进窗口）',
+    check('二级窗口的入口从面板上删掉了（用户：「原有的手动校准删除」）',
+          not hasattr(app, 'btn_calib'))
+    panel_btns = _btn_texts(app.root)
+    check('面板上没有「保存校准 / 恢复默认」了（它们在二级窗口里）',
           not any(t in ('保存校准', '恢复默认') for t in panel_btns), panel_btns)
     app.open_calib_dialog()
     try:
@@ -458,10 +471,8 @@ def t_layout_top(app):
           '顺序=%d vs %d' % (order.index(app.fr_more_top), order.index(app.fr_nums)))
     check('展开：打轴器在标题栏 / 分隔线之后（没压在最上面）',
           order.index(app.fr_more_top) >= 2, order.index(app.fr_more_top))
-    check('展开：手动校准那一行在**最末尾**',
-          order.index(app.fr_more) == len(order) - 1
-          and app.fr_more.winfo_manager() == 'pack',
-          '%d / 共 %d' % (order.index(app.fr_more), len(order)))
+    check('展开：fr_more（曾装「手动校准…」那一行）不再铺出来',
+          app.fr_more.winfo_manager() == '', app.fr_more.winfo_manager())
     check('两块是两个独立的 Frame（打轴器才插得了队）',
           app.fr_more is not app.fr_more_top
           and app.fr_more_top.master is root and app.fr_more.master is root)
@@ -490,6 +501,306 @@ def t_layout_top(app):
     check('展开是「往上长」：y 只减不增', y1 <= y0, 'y0=%d y1=%d' % (y0, y1))
     check('收起 -> 展开 -> 收起：y 回原处（A 方案没引入新漂移）',
           y2 == y0, 'y0=%d 展开=%d 收起=%d' % (y0, y1, y2))
+
+
+def t_window_row(app):
+    """11：读窗口那个键并进控制行 + 默认置顶 + 「教程」那一块删掉。
+
+    用户 2026-10-11：「把读取窗口功能中的框选费用条替换手动校准，原有的手动校准删除；
+    置顶中删除默认置顶；下方的教程删除，两种模式的窗口大小不变，不需要展开」。
+    41 轮追加：「窗口模式置顶删除，默认置顶」—— 键删了，选完窗口直接钉。
+    """
+    import types as _types
+    from akframe import ui as ui_mod
+
+    check('面板上不再有独立的一行 fr_window（两个键并进控制行了）',
+          not hasattr(app, 'fr_window'))
+    check('窗口那一行的「教程」连控件一起删了',
+          not hasattr(app, 'lb_window_hint') and not hasattr(app, '_window_hint_base'))
+    check('展开区那个「手动校准…」（自动模式的 ROI 二级窗口）也删了',
+          not hasattr(app, 'btn_calib'))
+    check('「手动校准」挂在控制行上（「置顶」那一格 41 轮删了）',
+          app.btn_manual.master is app.fr_ctrl and not hasattr(app, 'btn_pin'))
+    check('PC端：「手动校准」在（第五轮：PC端也要手动校准）',
+          bool(app.btn_manual.winfo_manager()))
+
+    def req():
+        app._set_note('')          # 提示行那句话的长短会带着宽度走，量尺寸前清掉
+        app.root.update_idletasks()
+        return (app.root.winfo_reqwidth(), app.root.winfo_reqheight())
+
+    live_w, live_h = req()
+    app._src_kind = 'window'
+    app._sync_ctrl_row()                     # 校准按钮上的字跟着模式走
+    app._window_win = _types.SimpleNamespace(hwnd=4242, exe="t.exe",
+                                             client=(0, 0, 1920, 1080))
+    row = [b.cget("text") for b in app.fr_ctrl.pack_slaves()]
+    check('读窗口模式：两个字铺出来、排在「开始」左边',
+          row == ['校准：窗口▾', '手动校准', '开始', '清零'], row)
+    check('「框选费用条」这个名字换成了「手动校准」（同一件事：手动圈条）',
+          app.btn_manual.cget('text') == '手动校准'
+          and '框选费用条' not in row)
+    check('两种模式的行数一样、高度一模一样（面板尺寸不变）',
+          req()[1] == live_h, '%d vs %d' % (req()[1], live_h))
+    check('并进控制行之后宽度仍然落进基准宽 470（没把面板顶宽）',
+          req()[0] <= app.COLLAPSED_W, req()[0])
+
+    # ---- 默认置顶：选完窗口就该顺手 SetWindowPos(TOPMOST) + 把面板抢回来 ----
+    calls = []
+    raised = []
+    real = (ui_mod.set_topmost, ui_mod.is_window, ui_mod.is_topmost, app._window_worker)
+    real_raise = app._raise_panel
+    app._window_worker = lambda *a, **k: None      # 别真起那条后台线程
+    app._raise_panel = lambda: raised.append(1)
+    ui_mod.set_topmost = lambda h, on=True: (calls.append((h, on)), True)[1]
+    try:
+        app.start_window_calib(_types.SimpleNamespace(hwnd=4242, exe="t.exe"),
+                               box=None, force=True)
+    finally:
+        ui_mod.set_topmost = real[0]
+        app._window_worker = real[3]
+    check('选完窗口**默认就钉**（「窗口模式置顶删除，默认置顶」）',
+          calls == [(4242, True)] and app._pinned_hwnd == 4242, str(calls))
+    check('钉完把面板抢回来（抬目标那一下会把面板压在下面）',
+          raised == [1], str(raised))
+
+    # ---- _keep_pin：标记还在就一个系统调用都不发（这就是「不闪」）----
+    app._pinned_hwnd = 4242
+    calls = []
+    raised = []
+    ui_mod.set_topmost = lambda h, on=True: (calls.append((h, on)), True)[1]
+    ui_mod.is_window = lambda h: True
+    app._raise_panel = lambda: raised.append(1)
+    try:
+        ui_mod.is_topmost = lambda h: True
+        app._pin_at = 0.0
+        app._keep_pin(1000.0)
+        check('置顶标记还在：一个系统调用都不发（稳态零闪烁）', calls == [], str(calls))
+        ui_mod.is_topmost = lambda h: False
+        app._pin_at = 0.0
+        app._keep_pin(1001.0)
+        check('标记丢了（播放器重建了窗口）：补钉一次 + 把面板抬回来',
+              calls == [(4242, True)] and raised == [1],
+              '%s / %s' % (calls, raised))
+        ui_mod.is_window = lambda h: False
+        app._pin_at = 0.0
+        app._keep_pin(1002.0)
+        check('窗口没了：放开置顶、提示换一个窗口（不再乱钉）',
+              app._pinned_hwnd is None and '不见了' in app.lb_note.cget('text'),
+              app.lb_note.cget('text'))
+    finally:
+        (ui_mod.set_topmost, ui_mod.is_window, ui_mod.is_topmost,
+         app._raise_panel) = real[0], real[1], real[2], real_raise
+    app._pinned_hwnd = None
+
+    # ---- 原来那段「教程」里唯一必须留的：面板压住了 ROI ----
+    class _R:
+        def __init__(self, x, y, w, h):
+            self.x, self.y, self.w, self.h = x, y, w, h
+
+    had = hasattr(app.monitor, "layout")
+    old_layout = getattr(app.monitor, "layout", None)
+    app.monitor.layout = _types.SimpleNamespace(
+        bar=_R(app.root.winfo_rootx() + 20, app.root.winfo_rooty() + 20, 200, 20))
+    app._refresh_roi_warn()
+    check('面板压住费用条 -> 写进「告警：」那一行（教程没了，这条不能丢）',
+          '压住了' in app.lb_warn.cget('text')
+          and app.fr_warn.winfo_manager() == 'pack', app.lb_warn.cget('text'))
+    app.monitor.layout = None
+    app._refresh_roi_warn()
+    check('没压住 -> 告警整行收起来',
+          app.lb_warn.cget('text') == '' and app.fr_warn.winfo_manager() == '')
+    app._set_warn('采样已停 1.0s（测试用）')          # 假装别的告警正占着那一行
+    app._refresh_roi_warn()
+    check('别的告警在说话时，ROI 这条不会把它收掉（否则告警行每拍一收一铺＝闪）',
+          app.fr_warn.winfo_manager() == 'pack'
+          and '采样已停' in app.lb_warn.cget('text'), app.lb_warn.cget('text'))
+    app._set_warn('')
+    if had:
+        app.monitor.layout = old_layout
+    else:
+        try:
+            del app.monitor.layout
+        except AttributeError:
+            pass
+
+    app._src_kind = 'live'
+    app._sync_ctrl_row()
+    check('切回 PC端：「手动校准」留着（两种模式都有），尺寸不变',
+          bool(app.btn_manual.winfo_manager()) and req() == (live_w, live_h),
+          '%s vs %s' % (req(), (live_w, live_h)))
+
+
+def t_status_row(app):
+    """12：模式名 -> PC端 / 窗口；PC端也手动校准；底部那一行写短状态。
+
+    用户 2026-10-11 第五轮：「把模式切换文本改成 pc端和窗口，pc端也加入手动校准功能，
+    下方的状态描述用一行简短的文字，比如正在校准。。。；正在计数。。。」
+    """
+    # 11 组把校准线程 stub 掉了，那道工序的状态会一直挂着（_window_busy=True）——
+    # 那样 _tick_body 每拍提前 return，底下一行永远写不到状态。
+    app._window_busy = False
+    app._window_result = None
+    app._window_win = None
+    app._src_kind = 'live'
+    app._sync_ctrl_row()
+
+    row = [b.cget('text') for b in app.fr_ctrl.pack_slaves()]
+    check('模式名换成「PC端 / 窗口」（不再叫自动 / 手动）',
+          row[0] == '校准：PC端▾' and '自动' not in ' '.join(row)
+          and '手动' not in row[0], row)
+    check('PC端也有「手动校准」（用户：「pc端也加入手动校准功能」）',
+          row == ['校准：PC端▾', '手动校准', '开始', '清零'], row)
+
+    # 「手动校准」按模式分派：PC端 -> 二级窗口（挪推算出来的 ROI）；
+    # 窗口 -> 参照图取景器（画面被缩放过，只能自己圈）
+    calls = []
+    box, dlg = app.box_bar, app.open_calib_dialog
+    app.box_bar = lambda: calls.append('box')
+    app.open_calib_dialog = lambda: calls.append('dialog')
+    try:
+        app._src_kind = 'live'
+        app.manual_calib()
+        app._src_kind = 'window'
+        app.manual_calib()
+    finally:
+        app.box_bar, app.open_calib_dialog = box, dlg
+        app._src_kind = 'live'
+    check('「手动校准」按模式分派：PC端 -> 二级窗口，窗口 -> 圈条取景器',
+          calls == ['dialog', 'box'], calls)
+
+    def status(reset=True):
+        if reset:
+            app._note_hold = 0.0
+        app._tick_body()
+        return app.lb_note.cget('text')
+
+    app._counting_started = False
+    check('没在数 -> 底下写「未开始」', status() == '未开始',
+          repr(app.lb_note.cget('text')))
+    app.monitor.start()
+    app._counting_started = True
+    check('在数 -> 底下写「正在计数…」', status() == '正在计数…',
+          repr(app.lb_note.cget('text')))
+    app.toggle_manual_pause()
+    check('暂停 -> 底下写「已暂停」', status() == '已暂停',
+          repr(app.lb_note.cget('text')))
+    app.toggle_manual_pause()
+    app._calib = True
+    check('在微调 ROI -> 底下写「正在校准…」', status() == '正在校准…',
+          repr(app.lb_note.cget('text')))
+    app._calib = False
+
+    # 动作反馈说完要让位（不让位的话底下一行又变成甩不掉的一句旧话）
+    app._set_note('已清零')
+    check('动作反馈先顶上来', app.lb_note.cget('text') == '已清零')
+    status(reset=False)
+    check('反馈还没到点：仍然是它（不许被状态抢掉）',
+          app.lb_note.cget('text') == '已清零', repr(app.lb_note.cget('text')))
+    status()
+    check('反馈到点：自己让位给状态', app.lb_note.cget('text') == '正在计数…',
+          repr(app.lb_note.cget('text')))
+
+    # 「一行简短的文字」查得住：所有写底下的字面量都不超 28 字、不换行
+    bad = []
+    src = io.open(os.path.join(ROOT, 'src', 'akframe', 'ui.py'), encoding='utf-8').read()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr in ('_set_note', '_note_pin') and node.args:
+            try:
+                val = ast.literal_eval(node.args[0])
+            except Exception:                  # noqa: BLE001  拼接 / f-string，跳过
+                continue
+            if isinstance(val, str) and (len(val) > 28 or '\n' in val):
+                bad.append('%d: %r' % (node.lineno, val))
+    check('写底部那一行的字面量全长在 28 字以内、没有换行（用户要「一行简短的文字」）',
+          not bad, bad[:3])
+
+    t_switch_clears(app)
+    t_picker_cancel(app)
+
+
+def t_switch_clears(app):
+    '''13a：切模式 = 自动清零，而且切过去是**待命**态（41 轮「切换模式自动清零」）。
+
+    为什么必须清零：两个来源的帧号不是一个坐标系（PC端 = 游戏窗口，窗口 = 播放器 /
+    录像），接在一起没有意义；不清的话大数字会挂着上一个来源数到的值，看着像「已经
+    数了 500 帧」，而这一拍其实什么都没数。
+    为什么是待命而不是接着跑：读窗口那条链路本来就是「校准完等你点开始」，切回去两边
+    一个规矩 —— 一眼看得出没在数，也不会把「切模式」偷偷变成「开始」。
+    '''
+    if not app.monitor.alive:              # 上一组可能刚把它停了
+        app.monitor.start()
+    app._counting_started = True
+    app._src_kind = 'window'               # 假装读着窗口，再切回 PC端
+    app.back_to_live()
+    check('切换模式自动清零：帧数归 0、按钮回「开始」、停采样待命',
+          app._src_kind == 'live' and app._counting_started is False
+          and app.monitor.alive is False and app.lb_frames.cget('text') == '0'
+          and app.btn_start.cget('text') == '开始',
+          '%s / %s / %s / %r / %s' % (app._src_kind, app._counting_started,
+                                      app.monitor.alive, app.lb_frames.cget('text'),
+                                      app.btn_start.cget('text')))
+    check('切模式也给一句话（提示切过去是待命、点「开始」才数）',
+          '已清零' in app.lb_note.cget('text'), repr(app.lb_note.cget('text')))
+
+
+def t_picker_cancel(app):
+    '''13b：取景器「取消」之后引用要清掉，否则「手动校准」再也点不动（41 轮）。
+
+    用户原话：「手动校准点取消后有时会无法再次手动校准」。根因：BoxPicker.close() 只
+    destroy 窗口，而「取消 / Esc / 右上角 ×」都不经过 on_apply —— 面板那边的
+    self._picker 就永远不是 None，box_bar 开头那句 `if self._picker is not None: return`
+    一直命中。修法：close() 收尾统一回调 on_close（且幂等），面板在那个回调里清引用。
+    '''
+    import types as _types
+    from akframe import ui as ui_mod
+
+    # 1) close() 自己：幂等 + on_close 恰好一次（应用那条路是 close() 之后才 on_apply()）
+    raw = ui_mod.BoxPicker.__new__(ui_mod.BoxPicker)
+    seen = []
+    raw._closed = False
+    raw.top = _types.SimpleNamespace(destroy=lambda: seen.append('destroy'))
+    raw.on_close = lambda: seen.append('cb')
+    raw.close()
+    raw.close()
+    check('取景器 close() 幂等：销毁一次、on_close 恰好一次（不重复回调）',
+          seen == ['destroy', 'cb'], seen)
+
+    # 2) 接线：取消（走 on_close）之后 _picker 清空，于是能再点开
+    made = []
+
+    class _FakePicker(object):
+        def __init__(self, parent, fetch, frames, index, on_apply, on_note=None,
+                     fullest=None, on_close=None):
+            self.on_close = on_close
+            made.append(self)
+
+        def close(self):                   # 照着 BoxPicker.close 那条路走
+            if self.on_close is not None:
+                self.on_close()
+
+    real_cls = ui_mod.BoxPicker
+    app._picker = None
+    app._src_kind = 'window'
+    app._window_win = _types.SimpleNamespace(hwnd=7, exe='t.exe',
+                                             client=(0, 0, 1920, 1080))
+    ui_mod.BoxPicker = _FakePicker
+    try:
+        app.box_bar()
+        check('第一次点「手动校准」开出取景器', app._picker is made[0])
+        app.box_bar()
+        check('取景器开着时再点不重开（一次只该有一个）', len(made) == 1)
+        made[0].close()                    # 用户点了「取消」
+        check('取景器「取消」之后面板把引用清掉了', app._picker is None)
+        app.box_bar()
+        check('取消之后还能再点开「手动校准」（用户报的就是这一条）',
+              len(made) == 2 and app._picker is made[1])
+    finally:
+        ui_mod.BoxPicker = real_cls
+        app._picker = None
+        app._src_kind = 'live'
+        app._window_win = None
 
 
 def t_scrub_render():
@@ -551,6 +862,41 @@ def t_drag(app):
     got = drag(60, -30)
     check('展开态拖 (+60, -30)：竖直方向也跟手', got == (60, -30),
           '%s（展开态竖直拖不动 = 拖动时没挪 _anchor_bottom）' % (got,))
+
+    # ---- 9b. 窗口被**别的方式**挪走之后，布局重算不能把它拽回去（2026-10-11）----
+    # 用户：「点击按钮都有可能导致窗口重置位置（漂移）」。_place 是照 _user_pos /
+    # _anchor_bottom 算位置的，而这两份缓存**只有拖面板自己那条 head** 才会更新
+    # （见 _drag_move）—— 用系统标题栏拖、系统贴边、换分辨率都会让缓存停在原地，于是
+    # 下一次布局重算（展开 / 收起、告警行收起来、内容长高触发的 _fit_window…）就照旧
+    # 缓存把窗口拽回去。修法：_place 之前先 _sync_pos，把缓存按「挪走的那一段」平移。
+    def move_to(x, y):
+        root.geometry('+%d+%d' % (x, y))       # 绕开面板那套缓存，像系统标题栏那样挪
+        root.update()
+
+    move_to(700, 200)
+    m_y = root.winfo_y()
+    check('绕开面板把窗口挪走（geometry 直接挪）：窗口真的到了 (700,200)',
+          (root.winfo_x(), root.winfo_y()) == (700, 200),
+          str((root.winfo_x(), root.winfo_y())))
+    app.toggle_more()                          # 展开 -> 收起
+    root.update()
+    check('挪走之后收起：x 不许被拽回旧缓存（修之前会被拽回 _user_pos[0]）',
+          root.winfo_x() == 700, 'x=%d（缓存 x=%d）' % (root.winfo_x(), app._user_pos[0]))
+    check('挪走之后收起：y 回到挪走时那个 y（平移没丢「想要的位置」）',
+          root.winfo_y() == m_y, 'y=%d（挪走时 %d）' % (root.winfo_y(), m_y))
+    app._refit()
+    root.update()
+    check('再 _refit 一次（点按钮顺手会干的事）：x / y 都不动',
+          (root.winfo_x(), root.winfo_y()) == (700, m_y),
+          str((root.winfo_x(), root.winfo_y())))
+    app.toggle_more()                          # 收起 -> 展开
+    root.update()
+    check('再展开：x 还是 700，y 只往上（<= 收起时那个 y）',
+          root.winfo_x() == 700 and root.winfo_y() <= m_y,
+          'x=%d y=%d（收起时 %d）' % (root.winfo_x(), root.winfo_y(), m_y))
+    app.toggle_more()                          # 回到收起态，后面照旧
+    root.update()
+
     app.toggle_more()
     park(300, 1000)
     app._dragging = True
@@ -603,6 +949,10 @@ def main():
                 t_drag(app2)
                 print('10. 展开区拆两块（打轴器在最上）')
                 t_layout_top(app2)
+                print('11. 读窗口那两个键 / 不默认置顶 / 教程删掉')
+                t_window_row(app2)
+                print('12. PC端 / 窗口 改名 + PC端也能手动校准 + 底下一行是短状态')
+                t_status_row(app2)
             finally:
                 kill_afters(app2)
                 try:

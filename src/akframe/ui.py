@@ -66,8 +66,8 @@ from .scale_render import render as render_scale
 from .state import LOGICAL_FPS
 from .timeline import Teleprompter, parse_lines
 from .win32 import (ScreenGrabber, arknights_ui_scaler, client_rect, is_window,
-                    raise_window, set_click_through, set_topmost, to_gray, top_level,
-                    virtual_screen_bounds, work_area)
+                    is_topmost, raise_window, set_click_through, set_topmost,
+                    to_gray, top_level, virtual_screen_bounds, work_area)
 
 # 「把 md 文件拖进【导入 / 编辑轴】窗口」这一条要 tkinterdnd2（**可选**依赖）：
 #     pip install tkinterdnd2
@@ -117,9 +117,10 @@ WINDOW_STAGES = {'align': '自动对齐费用条', 'measure': '量费用条槽',
                  'buttons': '搜右上角两个按钮', 'verify': '自检：费用条在不在动',
                  'ready': '就绪'}
 
-# 「读窗口」的目标窗口每隔多少秒重新钉一次置顶（见 MonitorApp._keep_pin）。
-# 0.7s 是「够快」和「别每拍都去调 SetWindowPos」之间的折中：真的被盖住时，用户看到的
-# 是下次采样（8ms 一拍）读不到画面，把这一层延迟压到一秒以内就够用了。
+# 「读窗口」的目标窗口每隔多少秒**复核**一次置顶（见 MonitorApp._keep_pin）。
+# 0.7s 是「够快」和「别每拍都去问系统」之间的折中。复核不等于重钉：标记还在就一个系统
+# 调用都不发 —— 无条件重钉每 0.7 秒会把面板盖一下，用户看到的就是「窗口会闪」。
+PIN_KEEP_S = 0.7
 PIN_KEEP_S = 0.7
 
 # ---- 配色：照着游戏内的 HUD 抄 ----
@@ -215,8 +216,10 @@ class BoxPicker:
     """
 
     def __init__(self, parent, fetch, frames: int, index: int, on_apply, on_note=None,
-                 fullest=None):
+                 fullest=None, on_close=None):
         self.fetch = fetch                  # fetch(i) -> (灰度帧, 参考 layout)
+        self.on_close = on_close            # 收尾回调（应用 / 取消 / Esc 都会走）
+        self._closed = False
         self.frames = max(1, int(frames))
         self.on_apply = on_apply
         self.on_note = on_note or (lambda text, hold=3.0: None)
@@ -474,10 +477,23 @@ class BoxPicker:
         self.on_apply(box)
 
     def close(self):
+        """关掉取景器（应用 / 取消 / Esc / 右上角 × 都走这里）。
+
+        为什么要有 on_close 回调：这个对象是「用完即弃」的，而**取消**这条路不经过
+        on_apply —— 面板那边的 self._picker 就永远不是 None 了，于是「手动校准」以后
+        点了什么都不发生（用户报的「手动校准点取消后有时会无法再次手动校准」）。
+        所以收尾统一走 on_close，让面板把那个引用清掉。
+        幂等：应用那条路是先 close() 再 on_apply()，不能回调两次。
+        """
+        if self._closed:
+            return
+        self._closed = True
         try:
             self.top.destroy()
         except tk.TclError:
             pass
+        if self.on_close is not None:
+            self.on_close()
 
 
 class MonitorApp:
@@ -532,7 +548,7 @@ class MonitorApp:
         self._pin_at = 0.0                      # 上次重新钉置顶的时刻（见 _keep_pin）
         self._full_ticks = 0                    # 满费格式还要多印几拍（见 _tick_body）
         self._pin_noted = ''                    # 置顶相关的提示只报一次（别每 0.7s 刷一遍）
-        self._window_hint_base = ''             # 窗口那一行的固定部分（动态部分见 _refresh_window_hint）
+        self._roi_warn = ''                     # 当前那条「面板压住 ROI」告警（见 _refresh_roi_warn）
         self._picker = None                     # 参照图取景器（BoxPicker，框选费用条用）
         # 倍速模板（read_speed 认 1X / 2X 数字笔画用）。run_monitor 会把它传进来；
         # 没传就自己从 templates/ 读一份（面板单独当库用时也能起来）。
@@ -613,6 +629,9 @@ class MonitorApp:
         self._user_pos = (24, max(10, sh - 470))
         # 展开时窗口下边缘钉在这个位置（收起态摆好之后算出来，见 _place）
         self._anchor_bottom = 0
+        # 上一次 geometry 请求的位置（见 _sync_pos）：拿它和窗口**真实**位置比，
+        # 差出来那一段就是「窗口被别人挪走了」的那一段位移。
+        self._asked_pos = None
         self.root.geometry('%dx%d+%d+%d' % (self.COLLAPSED_W, 150,
                                             self._user_pos[0], self._user_pos[1]))
         self.root.protocol('WM_DELETE_WINDOW', self.quit)
@@ -628,8 +647,7 @@ class MonitorApp:
         self._fit_at = 0.0
         # 面板起来是待命态（上面 _counting_started 那段）：这一句告诉用户该点哪里。
         if not self._counting_started:
-            self._set_note('点「开始」起采样；再点是暂停 / 继续，清零回到开始',
-                           hold=8.0)
+            self._set_note('点「开始」起采样（再点 = 暂停）', hold=8.0)
         # timeline_text 是直接把轴喂进面板输入框（演示模式用：轴不来自文件，
         # 但仍然能在面板里改、能按 Ctrl+Enter 重解析）。
         if timeline_text:
@@ -688,7 +706,6 @@ class MonitorApp:
         手动校准那一行（fr_more）照旧追加在末尾 —— 它在展开区的最下面。
         """
         self.fr_more_top.pack(fill='x', before=self.fr_nums)
-        self.fr_more.pack(fill='x')
 
     def _minimize(self):
         """最小化（任务栏）。再点一下任务栏图标就回来。"""
@@ -790,7 +807,7 @@ class MonitorApp:
         再宽收起态就不「小」了。
         """
         for lb in (self.lb_bar, self.lb_pause, self.lb_cycle, self.lb_perf,
-                   self.lb_warn, self.lb_note, self.lb_window_hint,
+                   self.lb_warn, self.lb_note,
                    # 展开区里这几行也会长：2026-10-11 起展开态宽度 = 收起态（同一个 base），
                    # 不给 wraplength 的话它们会按单行自然宽把整块面板顶宽（实测：轴文本
                    # 那行就要 509px，而 base 只有 470）。
@@ -819,6 +836,11 @@ class MonitorApp:
         # 窗口左上角到**客户区**左上角还差一条边框 / 标题栏（本机实测 45px）：
         # 不把这一条算进去，贴底那次还是会露出小半行。
         off = max(0, self.root.winfo_rooty() - self.root.winfo_y())
+        # 先把位置缓存对齐到窗口**真实**位置（见 _sync_pos）—— 不对的话，窗口被别的
+        # 方式挪走之后，任何一次布局重算都会照旧缓存把它拽回去（用户报的「点击按钮
+        # 都有可能导致窗口重置位置」）。拖拽中不对：_drag_move 有自己的账。
+        if not self._dragging:
+            self._sync_pos(off)
         ux, uy = self._user_pos
         # 贴底还要避开任务栏：Tk 报的屏幕高度把任务栏也算进去了（实测展开态底边落在
         # 1592、任务栏从 1552 起，最下面那行帮助就被压住了）。多显示器时先看窗口在不在
@@ -841,20 +863,60 @@ class MonitorApp:
         # 贴顶只是「往上长不动了、剩下的往下铺」，看着是长大而不是瞬移。
         y = min(max(8, y), max(8, bottom - h - off - 8))
         self.root.geometry('%dx%d+%d+%d' % (w, h, x, y))
+        self._asked_pos = (x, y)
+
+    def _sync_pos(self, off):
+        """窗口被**别人**挪走时，把位置缓存按同一段位移平移（2026-10-11）。
+
+        问题出在 `_user_pos` / `_anchor_bottom` 这两份缓存**只有拖面板自己那条标题栏**
+        才会更新（head 那一条，见 _drag_move）。用系统标题栏拖、系统贴边 / 最大化、
+        换分辨率、换显示器 —— 这些路都不经过它，缓存就停在原地；于是下一次布局重算
+        （展开 / 收起、告警行收起来、内容长高触发的 _fit_window…）照着旧缓存算位置，
+        就把窗口**拽回去**了。用户的说法：「点击按钮都有可能导致窗口重置位置（漂移）」。
+
+        2026-10-11 复现（本机 1067 高的屏）：geometry 直接挪到 (700, 200) -> 点展开 ->
+        跳到 (24, 249) —— x 回到缓存里的 24，y 也按缓存里那个下边缘重算了一遍。
+
+        为什么是**平移**而不是「直接覆盖成实际位置」：缓存里存的是「用户想要的位置」，
+        它允许超出屏幕（_place 会夹）。覆盖会把这个语义丢掉 —— 贴着屏幕上边展开时
+        y 会被夹到 8，覆盖之后收起就回不到原来的 y 了（「收起 -> 展开 -> 收起」这条
+        会开始漂）。平移只搬运「挪走的那一段」，两个语义都保住。
+
+        两处判据是必要的，不是保守：
+            ismapped —— __init__ 那一趟窗口还没上屏，winfo_x/y 是假值，照它平移会把
+                        面板摆到 (0,0) 去；
+            asked is None —— 同上，还没请求过位置时没有可比的对象。
+        """
+        try:
+            if not self.root.winfo_ismapped():
+                return
+            live = (self.root.winfo_x(), self.root.winfo_y())
+        except tk.TclError:                    # 窗口已经销毁
+            return
+        asked = self._asked_pos
+        if asked is None:
+            return
+        dx, dy = live[0] - asked[0], live[1] - asked[1]
+        if not (dx or dy):
+            return
+        ux, uy = self._user_pos
+        self._user_pos = (ux + dx, uy + dy)
+        self._anchor_bottom += dy
 
     # ---------------- 输入源 / 主按钮 ----------------
 
     def _src_menu(self):
-        """「校准：…」下拉（2026-10-11 照看板改名 + 加说明）。
+        """「校准：…」下拉 —— 选「读哪儿」（2026-10-11 第五轮改名）。
 
-        看板批注：「改成校准 / 实时为自动校准 / 视频为手动校准」——
-        自动 = 实时链路（所有 ROI 都按实测校准表推算，用户不用圈）；
-        手动 = 读一个窗口（录屏 / 视频），画面缩放对不上，必须用户自己框费用条。
+        看板批注：「改成校准 / 实时为自动校准 / 视频为手动校准」。但用户这一轮发现
+        「自动 / 手动」和那个「手动校准」键撞名了，所以按**读哪儿**命名：
+            PC端 = 实时链路（游戏窗口本身，ROI 按分辨率的实测表推算）；
+            窗口 = 读一个窗口（录屏 / 播放器 / 视频），画面被缩放过，得自己框费用条。
         """
         m = tk.Menu(self.root, tearoff=0, bg=CARD, fg=UI_FG, activebackground=RULE,
                     activeforeground=UI_BG, relief='flat', font=(FONT_UI, 9))
-        m.add_command(label='自动校准（实时游戏窗口）', command=self.back_to_live)
-        m.add_command(label='手动校准（读一个窗口…）', command=self.read_window)
+        m.add_command(label='PC端（实时游戏窗口）', command=self.back_to_live)
+        m.add_command(label='窗口（读一个窗口…）', command=self.read_window)
         try:
             m.tk_popup(self.btn_src.winfo_rootx(),
                        self.btn_src.winfo_rooty() + self.btn_src.winfo_height())
@@ -896,7 +958,7 @@ class MonitorApp:
         只在这两个控件上写字，所以每拍调用一次也不心疼（内容没变就不 configure）。
         """
         kind = self._src_kind
-        want_src = {'live': '校准：自动▾', 'window': '校准：手动▾'}[kind]
+        want_src = {'live': '校准：PC端▾', 'window': '校准：窗口▾'}[kind]
         if self.btn_src.cget('text') != want_src:
             self.btn_src.configure(text=want_src)
         want = self._primary_label()
@@ -1134,13 +1196,13 @@ class MonitorApp:
         info.pack_forget()
 
         # ---- 常驻④：控制键 ----
-        # 看板批注：「改成校准：实时为自动校准，视频为手动校准」「开始和暂停合并」。
+        # 看板批注：「改成校准」「开始和暂停合并」。这一轮按读哪儿命名：PC端 / 窗口。
         ctrl = tk.Frame(self.root, bg=UI_BG)
         ctrl.pack(fill='x', **pad)
         self.fr_ctrl = ctrl          # 告警行重新铺出来时的锚点（见 _set_warn）
         # 尖角前不留空格：'▾' 和空格一共 26px，控制行是收起态最宽的一行，去掉它
         # 整行才落进 470（实测 132 -> 121）。
-        self.btn_src = self._btn(ctrl, '校准：自动▾', self._src_menu, padx=7)
+        self.btn_src = self._btn(ctrl, '校准：PC端▾', self._src_menu, padx=7)
         self.btn_src.pack(side='left', padx=(0, 6))
         # 开始 / 暂停二合一：没在数 -> 开始；在数 -> 暂停；按了暂停 -> 继续。
         # 三态的字由 _sync_ctrl_row 每拍算，动作在 _primary_action。
@@ -1151,18 +1213,21 @@ class MonitorApp:
         #   层里那个逐帧记录能力（live.set_csv_path + run_monitor 的 --csv）留着：
         #   离线工具和自检还在用它，只是界面上再也不露这个开关。）
 
-        # 读窗口那块：校准好之后 **等用户点「开始计数」** 才起采样线程 ——
-        # 用户要的就是这个顺序：打开录屏置顶 -> 读这个窗口校准 -> 点开始。
-        # 平时不 pack（用到才出现），所以直接挂在 root 上，不再套一层 holder。
-        self.fr_window = tk.Frame(self.root, bg=UI_BG)
-        wrow = tk.Frame(self.fr_window, bg=UI_BG)
-        wrow.pack(fill='x')
-        self._btn(wrow, '框选费用条', self.box_bar).pack(side='left', padx=(0, 3))
-        self.btn_pin = self._btn(wrow, '置顶中', self.toggle_pin, hover=False)
-        self.btn_pin.pack(side='left', padx=3)
-        self.lb_window_hint = self._label(self.fr_window, '', 9, FAINT, anchor='w',
-                                          justify='left')
-        self.lb_window_hint.pack(fill='x', pady=(3, 0))
+        # 控制行右边这两个键（2026-10-11 第四 / 五轮）。
+        # 它们原来自己占一行（fr_window），下面还挂着一段多行「教程」（lb_window_hint）。
+        # 用户第四轮的原话：「把读取窗口功能中的框选费用条替换手动校准，原有的手动校准
+        # 删除；置顶中删除默认置顶；下方的教程删除，两种模式的窗口大小不变，不需要展开」；
+        # 第五轮又加了一句「pc端也加入手动校准功能」。
+        #   1. 「手动校准」**两种模式都有**，但两边不是同一件事（分派见 manual_calib）：
+        #      PC端挪的是推算出来的 ROI（二级窗口），窗口是**对着参照图圈**条槽；
+        #   2. 并进这一行（不用展开就够得着），而且两种模式**都铺**；
+        #   3. 原来这儿还有个「置顶」键 —— 用户 2026-10-11 说「窗口模式置顶删除，
+        #      默认置顶」，所以键没了，改成选完窗口**自动钉**（见 _pin_window）。
+        #      敢默认钉是因为第 39 轮已经把「每 0.7 秒无条件重钉」（= 面板每 0.7 秒
+        #      被盖一下，用户报的「窗口会闪」）改成「先复核再动手」（见 _keep_pin），
+        #      钉上之后稳态一个系统调用都不发。
+        self.btn_manual = self._btn(ctrl, '手动校准', self.manual_calib)
+        self.btn_manual.pack(side='left', padx=3, before=self.btn_start)
 
         # ---- 常驻④：提示行（面板用来说话的那一行）----
         # 提示行：只在「刚点过什么」之后才有一句话，说完自己清空（见 _set_note）。
@@ -1226,10 +1291,13 @@ class MonitorApp:
         # 打轴器则在 fr_more_top 里、展开时插到大数字上面 —— 见 _pack_more。
         self.fr_more = tk.Frame(self.root, bg=UI_BG)
 
-        btns = tk.Frame(self.fr_more, bg=UI_BG)
-        btns.pack(fill='x', **pad)
-        self.btn_calib = self._btn(btns, '手动校准…', self.open_calib_dialog)
-        self.btn_calib.pack(side='left')
+        # （那个「手动校准…」按钮 2026-10-11 按用户要求删了 —— 原话「原有的手动校准
+        #   删除」。它开的是**自动模式**的 ROI 二级窗口（微调 delta / 存
+        #   layout_calib.json），而读窗口那条链路的 ROI 走 window_calib.json，两边不是
+        #   一回事，所以那个入口不该待在读窗口那一行、也不该再占一行。
+        #   二级窗口本身没删：open_calib_dialog() 还在（自检第 8 组直接调它），要挂个
+        #   入口回来只需在这儿摆一个按钮。）
+        # 于是 fr_more 现在没有可见内容了（只剩不铺出来的 fr_diag）—— 见 _pack_more。
 
         # 下面这几行读数（费用条 / 暂停键 / 费用周期 / 性能 / 当前输入）**留着控件、
         # 不铺出来**：它们是查漏帧时唯一能看的原始证据，而用户要的是「面板上不要」。
@@ -1284,7 +1352,7 @@ class MonitorApp:
         if self._more:
             self.toggle_more()
             return
-        self._set_note('已经收起了；点右上角 ▸ 展开，退出点 ×')
+        self._set_note('已收起（点 ▸ 展开）')
 
     def _redraw_scale(self, flash: bool = False):
         """按当前「回看偏移」重画刻度表（换缩放 / 翻条 / 换轴都走这里）。"""
@@ -1302,17 +1370,17 @@ class MonitorApp:
         （见 scale_render.render）—— 只动「画哪一段」，**不碰任何计数**。
         """
         if self.prompter.timeline is None:
-            self._set_note('先导入 / 写一份轴，翻条才有东西可翻')
+            self._set_note('先导入一份轴')
             return
         before = self._prom_shift
         self._prom_shift = max(0.0, min(600.0, before + direction * step_frames))
         self._redraw_scale()
         if abs(self._prom_shift - before) < 1e-9:
-            self._set_note('已经在最前面了（回看 %d 帧）' % int(self._prom_shift))
+            self._set_note('已在最前面（回看 %d 帧）' % int(self._prom_shift))
         elif self._prom_shift == 0:
             self._set_note('回到「现在」')
         else:
-            self._set_note('回看 %d 帧之前（↓ 回到现在）' % int(self._prom_shift))
+            self._set_note('回看 %d 帧' % int(self._prom_shift))
 
     def _set_calib_mode(self, on: bool) -> None:
         """进出「微调 ROI」状态：只有这时才吃 Tab / 方向键 / Shift+方向键 / S / R / K。
@@ -1329,8 +1397,8 @@ class MonitorApp:
         self._calib = on
         self._bind_keys()
         if on:
-            self._set_note('微调 ROI：目标「%s」—— 用窗口里的按钮挪'
-                           % ROI_LABELS.get(self.target, self.target), hold=0.0)
+            self._set_note('微调「%s」' % ROI_LABELS.get(self.target, self.target),
+                           hold=6.0)
             if self.overlay is None:
                 self.toggle_overlay()          # 进微调就把屏幕上的框亮出来
         else:
@@ -1573,7 +1641,7 @@ class MonitorApp:
             self.target = order[0]
         else:
             self.target = order[(order.index(self.target) + 1) % len(order)]
-        self._set_note('当前校准目标：%s' % ROI_LABELS.get(self.target, self.target))
+        self._set_note('校准目标：%s' % ROI_LABELS.get(self.target, self.target))
 
     def _apply_deltas(self):
         base = self._base_layout()
@@ -1582,7 +1650,7 @@ class MonitorApp:
         try:
             self.monitor.set_layout(apply_deltas(base, self.deltas, self.calib_scale))
         except ValueError as exc:
-            self._set_note('ROI 越界，已忽略这次调整：%s' % exc)
+            self._set_note('ROI 越界（已忽略）')
 
     def _base_layout(self):
         """方向键的 delta 加在谁身上。
@@ -1614,21 +1682,21 @@ class MonitorApp:
                 path = src.save_current(layout=self.monitor.layout, source='面板校准',
                                         note='面板上挪过 / 确认过的 ROI')
             except OSError as exc:
-                self._set_note('%s校准存盘失败：%s' % (what, exc))
+                self._set_note('%s存盘失败：%s' % (what, exc))
                 return
-            self._set_note('已把当前三个 ROI 存进 %s（%dx%d 的%s下次直接套用）'
-                           % (os.path.basename(path), src.size[0], src.size[1], what))
+            self._set_note('已保存校准（%dx%d 的%s）'
+                           % (src.size[0], src.size[1], what))
             return
         base = self._base_layout()
         if base is None:
-            self._set_note('还没找到窗口，无法保存')
+            self._set_note('没找到窗口，不能保存')
             return
         data = {'client': [base.width, base.height], 'scale': base.scale,
                 'deltas': self.deltas,
                 'abs': self.monitor.layout.to_dict() if self.monitor.layout else base.to_dict()}
         with open(self.calib_path, 'w', encoding='utf-8') as fh:
             json.dump(data, fh, ensure_ascii=False, indent=2)
-        self._set_note('已保存校准到 %s' % os.path.abspath(self.calib_path))
+        self._set_note('已保存校准')
 
     def reset_calib(self):
         self.deltas = {'bar': [0, 0, 0, 0], 'pause': [0, 0, 0, 0], 'speed': [0, 0, 0, 0]}
@@ -1645,7 +1713,7 @@ class MonitorApp:
             self._set_note('已关闭 ROI 框')
             return
         if self.monitor.layout is None or self.monitor.window is None:
-            self._set_note('还没找到窗口，无法显示 ROI 框')
+            self._set_note('没找到窗口')
             return
         x, y, w, h = virtual_screen_bounds()
         top = tk.Toplevel(self.root)
@@ -1671,7 +1739,7 @@ class MonitorApp:
             wrapper = top.winfo_id()
         set_click_through(wrapper)
         self._draw_overlay()
-        self._set_note('ROI 框已显示（鼠标可以穿透，不影响游戏）')
+        self._set_note('ROI 框已显示（鼠标可穿透）')
 
     def _draw_overlay(self):
         if self.overlay is None:
@@ -1707,6 +1775,19 @@ class MonitorApp:
         开始计数才生效、暂停期间没用」）。计数器那边其实已经归零了，这里只是把面板的
         显示跟上。
         """
+        self._reset_count('已清零')
+
+    def _reset_count(self, note=None):
+        """停采样 + 归零 + 主按钮回到「开始」（清零那个键和「切换模式」共用）。
+
+        为什么要「切来源就清零」（用户 2026-10-11：「切换模式自动清零」）：
+            1. 两个来源的帧号根本不是一个坐标系（PC端读游戏窗口、窗口读一个播放器 /
+               录像），接在一起没有意义；
+            2. 不清的话大数字会**挂着上一个来源数到的值**，看着像「已经数了 500 帧」，
+               而其实这一拍什么都没数。
+        语义和「清零」那个键完全一样（停止 + 归零 + 三态拉回第一态），只是提示语不同；
+        note=None 表示「别动提示行」（调用方自己还要说别的话，见 _adopt_window）。
+        """
         if self.monitor.alive:
             self.monitor.stop()
         self._counting_started = False
@@ -1714,7 +1795,11 @@ class MonitorApp:
         self.monitor.reset()
         self._show_zero()
         self._sync_ctrl_row()
-        self._set_note('已清零（计数已停，按「开始计数」接着数）')
+        # 刚停过：看门狗从这一刻重新计时，否则切完模式立刻报一次「采样已停」
+        self._last_ticks = self.monitor.stats.ticks
+        self._stall_since = 0.0
+        if note is not None:
+            self._set_note(note, hold=6.0)
 
     def _set_text(self, key: str, label, text: str, fg=None) -> None:
         """写一个 Label，但**内容没变就一个 Tk 调用都不发**。
@@ -1778,15 +1863,14 @@ class MonitorApp:
         """
         on = self.monitor.toggle_manual_pause()
         self._sync_ctrl_row()          # 主按钮的字跟着三态走（开始 / 暂停 / 继续）
-        self._set_note('已暂停：数字按住不动，再点「继续」接着数'
-                       if on else '继续计数（重新起锚，停的那段不补）')
+        self._set_note('已暂停' if on else '继续计数')
 
     def _on_rate_pick(self, label):
         """下拉框选中某一项。选「自定义」不切档，只把光标丢进输入框。"""
         if label == RATE_CUSTOM_LABEL:
             self.en_rate.focus_set()
             self.en_rate.select_range(0, 'end')
-            self._set_note('在输入框里填「一费几个逻辑帧」（例如 45），再点「应用」')
+            self._set_note('填「一费几个逻辑帧」再点「应用」')
             # 下拉框回显真实值，免得看上去像已经切过去了
             self.rate_var.set(_rate_label(self._current_rate()))
             return
@@ -1804,11 +1888,10 @@ class MonitorApp:
         try:
             v = float(text)
         except ValueError:
-            self._set_note('「一费几个逻辑帧」要填数字，例如 60（回费速度 -50%% 就是 60）：%r'
-                           % text)
+            self._set_note('要填数字（例如 60，-50%% 回费就是 60）：%r' % text)
             return
         if not (v > 0):
-            self._set_note('「一费几个逻辑帧」要填正数，例如 60')
+            self._set_note('要填正数（例如 60）')
             return
         self.apply_cost_rate(v)
 
@@ -1821,9 +1904,9 @@ class MonitorApp:
         note = '回费速率 = %s' % format_frames_per_cost(v)
         try:
             save_cost_rate(self.settings_path, v)
-            self._set_note('%s，已存到 %s' % (note, os.path.abspath(self.settings_path)))
+            self._set_note('%s（已存盘）' % note)
         except OSError as exc:
-            self._set_note('%s，但存盘失败：%s' % (note, exc))
+            self._set_note('%s（存盘失败）' % note)
 
     def pick_window(self):
         """「换窗口」：换实时链路读的那个窗口（不改帧来源）。
@@ -1858,7 +1941,7 @@ class MonitorApp:
             # 读窗口这条链路：重新抓一遍（自动对齐 + 量条槽）。校准表里有这个
             # (进程名, 客户区尺寸) 的那份就直接套用，几毫秒；没有才跑网格搜索。
             # 数出来的帧数保留（_adopt_window 里把 Counter 接过来），本来在数就接着数。
-            note = '窗口模式：重新校准（自动对齐 + 量条槽，几秒钟，帧数保留）'
+            note = '窗口：重新校准（几秒钟，帧数保留）'
             self._set_note(note, hold=4.0)
             self.start_window_calib(self._window_win, note=note)
             return note
@@ -1875,7 +1958,7 @@ class MonitorApp:
         切走时把「我们钉上去的置顶」还回去 —— 否则播放器会一直盖在所有窗口最上面。
         """
         if self._src_kind == 'live':
-            self._set_note('现在就是实时输入')
+            self._set_note('已经是 PC端')
             return
         try:
             self.monitor.stop()
@@ -1889,15 +1972,14 @@ class MonitorApp:
             self._window_src = None
         self._release_pin()
         self._window_win = None
-        self.fr_window.pack_forget()
         self.monitor = self.live_monitor
         self._src_kind = 'live'
         self._load_calib()                        # 实时的 ROI 微调在 layout_calib.json 里
         self._apply_deltas()
-        self.monitor.start(reset_clock=False)
-        self._counting_started = self.monitor.alive
-        self.lb_source.configure(text='自动校准（实时游戏窗口）', fg=UI_DIM)
-        self._set_note('已切回实时输入')
+        # 换来源 = 新计数（用户：「切换模式自动清零」）—— 切过去是**待命**态，
+        # 点「开始」才数（和读窗口那条链路一个规矩，两边都一眼看得出没在数）。
+        self._reset_count('已切到 PC端（已清零，点「开始」接着数）')
+        self.lb_source.configure(text='PC端（实时游戏窗口）', fg=UI_DIM)
 
     # ---------------- 读窗口 ----------------
     #
@@ -1940,7 +2022,7 @@ class MonitorApp:
     def read_window(self):
         """读一个窗口：选窗口 -> 后台校准 -> 等用户点「开始计数」。"""
         if self._window_busy:
-            self._set_note('有校准在跑，等它弄完再点')
+            self._set_note('正在校准，等它弄完')
             return
         self._window_dialog('读取窗口（校准完点「开始计数」）', self.start_window_calib)
 
@@ -1951,28 +2033,15 @@ class MonitorApp:
         进度写在 _window_stage 里，主线程在 _poll_window 里读（后台线程不碰 Tk）。
         """
         if self._window_busy:
-            self._set_note('有校准在跑，等它弄完再点')
+            self._set_note('正在校准，等它弄完')
             return
         self._window_busy = True
         self._window_stage = ('align', -1.0, '准备…')
         self._window_result = None
-        # 目标窗口不能被盖住（盖住的那块抓到的是盖它的那个窗口）—— 「录屏置顶」就是这一步。
-        # 钉不上（窗口已关 / 系统不给）也不拦着，只在提示里说一声。
-        pinned = False
-        try:
-            pinned = set_topmost(win.hwnd, True)
-        except Exception:                      # noqa: BLE001
-            pinned = False
-        if pinned:
-            self._pinned_hwnd = win.hwnd
-            # 钉完目标顺手抬面板（同 _keep_pin 里的顺序）：不抬的话目标压在面板上面，
-            # 用户看到的是「校准进度刷不出来」。
-            self._raise_panel()
-        self._sync_pin_btn()
-        self._set_note('%s\n正在校准 %s（%s）…'
-                       % (note or '正在校准窗口：自动对齐 + 量条槽，几秒钟',
-                          win.exe, '已置顶' if pinned else '没能置顶，别让它被盖住'),
-                       hold=0.0)
+        # 目标窗口不能被盖住（盖住的那块抓到的是盖它的那个窗口）：选完窗口**就钉**
+        # （用户 2026-10-11：「窗口模式置顶删除，默认置顶」）。校准本身也要看得见画面。
+        self._pin_window(win)
+        self._set_note(note or '正在校准…', hold=0.0)
         threading.Thread(target=self._window_worker, name='akframe-window', daemon=True,
                          args=(win, box, force)).start()
 
@@ -2001,8 +2070,8 @@ class MonitorApp:
             self._window_result = None
             self._window_busy = False
             if exc is not None:
-                self._set_note('读窗口失败：%s: %s' % (type(exc).__name__, exc),
-                               hold=0.0, color=ERR)
+                self._release_pin()        # 校准没成：把刚钉上去的置顶还回去
+                self._set_note('读窗口失败：%s' % exc, hold=8.0, color=ERR)
             else:
                 self._adopt_window(src, win, note)
             return False
@@ -2013,7 +2082,7 @@ class MonitorApp:
         self._set_text('perf', self.lb_perf,
                        '%s%s  %s' % (WINDOW_STAGES.get(stage, stage), pct,
                                                  note or '…'), fg=UI_DIM)
-        self._set_note(note or '正在校准窗口…', hold=0.0)
+        self._set_note(note or '正在校准…', hold=0.0)
         # 看门狗在这段时间不能计时：否则校准一完就会被「之前停了 8 秒」立刻报一次
         self._last_ticks = self.monitor.stats.ticks
         self._stall_since = 0.0
@@ -2070,29 +2139,32 @@ class MonitorApp:
         # 和实时那套人工微调（layout_calib.json）不是一回事，切过来时清零
         self.deltas = {k: [0, 0, 0, 0] for k in ROI_ORDER}
         self.calib_scale = None
-        self.fr_window.pack(fill='x')
+        if not same:
+            # 换窗口 / 从 PC端 切过来 = 一份**全新**的计数（用户：「切换模式自动清零」）。
+            # 重新校准同一个窗口则相反：帧数要接着数（见上面 adopt 那一段）。
+            self._reset_count()
         self.lb_source.configure(
-            text='手动校准：窗口 %s ｜ 客户区 %dx%d ｜ %s'
+            text='手动校准：窗口 %s ｜ 客户区 %dx%d ｜ %s ｜ %s'
                  % (win.exe, win.client[2], win.client[3],
-                    '自己框的' if src.manual else '自动试出来的'), fg=UI_FG)
-        hint = [note or src.describe()]
-        if not src.verified and not src.manual:
-            hint.append('⚠ 自动校准没把握 → 点「框选费用条」手动圈一下费用条')
-        if was_running:
-            mon.start(reset_clock=False)        # 本来在数就接着数（时间基准不能倒退）
-            hint.append('已接着数（帧数保留）')
-        else:
-            hint.append('点「开始计数」开始数')
-        hint.extend(src.notes[-2:])
-        self._window_hint_base = '\n'.join(hint)
+                    '自己框的' if src.manual else '自动试出来的',
+                    ' ｜ '.join(src.notes[-2:])), fg=UI_FG)
         self._pin_noted = ''
-        self._refresh_window_hint()
         self._counting_started = mon.alive
         self._update_start_btn()
-        self._sync_pin_btn()
         self._last_ticks = mon.stats.ticks
         self._stall_since = 0.0
-        self._set_note('窗口已校准：%s' % hint[0], hold=4.0)
+        if was_running:
+            mon.start(reset_clock=False)     # 本来在数就接着数（时间基准不能倒退）
+        # 校准的结论只用**提示行那一行**说（用户 2026-10-11：「下方的教程删除」）。
+        # 细节（src.describe / src.notes）搬进「当前输入」那行读数（fr_diag，不铺出来），
+        # 要排查时仍然看得到。
+        if not src.verified and not src.manual:
+            self._set_note('自动校准没把握（点「手动校准」）', hold=6.0)
+        elif was_running:
+            self._set_note('已校准（帧数接着数）', hold=4.0)
+        else:
+            self._set_note('已校准（%s），点「开始」'
+                           % ('自己框的' if src.manual else '自动试出来的'), hold=4.0)
 
     def toggle_count(self):
         """「开始计数」/「停止计数」（主按钮 / 空格）：采样线程由这一下控制。
@@ -2108,13 +2180,13 @@ class MonitorApp:
         mon = self.monitor
         if mon.alive:
             mon.stop()
-            self._set_note('已停止计数：已经数出来的帧数保留，再点「开始计数」接着数')
+            self._set_note('已停止（帧数保留）')
         else:
             # reset_clock=True：停止这一段挂钟不算进来（t 从头来，dt<=0 只当一拍）。
             mon.start()
             if mon.counter is not None:
                 mon.counter.resync()
-            self._set_note('开始计数（重新起锚，停止期间那段不补）')
+            self._set_note('开始计数')
         self._counting_started = mon.alive
         self._last_ticks = mon.stats.ticks
         self._stall_since = 0.0
@@ -2124,10 +2196,41 @@ class MonitorApp:
         """主按钮上的字（开始计数 / 停止计数 …）—— 统一由 _sync_ctrl_row 算。"""
         self._sync_ctrl_row()
 
-    def _sync_pin_btn(self):
-        on = bool(self._pinned_hwnd and self._window_win
-                  and self._pinned_hwnd == self._window_win.hwnd)
-        self.btn_pin.configure(text='置顶中' if on else '未置顶', fg=UI_FG if on else UI_DIM)
+    def manual_calib(self):
+        """「手动校准」那个键：两种模式各有一套，按模式分派。
+
+        PC端（实时游戏窗口）：ROI 是按分辨率的实测表**推算**出来的，人工那一步是挪
+        格子（微调差值 -> layout_calib.json），所以开二级窗口，见 open_calib_dialog。
+        窗口（录屏 / 播放器）：画面被缩放过（实测 VLC 里 2560x1600 缩到 0.4777 倍），
+        推出来的框落不到条上，只能**对着参照图圈一遍**（box_bar -> window_calib.json）。
+        两份校准表的键都不一样（分辨率 / 进程名 + 客户区尺寸），所以合不成一件事。
+        """
+        if self._src_kind == 'window':
+            self.box_bar()
+        else:
+            self.open_calib_dialog()
+
+    def _pin_window(self, win):
+        """把目标窗口钉到最上层 —— **默认就这么干**（用户 2026-10-11：
+        「窗口模式置顶删除，默认置顶」）。
+
+        为什么敢默认钉：这条链路是抓**屏幕上那块像素**的，目标被盖住一角，压住的
+        那块读到的就是别人的画面（费用条在右下角），等于整条链路瞎了。而第 39 轮
+        已经把「每 0.7 秒无条件重钉」改成「先复核再动手」（见 _keep_pin）—— 钉上之后
+        稳态一个系统调用都不发，所以不会再出现「窗口会闪」。
+
+        钉失败（系统不让）不用在这儿报：_keep_pin 每 0.7 秒复核一次，失败它会说一句话。
+        """
+        hwnd = int(win.hwnd)
+        self._pinned_hwnd = hwnd
+        self._pin_at = 0.0                  # 下一拍立刻复核一次
+        self._pin_noted = ''
+        try:
+            ok = set_topmost(hwnd, True)
+        except Exception:                      # noqa: BLE001
+            ok = False
+        if ok:
+            self._raise_panel()             # 抬目标会把它压到面板上面，得抢回来
 
     def _release_pin(self):
         """把我们钉上去的置顶还回去（窗口已经关了就拉倒）。"""
@@ -2139,73 +2242,54 @@ class MonitorApp:
             pass
         self._pinned_hwnd = None
 
-    def toggle_pin(self):
-        """把目标窗口钉到最上层 / 放开。读窗口时被盖住就等于读不到。"""
-        if self._src_kind != 'window' or self._window_win is None:
-            self._set_note('先点「读取窗口…」选一个窗口')
-            return
-        on = self._pinned_hwnd != self._window_win.hwnd
-        try:
-            set_topmost(self._window_win.hwnd, on)
-        except Exception as exc:               # noqa: BLE001
-            self._set_note('置顶失败：%s' % exc)
-            return
-        self._pinned_hwnd = self._window_win.hwnd if on else None
-        if on:
-            self._raise_panel()                # 手动钉的时候也立刻把面板抬到它上面
-        self._pin_noted = ''
-        self._pin_at = 0.0                     # 刚钉过：让 _keep_pin 下一拍立刻复核一次
-        self._sync_pin_btn()
-        self._refresh_window_hint()
-        self._set_note('已把目标窗口钉到最上层（被盖住就读不到画面）' if on
-                       else '已放开置顶')
-
     # ---------- 置顶（读窗口那条链路）----------
 
     def _keep_pin(self, now):
-        """把目标窗口的置顶**重新钉一遍**（每 PIN_KEEP_S 秒一次）。
+        """**复核**目标窗口的置顶（每 PIN_KEEP_S 秒一次）—— 只在真丢了标记时才动手。
 
         为什么钉一次不够：这条链路是抓**屏幕上那块像素**的，目标窗口被压住一角，压住的
         那块读到的就是别人的画面（费用条在右下角、按钮在右上角，压住等于整条链路瞎了）。
-        而「置顶」这个状态并不牢靠，实测两种都会掉：
+        而置顶这个状态并不牢靠：播放器切全屏 / 换下一段视频会**重建窗口**，新窗口不带
+        WS_EX_TOPMOST 标记。
 
-        1. 播放器切全屏 / 换下一段视频会**重建窗口**，新窗口不带 WS_EX_TOPMOST；
-        2. 我们自己那个面板也是置顶的 —— 两个置顶窗口里，最后被激活的在上面。用户点一下
-           面板（比如点「开始计数」），面板就压到播放器上面了。
+        2026-10-11 改法（用户：「在读取视频时窗口会闪解决一下」）：先问一句再动手。
+        旧写法无条件 set_topmost(HWND_TOPMOST) —— 它除了打标记，还顺手把目标抬到置顶层
+        最上面，于是必须紧接着 _raise_panel() 把面板抢回来。这一抬一抢每 0.7 秒来一次，
+        全屏播放器就会盖住面板一下再让开，用户看到的就是「窗口会闪」。
 
-        重新调用一次 SetWindowPos(HWND_TOPMOST) 同时解决两件事：把窗口重新标成置顶，
-        并把它抬到置顶那一层的最上面（不动大小、不抢焦点，见 win32.set_topmost）。
-
-        代价是：抬目标的同时也把**我们自己的面板**压下去了（面板也是置顶的，同一层里
-        最后抬起来的在最上面）。实测 Desktop 2026.10.09 20.13.34（8.5 秒）里，面板每次
-        只露 0.7 秒就被盖回去 —— 用户的原话「置顶还是有问题」。所以钉完目标紧接着调
-        _raise_panel() 把面板再抬回来：目标在最上层（不被别的窗口盖住），面板在目标之上
-        （用户看得见）。面板要是压住了某个 ROI，_roi_hits() 会当面告警。
+        现在只有三种情况，且只有第二种会发系统调用：
+            标记还在   -> 什么都不做（稳态零闪烁）
+            标记丢了   -> 补钉 + 抬面板（这一下会闪，但确实需要，否则目标会被盖住）
+            系统不让钉 -> 报一次，让用户自己在播放器里勾「总在最前」
         """
         if now - self._pin_at < PIN_KEEP_S:
             return
         self._pin_at = now
         hwnd, win = self._pinned_hwnd, self._window_win
         if hwnd is None or win is None:
-            return
+            return                          # 没在读窗口：不钉（见 _pin_window）
         if not is_window(hwnd):
             # 窗口没了（被关掉 / 播放器重建了它）。不自动换一个 —— 换窗口要重新校准、
             # 帧号也得从头数，那是用户的决定；这里只把话说明白。
             self._pinned_hwnd = None
             self._pin_noted = ''
-            self._sync_pin_btn()
-            self._note_pin('⚠ 目标窗口不见了（被关掉 / 播放器换了一个窗口）——'
-                           '点「换窗口」重新选一个，再点「开始计数」')
+            self._note_pin('目标窗口不见了，重新选一个（校准 → 窗口）')
             return
         try:
+            if is_topmost(hwnd):
+                return                      # 标记还在：这一拍一个系统调用都不发
+        except Exception:                   # noqa: BLE001
+            pass
+        try:
             ok = set_topmost(hwnd, True)
-        except Exception:                      # noqa: BLE001
+        except Exception:                   # noqa: BLE001
             ok = False
         if ok:
-            self._raise_panel()
+            self._pin_noted = ''
+            self._raise_panel()             # 抬目标会把它压到面板上面，得抢回来
+            self._note_pin('置顶丢了，已重新钉上')
             return
-        self._note_pin('⚠ 系统不让给这个窗口置顶（它可能以管理员身份在跑）—— '
-                       '请手动把播放器设成「总在最前」，否则被盖住的那块就读不到画面')
+        self._note_pin('系统不让置顶（手动勾播放器「总在最前」）')
 
     def _raise_panel(self):
         """把面板抬到目标窗口上面（同一置顶层里，最后抬上来的在最上面）。
@@ -2226,8 +2310,7 @@ class MonitorApp:
         if text == self._pin_noted:
             return
         self._pin_noted = text
-        self._set_note(text, hold=0.0)
-        self._refresh_window_hint()
+        self._set_note(text, hold=6.0)
 
     def _own_dialog_open(self) -> bool:
         """我们自己有没有开着对话框 / 取景器。
@@ -2274,22 +2357,31 @@ class MonitorApp:
                 hits.append(label)
         return hits
 
-    def _refresh_window_hint(self):
-        """重画窗口那一行：固定的那几句 + 置顶 / 遮挡这两条动态提示。"""
-        if self._src_kind != 'window':
-            return
-        parts = [self._window_hint_base] if self._window_hint_base else []
-        if self._window_win is not None:
-            parts.append('置顶：%s（点右边那个键切换）'
-                         % ('已钉在最上层、面板压在它上面'
-                            if self._pinned_hwnd == self._window_win.hwnd else '未置顶'))
+    def _refresh_roi_warn(self):
+        """面板压住了 ROI 就报警（写进「告警：」那一行）。
+
+        这一段原来写在窗口那一行的「教程」里（用户 2026-10-11：「下方的教程删除」）。
+        压住 ROI 不是教程 —— 压住的那块像素读到的是**面板自己**，计数会卡在那个帧号上，
+        而用户完全看不出为什么（冷启那段「莫名卡死」就是这么来的），所以搬进常驻区唯一
+        的告警位（fr_warn：平时整行收起来，有事才铺出来）。
+
+        为什么要记住上一次那条：这个函数**每拍**都会被调。不记的话「没有压住」那一支
+        每拍都会去 _set_warn('')，而它只要看到 fr_warn 铺着就 pack_forget —— 采样停了
+        的告警是每拍末尾重新铺的，两条一起就是「告警行每拍收一次铺一次」，看着就是闪。
+        所以状态没变直接 return；真要收的时候也只收「我们自己那条」。
+        """
         hits = self._roi_hits()
-        if hits:
-            parts.append('⚠ 面板压住了「%s」—— 把它挪开，压住的那块读到的是面板自己'
-                         % '」「'.join(hits))
-        text = '\n'.join(p for p in parts if p)
-        if self.lb_window_hint.cget('text') != text:
-            self.lb_window_hint.configure(text=text, fg=WARN if hits else FAINT)
+        text = ('⚠ 面板压住了「%s」—— 挪开它，压住的那块读到的是面板自己'
+                % '」「'.join(hits)) if hits else ''
+        if text == self._roi_warn:
+            return                          # 状态没变：一个 Tk 调用都不发
+        if text:
+            self._roi_warn = text
+            self._set_warn(text)
+            return
+        if self.lb_warn.cget('text') == self._roi_warn:
+            self._set_warn('')              # 只收回我们这条；别的告警在说话就别碰
+        self._roi_warn = ''
 
     # ---------- 框选费用条 ----------
 
@@ -2302,7 +2394,7 @@ class MonitorApp:
         吸附左端把这一层误差压到 0，用的就是 BoxPicker 那套参照图取景器。
         """
         if self._src_kind != 'window' or self._window_win is None:
-            self._set_note('先「读取窗口…」选一个窗口，再框选费用条')
+            self._set_note('先选一个窗口（校准 → 窗口）')
             return
         if self._picker is not None:
             return
@@ -2315,9 +2407,17 @@ class MonitorApp:
                     build_window_layout(win.exe, size[0], size[1]))
 
         self._picker = BoxPicker(self.root, fetch, 1, 0, on_apply=self._apply_window_box,
-                                 on_note=self._set_note)
-        self._set_note('框选费用条：对着参照图把条槽圈住（左右两端贴住条的两头），'
-                       '框完点「用这个框」', hold=0.0)
+                                 on_note=self._set_note, on_close=self._picker_closed)
+        self._set_note('对着参照图圈住条槽', hold=6.0)
+
+    def _picker_closed(self):
+        """取景器关掉了（应用 / 取消 都算）——把引用清掉。
+
+        不清的后果是「手动校准」这个键**再也点不动**（box_bar 开头那句
+        `if self._picker is not None: return` 会一直命中），用户报的
+        「手动校准点取消后有时会无法再次手动校准」就是它。
+        """
+        self._picker = None
 
     def _apply_window_box(self, box):
         """用户框完了（客户区坐标）：按这个框重算三个 ROI，并记进窗口校准表。"""
@@ -2325,8 +2425,7 @@ class MonitorApp:
         win = self._window_win
         if win is None:
             return
-        self._set_note('按框选的费用条重算 ROI：x=%d y=%d 宽 %d（几秒钟）'
-                       % (box.x, box.y, box.w), hold=0.0)
+        self._set_note('按这个框重算 ROI（几秒钟）', hold=0.0)
         self.start_window_calib(win, box=box,
                                 note='按框选校准（框了 %dx%d）' % (box.w, box.h))
 
@@ -2352,7 +2451,7 @@ class MonitorApp:
         self._set_axis_text(text)       # 顺手填进输入框，接着就能在面板里改
         tl = parse_lines(text.splitlines(), source=self._timeline_path)
         if not tl.cues:
-            self._set_note('这个文件里没解析出任何一条轴，格式见 maps/example.md')
+            self._set_note('没解析出轴（格式见 maps/example.md）')
             return
         self._use_timeline(tl)
         note = '已导入 %s：%d 条轴' % (tl.name, len(tl))
@@ -2368,7 +2467,7 @@ class MonitorApp:
         if self.prompter.timeline is not None:
             self.apply_axis_text()
             return
-        self._set_note('还没有轴：点「导入轴…」打开窗口，导入 md 或直接写')
+        self._set_note('还没有轴（点「导入轴…」）')
 
     def open_axis_dialog(self):
         """「导入轴…（T）」：弹一个**独立小窗**（看板批注第 6 条）。
@@ -2460,7 +2559,7 @@ class MonitorApp:
         """把轴窗口里的文本解析成轴，换掉当前提词用的轴。"""
         tl = parse_lines(self._axis_read().splitlines(), source='(轴窗口)')
         if not tl.cues:
-            self._set_note('这段文本里没解析出轴。格式是「帧号 + 说明」，例如：120 部署银灰')
+            self._set_note('没解析出轴（例如：120 部署银灰）')
             return
         self._timeline_path = None      # 轴现在来自面板，不再是某个文件
         self._use_timeline(tl)
@@ -2473,7 +2572,7 @@ class MonitorApp:
         """把轴窗口里的文本存成 md 文件（存完仍以窗口内容为准）。"""
         text = self._axis_read()
         if not text.strip():
-            self._set_note('轴文本是空的，没东西可存')
+            self._set_note('轴文本是空的')
             return
         path = filedialog.asksaveasfilename(
             parent=self.root, title='把轴保存成 md 文件', defaultextension='.md',
@@ -2483,14 +2582,14 @@ class MonitorApp:
             return
         with open(path, 'w', encoding='utf-8') as fh:
             fh.write(text.rstrip('\n') + '\n')
-        self._set_note('已保存到 %s（当前轴仍按窗口内容走，改完点「应用到提词器」）' % path)
+        self._set_note('已保存到 %s（点「应用到提词器」生效）' % path)
 
     def clear_axis_text(self):
         """只清空轴文本；已经在跑的提词轴不动。"""
         self._axis_text = ''
         if self.txt_axis is not None:
             self.txt_axis.delete('1.0', 'end')
-        self._set_note('轴文本已清空（当前提词轴不变；换轴请点「应用到提词器」）')
+        self._set_note('轴文本已清空')
 
     def _maps_dir(self) -> str:
         d = os.path.join(os.getcwd(), 'maps')
@@ -2595,12 +2694,33 @@ class MonitorApp:
 
     # ---------------- 每帧刷新 ----------------
 
-    def _set_note(self, text: str, hold: float = 3.0, color=None):
-        """更新底部提示行（用户点完一件事之后的一句话反馈）。
+    def _status_text(self, sampling_dead: bool = False) -> str:
+        """底部那一行的**状态**（用户 2026-10-11：「下方的状态描述用一行简短的文字，
+        比如正在校准。。。；正在计数。。。」）。
 
-        hold > 0：这句话留 `hold` 秒，然后**自己清空**（见 _tick_body 里的收尾）——
-        不自动清的话它会一直挂在那儿，看起来就像一行甩不掉的「状态描述」。
-        hold = 0：一直留着，等下一个说话的人来盖（比如「采样线程停了…」那条要一直提示）。
+        为什么要它：那一行原来只在「刚点过什么」之后才有字，平时空着 —— 而真正
+        **现在在干什么**（正在校准 / 正在计数 / 暂停 / 停了）反而没地方看。
+        动作反馈说完（hold 到点）就让位给它；状态没变一个 Tk 调用都不发
+        （_set_text 有记忆，见 _tick_body 里那一段）。
+
+        sampling_dead 由调用方传进来：那是 _tick_body 的看门狗判出来的，语义是
+        「在数，但采样线程不涨了」，这里只是换一句话说。
+        """
+        if self._window_busy or self._calib:
+            return '正在校准…'
+        if sampling_dead:
+            return '采样已停'
+        if not (self.monitor.alive and self._counting_started):
+            return '未开始'
+        return '已暂停' if self._manual_paused() else '正在计数…'
+
+    def _set_note(self, text: str, hold: float = 3.0, color=None):
+        """底部那一行：一句话反馈（用户点完一件事之后）。
+
+        hold > 0：这句话留 `hold` 秒，然后让位给**状态**（见 _status_text）——
+        不让位的话它会一直挂在那儿，看起来就像一行甩不掉的状态。
+        hold = 0：一直留着，等下一个说话的人来盖。只留给两类：正在跑的工序进度
+        （校准期间 _tick_body 提前 return，轮不到状态那一段）和面板自己出错的告警。
         color 留给「必须看一眼」的那几条用（读窗口失败这类），默认是淡灰。
         """
         self._set_text('note', self.lb_note, text, color or UI_DIM)
@@ -2618,7 +2738,7 @@ class MonitorApp:
             self._tick_body()
         except Exception as exc:                     # noqa: BLE001
             traceback.print_exc()
-            self._set_note('面板刷新出错：%s（细节在控制台）' % exc, hold=0.0)
+            self._set_note('面板出错：%s' % exc, hold=0.0)
         finally:
             self.root.after(self.poll_ms, self._tick)
 
@@ -2641,7 +2761,7 @@ class MonitorApp:
         if not dragging and not self._own_dialog_open():
             self._keep_pin(now)
         if not dragging:
-            self._refresh_window_hint()
+            self._refresh_roi_warn()
         self._tick_times.append(now)
         if len(self._tick_times) > 30:
             self._tick_times.pop(0)
@@ -2768,9 +2888,12 @@ class MonitorApp:
         #   说完就自己清空（见 _set_note / 下面那一段）。
         #   要排查「这一拍走的哪条通道」，仍然看得到：那行读数在 fr_diag 里
         #   （不铺出来，但 _tick_body 一直在往里写）。）
+        # 底部那一行 = **状态**（用户 2026-10-11：「下方的状态描述用一行简短的文字，
+        # 比如正在校准。。。；正在计数。。。」）。动作反馈说完（hold 到点）自己让位。
         if self._note_hold and now >= self._note_hold:
             self._note_hold = 0.0
-            self._set_note('')
+        if not self._note_hold:
+            self._set_note(self._status_text(sampling_dead), hold=0.0)
 
         if not dragging:
             self._render_previews(upd)
@@ -2789,8 +2912,8 @@ class MonitorApp:
             why = st.last_error or '采样线程已退出'
             self._set_warn('采样已停 %.1fs（%s）→ 点「重新校准」'
                            % (stall_s, why), ERR)
-            self._set_note('采样线程停了：%s。点「重新校准」重开，'
-                           '已经数出来的帧数不会丢' % why, hold=0.0, color=ERR)
+            # 底部那一行**不再**跟着说一遍（用户要「一行简短的文字」）：那一行由
+            # _status_text 写「采样已停」，带下一步动作的那条留在告警行里。
 
     def _update_cycle(self, res):
         """更新「费用周期」那一行：一费几帧 + 本费走到第几帧。

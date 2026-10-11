@@ -33,6 +33,7 @@ GWL_EXSTYLE = -20
 WS_EX_LAYERED = 0x00080000
 WS_EX_TRANSPARENT = 0x00000020
 WS_EX_TOOLWINDOW = 0x00000080
+WS_EX_TOPMOST = 0x00000008              # 这个窗口现在是不是「置顶」的标记
 
 # SetWindowPos：只改 Z 序那三个标志（见 set_topmost）
 SWP_NOSIZE = 0x0001
@@ -212,6 +213,21 @@ def is_window(hwnd: int) -> bool:
     return bool(_user32.IsWindow(ctypes.c_void_p(int(hwnd))))
 
 
+def is_topmost(hwnd: int) -> bool:
+    """这个窗口现在**还是**置顶的吗（读 WS_EX_TOPMOST 标记）。
+
+    为什么置顶那条链路要问这一句：SetWindowPos(HWND_TOPMOST) 除了「打上标记」，还会
+    顺手把窗口抬到**置顶层的最上面**。每 0.7 秒无条件来一次（旧写法），全屏播放器就
+    会盖住我们的面板一下、再被我们抢回来 —— 用户看到的就是「窗口会闪」。
+    先问一句：标记还在就一个系统调用都不发（稳态零闪烁）；只有播放器切全屏 / 换视频
+    **重建了窗口**（新窗口不带这个标记）才真去钉一次。
+    """
+    get = _user32.GetWindowLongPtrW
+    get.restype = ctypes.c_ssize_t
+    get.argtypes = [wt.HWND, ctypes.c_int]
+    return bool(get(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST)
+
+
 def set_topmost(hwnd: int, on: bool = True) -> bool:
     """把一个窗口钉到最上层（on=False 恢复原样）。返回系统有没有接受。
 
@@ -246,9 +262,11 @@ def raise_window(hwnd: int) -> bool:
 
     为什么「读窗口」这条链路要用它抬**自己**：置顶是一个「层」的概念，同一层里最后被
     抬起来的那个在最上面。我们每 0.7 秒把目标窗口 SetWindowPos(HWND_TOPMOST) 一次
-    （见 ui.MonitorApp._keep_pin），目标窗口就顺势压到我们面板上面 —— 面板每 0.7 秒被
-    盖回去一次，用户根本读不到数。所以钉完目标要顺手把面板再抬一次：目标在最上层
-    （不会被动地窗盖住），面板在目标之上（用户看得见）。
+    抬起来的那个在最上面。目标窗口一旦被重新钉上置顶（那一下会把它抬到置顶层最上面），
+    就会顺势压到我们面板上面 —— 面板被盖住，用户根本读不到数。所以钉完目标要顺手把
+    面板再抬一次：目标在最上层（不会被动地窗盖住），面板在目标之上（用户看得见）。
+    2026-10-11 起这一步只在「目标真的丢了置顶标记」时才走（见 ui.MonitorApp._keep_pin），
+    平时一次都不发 —— 那一抬一抢本身就是用户报的「窗口会闪」。
 
     HWND_TOP = 0：放在自己那一层的最上面，**不改变**「是不是置顶」。
     """
