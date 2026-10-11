@@ -113,7 +113,8 @@ def main() -> int:
                  None if lay is None else lay.bar.w, truth.bar.w))
         # ---- 2. 校准完**不**自动跑 ----
         check('校准完不自动起采样线程（等用户点开始）', not mon.alive)
-        check('按钮这时候写的是「开始计数」', app.btn_start.cget('text') == '开始计数',
+        check('按钮这时候写的是「开始」',
+              app.btn_start.cget('text') == '开始',
               app.btn_start.cget('text'))
         app._tick_body()
         app._tick_body()
@@ -130,12 +131,13 @@ def main() -> int:
         check('没在采样时清零：大数字立刻归 0（不等下一拍）',
               app.lb_frames.cget('text') == '0', app.lb_frames.cget('text'))
         check('没在采样时清零：时间行也归 0',
-              app.lb_time.cget('text') == '游戏内时间 00:00.00', app.lb_time.cget('text'))
+              app.lb_time.cget('text') == '时间 00:00.00', app.lb_time.cget('text'))
 
         # ---- 3. 点「开始计数」-> 真的在数，而且一费 = 30 帧 ----
-        app.toggle_window_count()
+        app.toggle_count()
         check('点开始之后采样线程起来了', mon.alive)
-        check('按钮翻成「停止计数」', app.btn_start.cget('text') == '停止计数',
+        check('按钮翻成「暂停」（开始 / 暂停 / 继续三态里的第二态）',
+              app.btn_start.cget('text') == '暂停',
               app.btn_start.cget('text'))
         t0 = time.perf_counter()
         screen.t0 = t0
@@ -144,11 +146,19 @@ def main() -> int:
         # 要知道「清零那一刻条画到第几帧」，fill 读不到（还没采过）就只能
         # 保守地一律不补 —— 那样「从几帧开始数」就取决于第一拍落在周期第几帧，
         # 总数就没有固定真值可比了（机器一忙，第一拍可能落在第 8 帧）。
+        # 2026-10-11 起「清零」的语义是「停采样 + 归零 + 按钮回『开始』」
+        # （看板批注「点清零后变成开始」），所以要接着数就得再点一次「开始计数」。
+        # 这里照用户的真实操作顺序走一遍。
         mon._sample()
         app.clear_count()
+        check('清零：采样顺手停了、按钮回到「开始」',
+              (not mon.alive) and app.btn_start.cget('text') == '开始',
+              '%s alive=%s' % (app.btn_start.cget('text'), mon.alive))
         e0 = mon.counter.elapsed
-        idx0 = screen.last_idx
         check('清零之后立刻从 0 开始数', e0 == 0, '清零后读到 %s' % e0)
+        app.toggle_count()
+        check('清零后再点「开始计数」：采样线程又起来了', mon.alive)
+        idx0 = screen.last_idx
         while time.perf_counter() - t0 < 3.6:
             mon._sample()
         cyc = list(mon.counter.cycle_lengths)
@@ -176,7 +186,10 @@ def main() -> int:
         app._apply_window_box(Rect(x1, y1, x2 - x1, y2 - y1))
         check('框完之后取景器关掉了', app._picker is None)
         ok = pump(app, lambda: not app._window_busy and app.monitor is not mon)
-        check('框选之后重新算了一份 ROI', ok)
+        # 失败时把「那道工序现在什么状态 / 提示行说了什么」一起报出来：
+        # 这条偶尔会在机器忙的时候红（校准线程更慢 / 报错），不带这两个信息看不出是谁的锅。
+        check('框选之后重新算了一份 ROI', ok,
+              'busy=%s ｜ 提示=%r' % (app._window_busy, app.lb_note.cget('text')))
         mon2 = app.monitor
         check('框选钉住的费用条 = 框的左边缘（1px 不差）',
               mon2.layout.bar.x == x1 and mon2.layout.bar.w == x2 - x1,

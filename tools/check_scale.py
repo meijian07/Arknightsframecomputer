@@ -54,14 +54,20 @@ def main():
 
     print('1) 等比例：两个轴点的间距 = 帧差 x px_per_frame')
     a = by_frame(lay(1186.2))
-    # 未来的帧在屏幕上方，y 更小 —— 所以「早的减晚的」才是正数
-    d = a[1198].tick_y - a[1210].tick_y
+    # 晚的帧在屏幕**下方**：刻度整条往上滚，未来的轴从下面进来（2026-10-11 照看板改）
+    d = a[1210].tick_y - a[1198].tick_y
     check('1210 与 1198 相隔 12 帧 -> 18.0px', abs(d - 12 * g.px_per_frame) < 1e-6,
           '实际 %.3f' % d)
-    d2 = a[1168].tick_y - a[1310].tick_y
-    check('1310 与 1168 相隔 142 帧 -> 213.0px', abs(d2 - 142 * g.px_per_frame) < 1e-6,
+    # 远距离那一对（1310）在 1.5px/帧 下已经出画面了（底部可见范围只有 83 帧），
+    # 所以换 1px/帧 量它 —— 验的是「等比例」，跟缩放档无关。
+    a1 = by_frame(lay(1186.2, g=ScaleGeom(px_per_frame=1.0)))
+    d2 = a1[1310].tick_y - a1[1168].tick_y
+    check('1310 与 1168 相隔 142 帧 -> 142.0px', abs(d2 - 142 * 1.0) < 1e-6,
           '实际 %.3f' % d2)
-    check('晚的帧一定在上方（y 更小）', a[1210].tick_y < a[1198].tick_y < a[1168].tick_y)
+    check('晚的帧一定在下方（y 更大）', a[1210].tick_y > a[1198].tick_y > a[1168].tick_y)
+    check('高亮的那条（下一条）在指针**下面**，紧挨着线',
+          g.pointer_y < a[1198].tick_y < g.pointer_y + 30.0,
+          'pointer=%.1f next=%.1f' % (g.pointer_y, a[1198].tick_y))
 
     print('2) 状态划分：done 之前是 past，第 done 条是 next，之后是 future')
     past = [m.cue.text for m in lay(1186.2).marks if m.state == 'past']
@@ -78,12 +84,12 @@ def main():
     check('到帧后 部署 山 变 past',
           any(m.cue.text == '部署 山' and m.state == 'past' for m in lay(1198.0).marks))
 
-    print('4) 向下滚：frame 变大，同一个轴点往下走')
+    print('4) 向上滚：frame 变大，同一个轴点往上走')
     def y_at(frame, text):
         return [m for m in lay(frame).marks if m.cue.text == text][0].tick_y
     y1, y2 = y_at(1186.0, '撤离 桃金娘'), y_at(1190.0, '撤离 桃金娘')
-    check('1190 时比 1186 时低 6.0px', abs((y2 - y1) - 6.0) < 1e-6, '实际 %.3f' % (y2 - y1))
-    check('下移量 = 帧号差 x 缩放', abs((y2 - y1) - (1190 - 1186) * g.px_per_frame) < 1e-6)
+    check('1190 时比 1186 时高 6.0px', abs((y1 - y2) - 6.0) < 1e-6, '实际 %.3f' % (y1 - y2))
+    check('上移量 = 帧号差 x 缩放', abs((y1 - y2) - (1190 - 1186) * g.px_per_frame) < 1e-6)
 
     print('5) 标签防重叠：相邻标签至少隔 label_gap')
     tight = mk_cues([(1000, 'a'), (1002, 'b'), (1004, 'c'), (1006, 'd')])
@@ -106,20 +112,33 @@ def main():
               % (name, worst, g.label_h / 2.0),
               worst >= g.label_h / 2.0 - 1e-6)
 
-    print('6) 青柱：从「现在」连到下一条')
+    print('6) 青柱：2026-10-11 按用户要求**删掉了**')
     l6 = lay(1186.2)
-    check('1186.2 时青柱存在', l6.mercury is not None)
-    check('青柱底 = pointer_y', abs(l6.mercury[1] - g.pointer_y) < 1e-9)
-    check('青柱顶 = 下一条的真实刻度', abs(l6.mercury[0] - by_frame(l6)[1198].tick_y) < 1e-6)
     far = lay(1000.0)
-    check('下一条还在屏幕外时，青柱顶夹在 0（不画到画布外面）',
-          far.mercury[0] == 0.0, str(far.mercury))
+    check('Layout 上已经没有 mercury 字段',
+          not hasattr(l6, 'mercury') and not hasattr(far, 'mercury'))
+    # 像素级钉一遍：青柱原来画在刻度条右边缘那两列（ruler_w-3 .. ruler_w-2），
+    # 从指针往下扫，白色一个都不该有。指针那一条横线和它左端那个三角箭头也压在
+    # 这两列上（三角是 py-4 .. py+4），所以从 pointer_y + 6 往下扫。
+    from akframe import scale_render
+    im6 = scale_render.render(l6)
+    # 判据得是「**竖着**的连续白」：轴点自己的刻度线是白的（mark_next 就是 #ffffff），
+    # 那是 1px 高的横线，扫列时会撞上它。青柱是一条从指针连到下一条的**实心柱**，
+    # 所以看每一列里最长的连续白段有多长。
+    worst = 0
+    for x in range(g.ruler_w - 3, g.ruler_w - 1):
+        run = 0
+        for y in range(int(g.pointer_y) + 6, im6.height):
+            run = run + 1 if im6.getpixel((x, y)) == (255, 255, 255) else 0
+            worst = max(worst, run)
+    check('刻度条右边缘从指针往下没有白色竖柱（只剩 1px 的横刻度线）',
+          worst <= 2, '最长的一段连续白 = %dpx' % worst)
 
     print('7) 边界：没有轴 / 一条都没到 / 全走完')
     check('没有轴不崩', build(100.0, [], 0, g).marks == [])
-    check('一条都没到时不崩', far.mercury is not None)
+    check('表外一条都没到时也不崩（表是空的、指针还在）',
+          far.marks == [] and far.pointer_y > 0)
     end = lay(1320.0)
-    check('全走完时没有青柱', end.mercury is None)
     check('全走完时剩下的全是 past（%d 条）' % len(end.marks),
           len(end.marks) > 0 and all(m.state == 'past' for m in end.marks),
           str([m.cue.text for m in end.marks]))
@@ -135,11 +154,15 @@ def main():
     print('9) 缩放和指针高度都是参数')
     lw = by_frame(lay(1186.2, g=ScaleGeom(px_per_frame=3.0)))
     check('3.0 px/帧 时间距翻倍',
-          abs((lw[1198].tick_y - lw[1210].tick_y) - 36.0) < 1e-6,
-          '%.3f' % (lw[1198].tick_y - lw[1210].tick_y))
+          abs((lw[1210].tick_y - lw[1198].tick_y) - 36.0) < 1e-6,
+          '%.3f' % (lw[1210].tick_y - lw[1198].tick_y))
     check('pointer_ratio 生效', abs(ScaleGeom(pointer_ratio=0.5).pointer_y - 125.0) < 1e-9)
-    check('看得到的未来帧数随之变化',
-          abs(ScaleGeom().frames_up() - 116.667) < 0.01, '%.3f' % ScaleGeom().frames_up())
+    check('默认指针就在正中（2026-10-11 照看板改的）',
+          abs(ScaleGeom().pointer_y - ScaleGeom().height / 2.0) < 1e-9)
+    check('指针对称：上下一半一半',
+          abs(ScaleGeom().frames_up() - ScaleGeom().frames_down()) < 1e-9)
+    check('看到的过去帧数 = 125 / 1.5',
+          abs(ScaleGeom().frames_up() - 83.333) < 0.01, '%.3f' % ScaleGeom().frames_up())
 
     print('10) 不碰输入（build 不改 cues）')
     before = [(c.frame, c.text) for c in CUES]
@@ -190,6 +213,10 @@ def main():
     check('汉字走的是中文字体',
           any(not t.isascii() for t in cjk), '画到的：%r' % cjk[:6])
     check('「现在」那一行在', any(t.startswith('现在') for f, t in drawn))
+    nums = sorted({t for f, t in drawn if t.isdigit()})
+    check('轴点右边印的是**绝对帧号**（不再有 +40 这种带符号帧差）',
+          '1198' in nums and not any(t.startswith('+') for f, t in drawn),
+          '画到的数字：%r' % nums[:10])
     print()
     if FAILED:
         print('失败 %d 项：%s' % (len(FAILED), ', '.join(FAILED)))

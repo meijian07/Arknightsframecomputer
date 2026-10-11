@@ -712,11 +712,23 @@ class VideoSource:
             return hits, (tot / n if n else -2.0)
 
         best = None
+        found = False
         for y in range(cy0, cy1 + 1, BTN_COARSE):
+            if found:
+                break
             for x in range(cx0, cx1 + 1, BTN_COARSE):
                 got = score(x, y)
                 if best is None or got > (best[0], best[1]):
                     best = (got[0], got[1], x, y)
+                    # 「每一帧都命中 + 平均相关够强」= 这一格已经到顶了（hits 最多
+                    # 就是帧数），再往下扫只会在同样命中的格子里比小数点后几位。
+                    # 为什么值得加这一条：整片搜索网格是 21 x 111 格，每格都要把
+                    # 十几帧全做一遍模板互相关 —— 实测最坏情况要几十秒（自检里
+                    # 「框选之后重新算了一份 ROI」那条就是这么超时红的），提前收手
+                    # 之后一秒出头。精搜那一段照旧跑，位置精度不受影响。
+                    if got[0] >= strip.shape[0] and got[1] >= BTN_STRONG_CORR:
+                        found = True
+                        break
         for y in range(max(cy0, best[3] - BTN_COARSE), min(cy1, best[3] + BTN_COARSE) + 1):
             for x in range(max(cx0, best[2] - BTN_COARSE), min(cx1, best[2] + BTN_COARSE) + 1):
                 got = score(x, y)

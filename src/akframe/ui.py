@@ -7,20 +7,29 @@
     预览图上的红线 = 特征提取实际使用的那条带
     屏幕上加粗的方框（K 键）= 当前 ROI 位置，直接叠在游戏画面上
 
-操作：
+操作（常驻）：
+    空格 开始 / 暂停 / 继续（一个按钮三态，2026-10-11 照看板合并）
+    P 暂停计数（数字按住不动）      C 清零 + 停（主按钮回到「开始计数」）
+    T 打开「导入 / 编辑轴」窗口（能拖 md 进来）
+    Ctrl+R 重载轴文件      Ctrl+Enter 应用轴窗口里的文本
+    F5 重新校准（采样停了 / 窗口动了）      ↑↓ 打轴器翻条
+    Esc 收起展开区（**不再退程序**）      Ctrl+Q 退出
+
+ROI 校准模式（点展开区那个按钮才进，进去之后才吃这些键）：
     Tab 切换要校准的 ROI   方向键 移动   Shift+方向键 改大小
-    P 暂停计数（数字按住不动）
-    K 显示/隐藏屏幕上的 ROI 框    S 保存校准   R 恢复默认
-    C 清零计数    L 开始/停止记录 CSV    P 暂停/继续计数（手动）
-    T 导入 md 轴文件    F5 重新校准（采样停了 / 窗口动了）    Esc 退出
+    K 显示/隐藏屏幕上的 ROI 框    S 保存校准   R 恢复默认   Esc 退出模式
 
-回费速率（减费 tag）：默认 30 帧/费（1 秒 1 费）。点了「回费速度 -50% / -75%」的 tag
-时，在面板「回费速率」那行选 60 / 120，或直接填数字后点「应用」——改完立刻生效，
-并写回设置文件 cost_rate.json，下次启动自动带上。
+为什么把校准键收进一个模式：那六个键原来绑在全局，打字、翻条、想按 Tab 跳控件
+都会被它们吃掉，误按一下 ROI 就偏了（偏几个像素读数就全错）。
 
-打轴器（提词器）：导入一个 md 轴文件，或直接在下面的输入框里写（Ctrl+Enter 应用），
-计数器走到对应帧号时，面板上就把那条说明放大显示出来。轴文件格式见 timeline.py 顶部注释
-和 maps/example.md。
+回费效率（减费 tag）：默认 30 帧/费（1 秒 1 费）。点了「回费速度 -50% / -75%」的 tag
+时，在**收起态**面板「回费效率」那一行选 60 / 120，或直接填数字后点「应用」——
+改完立刻生效，并写回设置文件 cost_rate.json，下次启动自动带上。
+
+打轴器（提词器）：按 T（或展开区右上角「导入轴…」）打开一个**独立小窗**——里面既能
+把 md 文件拖进去，也能直接写（Ctrl+Enter 应用）。计数器走到对应帧号时，刻度表上那条
+就滚到指针位置，同时把说明放大显示出来。轴文件格式见 timeline.py 顶部注释和
+maps/example.md。
 
 读窗口（第 3 条需求「多样接口」）：**不解码文件**，直接读屏幕上正在显示的那个窗口 ——
 把录屏用播放器打开、置顶，点「读取窗口…」选它 → 自动校准（没把握就点「框选费用条」
@@ -49,16 +58,35 @@ from . import boxpick
 from .geometry import (BAR_BAND_BOTTOM, BAR_BAND_TOP, Rect, apply_deltas, layout_for,
                        load_calibration)
 from .live import LiveMonitor
-from .settings import (COST_RATE_PRESETS, DEFAULT_FRAMES_PER_COST, NEGATIVE_LABELS,
-                       NEGATIVE_MODES, clamp_frames_per_cost, format_frames_per_cost,
-                       parse_negative, save_cost_rate, save_negative_mode)
-from .scale import ScaleGeom, Theme, build as build_scale, clip, one_line
+from .settings import (COST_RATE_PRESETS, DEFAULT_FRAMES_PER_COST,
+                       clamp_frames_per_cost, format_frames_per_cost,
+                       parse_negative, save_cost_rate)
+from .scale import ScaleGeom, Theme, build as build_scale
 from .scale_render import render as render_scale
 from .state import LOGICAL_FPS
 from .timeline import Teleprompter, parse_lines
 from .win32 import (ScreenGrabber, arknights_ui_scaler, client_rect, is_window,
                     raise_window, set_click_through, set_topmost, to_gray, top_level,
                     virtual_screen_bounds, work_area)
+
+# 「把 md 文件拖进【导入 / 编辑轴】窗口」这一条要 tkinterdnd2（**可选**依赖）：
+#     pip install tkinterdnd2
+# 没装的话轴窗口照常能用（点「选择 md 文件…」/ 直接写），只是不吃拖放 —— 所以
+# 这里绝不能硬 import，否则没装的人连程序都起不来。
+try:                                             # pragma: no cover
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+    _HAS_DND = True
+except Exception:                                # noqa: BLE001
+    DND_FILES = None
+    TkinterDnD = None
+    _HAS_DND = False
+
+
+def make_root():
+    """建 Tk 根窗口。装了 tkinterdnd2 就用它那个 —— 只有它建出来的窗口才能当拖放目标。"""
+    if _HAS_DND:
+        return TkinterDnD.Tk()
+    return tk.Tk()
 from .window import WindowMonitor, WindowSource, build_window_layout
 
 
@@ -82,7 +110,7 @@ AXIS_HINT = ('// 在这里直接写轴：帧号开头，后面跟说明，和 md
              '//   120 部署银灰\n'
              '//   350 开技能\n'
              '//   1:05 撤退        （也可以用 分:秒，1:05 = 1950 帧）\n'
-             '// 写完点右边的「应用到提词器」，或按 Ctrl+Enter\n')
+             '// 写完点右边的「应用到提词器」\n')
 
 # 读窗口那条链路的阶段名（window.WindowSource：没有探测和抽流，多了一步自检）
 WINDOW_STAGES = {'align': '自动对齐费用条', 'measure': '量费用条槽',
@@ -121,9 +149,15 @@ FONT_MONO = 'Consolas'
 # 校准目标 / ROI 框 / 预览按这个顺序走。
 ROI_ORDER = ('bar', 'pause', 'speed')
 
-# 刻度缩放档：1 个逻辑帧画几个像素。轴点挤在一起就调小，隔得远就调大。
-SCALE_ZOOMS = ((0.5, '0.5x'), (1.0, '1x'), (1.5, '1.5x'), (3.0, '3x'))
-SCALE_ZOOM_DEFAULT = 1.5
+# 三个 ROI 的中文名（手动校准窗口里当按钮用）。
+ROI_LABELS = {'bar': '费用条', 'pause': '暂停键', 'speed': '倍速键'}
+
+# 刻度表的**可视跨度**（2026-10-11 按用户要求固定）：整条刻度刚好盖住 150 帧
+# —— 1 倍速下 = 5 秒 = 5 费，指针钉在正中，上下各 75 帧。
+# 以前是 0.5x / 1x / 1.5x / 3x 四档手动缩放（还有 [ ] 两个键）。用户要的是固定值，
+# 所以现在 px_per_frame 由刻度区高度反算：height / SCALE_SPAN_FRAMES。
+SCALE_SPAN_FRAMES = 150.0
+SCALE_HEIGHT = 280            # 刻度区高（px）
 
 # 采样线程多久没有心跳就判「停了」。选 1 秒：正常采样 120Hz（心跳每 8ms 一次），
 # 1 秒 = 120 次心跳一次都没来，绝不可能是抖动；而 1 倍速下一个逻辑帧才 33ms，
@@ -143,8 +177,6 @@ FULL_COST_HOLD_TICKS = 12
 # 「自己填一个数」的那个下拉项。选中它不切档，只把光标丢进输入框。
 RATE_CUSTOM_LABEL = '自定义（在右边输入）'
 AUTO_RATE_LABEL = '自动识别中…'
-# 负费档的下拉框用的是「说明文字」，要靠这张表翻回档名
-_NEG_BY_LABEL = {v: k for k, v in NEGATIVE_LABELS.items()}
 
 
 def _rate_label(frames: float) -> str:
@@ -449,10 +481,14 @@ class BoxPicker:
 
 
 class MonitorApp:
-    # 面板两种状态各自的宽度：收起 = 小面板（大数字 + 一行读数 + 一行按钮），
-    # 展开 = 打轴器 / 设置 / 诊断（那三张 ROI 预览图本身就要 704px）。
-    COLLAPSED_W = 560
-    EXPANDED_W = 724
+    # 面板宽度（**收起和展开是同一个宽度**，2026-10-11 按用户要求）。
+    # 用户原话：「展开是向上展开，展开后的宽度不变」—— 所以展开只长高、
+    # 不长宽，且窗口的**下边缘钉在原地**往上顶（见 _place）。展开区里所有会宽
+    # 的东西都得收进这个宽度：刻度表画布 420、ROI 预览画布按可用宽
+    # 实时算（_fit_preview_canvas）、长句子全给 wraplength（_set_wraps）。
+    # 470 是照看板批注从 560 收下来的：要「尽量和游戏里显示费用的
+    # 那个框差不多大」。
+    COLLAPSED_W = 470
 
     def __init__(self, monitor: LiveMonitor, *, calib_path: str = 'layout_calib.json',
                  settings_path: str = 'cost_rate.json', poll_ms: int = 8,
@@ -485,7 +521,13 @@ class MonitorApp:
         self._window_busy = False               # 后台在校准窗口
         self._window_stage = ('align', -1.0, '')
         self._window_result = None              # (src 或 None, 异常或 None, 窗口, 提示)
-        self._window_started = False            # 点过「开始计数」没有（没点就不起采样线程）
+        # 计数该不该在跑（看门狗靠它区分「用户主动停的」和「线程死了」）。
+        # 2026-10-11 初值改成 False：面板起来是**待命**态（主按钮写「开始」）。
+        # 以前 run_monitor 一进来就 start()，而这里又是 True，于是
+        # 主按钮一上来就是「暂停」——「开始」那个态根本没机会出现
+        # （用户原话「现在根本没有开始键」）。
+        # 现在两条链路一样：点了才开始（读窗口那条本来就是）。
+        self._counting_started = False
         self._pinned_hwnd = None                # 被我们钉到最上层的窗口（切走时还回去）
         self._pin_at = 0.0                      # 上次重新钉置顶的时刻（见 _keep_pin）
         self._full_ticks = 0                    # 满费格式还要多印几拍（见 _tick_body）
@@ -499,8 +541,8 @@ class MonitorApp:
             templates = load_templates(DEFAULT_TEMPLATES)
         self.templates = list(templates)
         self.calib_path = calib_path
-        # 回费速率 + 局内负费两个设置共用一个文件（改档时写回这里）
-        # 负费档从监视器上取（--negative 已经解析过），面板只负责显示和改
+        # 回费速率写回这个文件（改档时）；局内负费已改成**一直开着**（见负费那段注释）
+        # ——不再写回去，也不再读。negative_mode 只是为了读图时打印「减号 run/thr」那条证据。
         self.settings_path = settings_path
         self.negative_mode = parse_negative(getattr(monitor, 'negative_mode', 'auto'))
         self.poll_ms = poll_ms
@@ -519,18 +561,29 @@ class MonitorApp:
         self._stall_since = 0.0
         # 刻度表的几何和配色。布局数学全在 akframe.scale 里（tools/check_scale.py
         # 能脱离界面把它验一遍），这里只负责照着自己画。
-        self.scale_geom = ScaleGeom(width=420, height=280, ruler_w=50,
-                                    px_per_frame=SCALE_ZOOM_DEFAULT)
+        # px_per_frame 由「固定跨度」反算：150 帧正好铺满 280px 高
+        # （2026-10-11 起固定，没有缩放档了）。
+        self.scale_geom = ScaleGeom(width=420, height=SCALE_HEIGHT, ruler_w=50,
+                                    px_per_frame=SCALE_HEIGHT / SCALE_SPAN_FRAMES)
         self.scale_theme = Theme()
         self._prom_state = None     # (当前帧, 全部轴, 已触发几条)，换缩放时重画要用
+        self._axis_win = None       # 「导入 / 编辑轴」那个独立窗口（用到才建）
+        self.txt_axis = None        # 那个窗口里的 Text；窗口没开就是 None
+        self._axis_text = AXIS_HINT  # 轴文本缓冲区：窗口关着时以它为准
         # 刻度表本体是**一张 PIL 图**（akframe.scale_render），下面这两个是它贴到
         # Canvas 上的那一个图元和那一份 PhotoImage —— 必须留引用，否则会被回收成空白。
         self._scale_item = None
         self._scale_photo = None
+        # 每个 Label 上一次写进去的 (文本, 颜色)。见 _set_text —— 面板每 8ms 刷一拍，
+        # 内容没变还去 configure 的话光这一项就吃掉十几毫秒（实测 150% DPI 下一次 Tk
+        # configure 平均 0.8ms），事件循环被塞满，拖窗口就一顿一顿的。
+        self._memo = {}
         self._note_hold = 0.0           # 提示行的保留截止时刻（见 _set_note）
+        self._warn_at = 0.0             # 上次「告警行收起来 + 重算窗口」的时刻（见 _set_warn）
+        self._rule_need = None          # 上一拍大数字那一格的预留宽（见 _sync_rule）
         self._load_calib()
 
-        self.root = tk.Tk()
+        self.root = make_root()
         self.root.title('明日方舟 全局帧数计数器')
         self.root.configure(bg=UI_BG)
         self.root.attributes('-topmost', True)
@@ -538,9 +591,28 @@ class MonitorApp:
         sh = self.root.winfo_screenheight()
         # 默认**收起**（小面板）。真正的尺寸等 _build_ui() 之后按内容需求算（见 _refit）。
         self._more = False
+        self._calib = False         # ROI 校准模式：进去才吃 Tab / 方向键 / S / R / K
+        self._prom_shift = 0.0      # 打轴器回看：大于 0 = 往回看了这么多帧
+        self._dragging = False      # 正在拖窗口（拖动期间 _tick_body 跳过重活）
+        # 手动校准的二级窗口 + 它自己的状态（见 open_calib_dialog）
+        self._calib_win = None
+        self.calib_step = 1         # 微调步长（px）
+        self.cv_bar = None          # ROI 预览画布：只在那个窗口开着时才有
         # 用户想放的位置（不是实际位置）：展开 / 收起时窗口高矮差三四倍，直接按实际
         # 位置改尺寸会把它顶出屏幕，所以位置统一由 _place() 从这一份算（见 _place）。
-        self._user_pos = (24, max(10, (sh - 260) // 2))
+        #
+        # 2026-10-11 把它从中线挪到**屏幕左下**：用户要「展开是向上展开」，而展开区
+        # 本体就有 1172px 高（本机 150% DPI 实测）—— 摆在竖直中间时上面只剩 670px，
+        # 根本不够往上长，_place 只能退成「贴着屏幕底边」（观感还是往下展开）。
+        # 摆到左下之后实测：收起 470x364 @y=1111（客户区下边缘 1520）、展开 470x1172
+        # @y=303（客户区下边缘还是 1520）—— 这才是纯正的**下边缘钉住、往上长**。
+        # sh - 470 里的 470：收起态窗口高 364 + 标题栏 45 + 余量 ≈ 460，取整 470，
+        # 想让收起态的客户区下边缘落在任务栏上方一点点。注意它只是个**上界**：本机
+        # 工作区 1528、任务栏 72px 高，_place 里那条 `bottom - h - off - 8` 会先把
+        # y 夹到 1111（< 1130），所以真正定位置的是那个夹子，这里只是别让它先跑偏。
+        self._user_pos = (24, max(10, sh - 470))
+        # 展开时窗口下边缘钉在这个位置（收起态摆好之后算出来，见 _place）
+        self._anchor_bottom = 0
         self.root.geometry('%dx%d+%d+%d' % (self.COLLAPSED_W, 150,
                                             self._user_pos[0], self._user_pos[1]))
         self.root.protocol('WM_DELETE_WINDOW', self.quit)
@@ -554,6 +626,10 @@ class MonitorApp:
         self._win_w, self._win_h = self.COLLAPSED_W, 150
         self._refit()
         self._fit_at = 0.0
+        # 面板起来是待命态（上面 _counting_started 那段）：这一句告诉用户该点哪里。
+        if not self._counting_started:
+            self._set_note('点「开始」起采样；再点是暂停 / 继续，清零回到开始',
+                           hold=8.0)
         # timeline_text 是直接把轴喂进面板输入框（演示模式用：轴不来自文件，
         # 但仍然能在面板里改、能按 Ctrl+Enter 重解析）。
         if timeline_text:
@@ -594,14 +670,25 @@ class MonitorApp:
     # ---------------- 展开 / 收起 ----------------
 
     def toggle_more(self):
-        """展开 / 收起。收起态就是一个小面板：大数字 + 一行读数 + 一行按钮。"""
+        """展开 / 收起。收起态就是一个小面板：大数字 + 时间 + 回费效率 + 一行控制键。"""
         self._more = not self._more
         if self._more:
-            self.fr_more.pack(fill='both', expand=True)
+            self._pack_more()
         else:
+            self.fr_more_top.pack_forget()
             self.fr_more.pack_forget()
-        self.btn_more.configure(text='▾ 收起' if self._more else '▸ 打轴器 / 设置')
+        self.btn_more.configure(text='▾' if self._more else '▸')
         self._refit()
+
+    def _pack_more(self):
+        """把展开区铺出来：**打轴器整块插到大数字上面**。
+
+        用户 2026-10-11：「展开是向上展开，打轴器在计数表的上方」。pack 默认只会
+        往末尾追加，想让打轴器跑到常驻区上面，只有 before=self.fr_nums 一条路。
+        手动校准那一行（fr_more）照旧追加在末尾 —— 它在展开区的最下面。
+        """
+        self.fr_more_top.pack(fill='x', before=self.fr_nums)
+        self.fr_more.pack(fill='x')
 
     def _minimize(self):
         """最小化（任务栏）。再点一下任务栏图标就回来。"""
@@ -611,16 +698,42 @@ class MonitorApp:
             pass
 
     def _drag_start(self, event):
-        """按住标题栏拖动窗口（面板是无边框 HUD，系统标题栏被去掉了）。"""
-        self._drag_at = (event.x_root - self.root.winfo_x(),
-                         event.y_root - self.root.winfo_y())
+        """按住标题栏拖动窗口。
+
+        记两样东西：鼠标按下的屏幕坐标，以及**按下那一刻**窗口在哪。之后每一拍都用
+        「按下那一刻的位置 + 鼠标位移」算新位置 —— 不每拍重新读 winfo_x()/winfo_y()
+        再反推（那样每一拍的取整误差都会进到算出来的位置里）。
+        """
+        self._drag_at = (event.x_root, event.y_root)
+        self._drag_win = (self.root.winfo_x(), self.root.winfo_y())
+        self._dragging = True
 
     def _drag_move(self, event):
+        """拖动中：鼠标走到哪，窗口就跟到哪（展开态也一样）。
+
+        **展开态必须先把锚点跟着挪**：_place 的展开分支只认 _anchor_bottom（「下边缘
+        钉住、往上长」那条），不看 _user_pos[1]。不挪锚点的话，展开态竖直方向**根本
+        拖不动**（实测拖 dy=-30，窗口一动没动），而这一下攒进 _user_pos 的偏移会在
+        收起那一刻突然冒出来 —— 面板往下一跳，用户看到的就是「位置漂移」（视频 1）。
+        """
         at = getattr(self, '_drag_at', None)
         if at is None:
             return
-        self._user_pos = (event.x_root - at[0], event.y_root - at[1])
+        self._user_pos = (self._drag_win[0] + (event.x_root - at[0]),
+                          self._drag_win[1] + (event.y_root - at[1]))
+        off = max(0, self.root.winfo_rooty() - self.root.winfo_y())
+        self._anchor_bottom = self._user_pos[1] + self._win_h + off
         self._place(self._win_w, self._win_h)
+
+    def _drag_end(self, event=None):
+        """松手：结束「拖动中」状态，并按内容重新核一次尺寸 / 夹一次位置。
+
+        拖动期间 _tick_body 是**跳过重活**的（见那里的注释），松手这一下补回来。
+        """
+        if not getattr(self, '_dragging', False):
+            return
+        self._dragging = False
+        self._refit()
 
     def _refit(self):
         """按当前展开状态把窗口尺寸重新夹一次（收起 = 小的，展开 = 大的）。
@@ -629,11 +742,12 @@ class MonitorApp:
         还会随提示文字换行变化（换台机器、换系统字体缩放又不一样）。所以宽度按状态给
         基准，高度按**内容实际需要**算。
         """
-        base = self.EXPANDED_W if self._more else self.COLLAPSED_W
+        # 展开也是一样的宽度（只长高）—— 展开区里宽的东西都得先收进 base。
+        base = self.COLLAPSED_W
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
         # 顺序很重要：**先**把会换行的那些行按基准宽度限住，再量内容要多宽。
         # 反过来的话，上一拍留下的宽 wraplength 会让一行长提示（「采样正常，这一拍
-        # 没读到画面（未开始）」这种）把收起态从 560px 顶到 800px（实测踩过）。
+        # 没读到画面（未开始）」这种）把收起态从 470px 顶到 800px（实测踩过）。
         wrap = max(360, base - 30)
         self._set_wraps(wrap)
         try:
@@ -642,6 +756,9 @@ class MonitorApp:
         except Exception:                    # noqa: BLE001  还在建 / 已经销毁
             return
         w = min(max(base, need_w), max(420, sw - 40))
+        # 用 base 而不是算出来的 w：画布宽一旦跟着 w 走就自激（w -> 画布 -> reqw -> w，
+        # 实测直接顶到 609）。
+        self._fit_preview_canvas(base)
         self._set_wraps(max(360, w - 30))
         try:
             self.root.update_idletasks()
@@ -652,29 +769,51 @@ class MonitorApp:
         self._win_w, self._win_h = w, h
         self._place(w, h)
 
+    def _fit_preview_canvas(self, win_w: int) -> None:
+        """把 ROI 预览画布调到「当前窗口装得下」的宽度。
+
+        为什么不能写死 704：2026-10-11 起展开态的宽度和收起态一样（用户：
+        「展开后的宽度不变」），而 704 会把整块面板顶宽 250px。
+        _show() 本来就是按画布尺寸等比缩放居中的，所以这里只改画布宽 ——
+        缩放倍数会自己变小（本机实测 k 从 2 掉到 1，费用条 ROI 240px 宽）。
+        """
+        if self.cv_bar is None:          # 手动校准窗口没开 -> 没有预览画布
+            return
+        # 24 = 左右各 10 的 padx + 4px 画布自己的边框
+        self.cv_bar.configure(width=max(200, win_w - 24))
+
     def _set_wraps(self, wrap: int) -> None:
         """按可用宽度给会换行的那些行设换行宽度。
 
-        右列那两行（逻辑帧 / 游戏内时间）平时只有几个字，但它们**不在**下面这一组里 ——
-        单独给一个 420 的上限：大数字卡片本身就占掉 240px，再宽收起态就不「小」了。
+        右列那两行（逻辑帧 / 时间）平时只有几个字，但它们**不在**下面这一组里 ——
+        单独给一个 420 的上限：大数字卡片本身就占掉 186~366px（跟着位数走），
+        再宽收起态就不「小」了。
         """
-        for lb in (self.lb_cycle, self.lb_perf, self.lb_warn, self.lb_note,
-                   self.lb_window_hint, self.lb_help):
+        for lb in (self.lb_bar, self.lb_pause, self.lb_cycle, self.lb_perf,
+                   self.lb_warn, self.lb_note, self.lb_window_hint,
+                   # 展开区里这几行也会长：2026-10-11 起展开态宽度 = 收起态（同一个 base），
+                   # 不给 wraplength 的话它们会按单行自然宽把整块面板顶宽（实测：轴文本
+                   # 那行就要 509px，而 base 只有 470）。
+                   self.lb_prom_title):
             lb.configure(wraplength=wrap)
+        # 打轴器标题那一行右边还挂着两个按钮（重载 / 导入轴…），标题能用的宽度要
+        # 扣掉它们 —— 不扣的话整行 453px，把展开态顶到 473（实测）。
+        self.lb_prom_title.configure(wraplength=max(120, wrap - 185))
         for lb in (self.lb_frames_hint, self.lb_time):
             lb.configure(wraplength=max(240, min(wrap, 420)))
-        # 三件 UI 的读数摘要（各占一行）：自然宽度最大的是倍速那行 406px，限到 520
-        # 留足余地 —— 不限的话最长的组合能把**收起态**顶到 800px 宽（实测）。
-        for lb in (self.lb_bar, self.lb_pause, self.lb_speed):
-            lb.configure(wraplength=min(wrap, 520))
 
     def _place(self, w, h):
         """把窗口摆到屏幕上：尺寸一变（展开 / 收起）就按「想放的位置」重算一次。
 
-        为什么必须有这一步：面板默认落在屏幕竖直中间（+24+670，本机 2560x1600），
-        而展开区一出来内容就要 1300+ px —— 直接照原位置改尺寸，底边会掉到屏幕外，
-        用户看到的是「展开了但下面半截看不见」。这里把左上角按屏幕夹一次：
-        越界就往上 / 往左收，收到头就贴边（留 8px 边）。收起时又自动回到原来的位置。
+        展开 / 收起：**同一个宽度**（用户要「展开后的宽度不变」，切的就是 COLLAPSED_W），
+        高度按内容需求；位置靠这一份算：收起态摆好后把**客户区下边缘**记进
+        _anchor_bottom，展开时 y = 下边缘 - h，下边缘不动、往上长（用户要的「向上展开」）。
+
+        为什么要有「锚住下边缘」这一步：展开区一出来内容就 1172px 高（本机 150% DPI
+        实测），照原位置直接改尺寸的话下面半截会掉到屏幕外、被任务栏压住。锚住下边缘
+        就等价于「往上铺」——多出来的高度全在屏幕上方，正在看的那几行不动。
+        上面真装不下（y < 8）就只贴屏幕顶。
+        横向仍旧夹一次：越界就往左收，收到头贴边（留 8px）。
         """
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
         # 窗口左上角到**客户区**左上角还差一条边框 / 标题栏（本机实测 45px）：
@@ -687,17 +826,35 @@ class MonitorApp:
         ax, ay, aw, ah = work_area()
         bottom = ay + ah if (aw > 0 and ah > 0 and ax <= ux + w // 2 <= ax + aw) else sh
         x = min(max(8, ux), max(8, sw - w - 8))
-        y = min(max(8, uy), max(8, bottom - h - off - 8))
+        if self._more and self._anchor_bottom > 0:
+            # 展开：**下边缘钉住、往上长**（用户要的「向上展开」）。
+            # 面板平时摆在屏幕中下部，展开区往上铺才不会被任务栏 / 屏幕底边切。
+            y = self._anchor_bottom - h - off
+        else:
+            y = min(max(8, uy), max(8, bottom - h - off - 8))
+            # 收起态的客户区下边缘 = 展开时的锚点
+            self._anchor_bottom = y + h + off
+        # 只夹这一次：**上面装不下就贴屏幕顶**（y = 8）—— 以前这里还多一条
+        # 「退成贴着屏幕底边（bottom - h - off - 8）」的兜底，那条会把面板一脚踢到
+        # 屏幕底部：实测收起在 y=100 时展开，整块面板从 100 瞬移到 738（638px），
+        # 用户报的「展开收起都会导致面板漂移」就是它（收起能回原地，展开又跳一次）。
+        # 贴顶只是「往上长不动了、剩下的往下铺」，看着是长大而不是瞬移。
+        y = min(max(8, y), max(8, bottom - h - off - 8))
         self.root.geometry('%dx%d+%d+%d' % (w, h, x, y))
 
     # ---------------- 输入源 / 主按钮 ----------------
 
     def _src_menu(self):
-        """「输入：…」下拉：实时 / 读取窗口。"""
+        """「校准：…」下拉（2026-10-11 照看板改名 + 加说明）。
+
+        看板批注：「改成校准 / 实时为自动校准 / 视频为手动校准」——
+        自动 = 实时链路（所有 ROI 都按实测校准表推算，用户不用圈）；
+        手动 = 读一个窗口（录屏 / 视频），画面缩放对不上，必须用户自己框费用条。
+        """
         m = tk.Menu(self.root, tearoff=0, bg=CARD, fg=UI_FG, activebackground=RULE,
                     activeforeground=UI_BG, relief='flat', font=(FONT_UI, 9))
-        m.add_command(label='实时（游戏窗口）', command=self.back_to_live)
-        m.add_command(label='读取一个窗口…', command=self.read_window)
+        m.add_command(label='自动校准（实时游戏窗口）', command=self.back_to_live)
+        m.add_command(label='手动校准（读一个窗口…）', command=self.read_window)
         try:
             m.tk_popup(self.btn_src.winfo_rootx(),
                        self.btn_src.winfo_rooty() + self.btn_src.winfo_height())
@@ -705,11 +862,33 @@ class MonitorApp:
             m.grab_release()
 
     def _primary_action(self):
-        """常驻行那个主按钮：按当前输入源做「最该做的那件事」。"""
-        if self._src_kind == 'window':
-            self.toggle_window_count()
+        """主按钮：开始 -> 暂停 -> 继续（2026-10-11 照看板「开始和暂停合并」）。
+
+        三态，字由 _primary_label() 算：
+            没在计数    「开始计数」：起采样线程（= 原来的「开始 / 停止计数」）
+            在计数      「暂停」    ：数字按住不动（= 原来的「暂停计数 (P)」）
+            手动暂停中  「继续」    ：接着数（重新起锚，停的那段不补）
+        清零把三态一起拉回「开始」，见 clear_count。
+        """
+        if self.monitor.alive and self._counting_started:
+            self.toggle_manual_pause()      # 计数中 / 暂停中都是这个开关在翻
         else:
-            self.recalibrate()
+            self.toggle_count()             # 没在数 -> 起采样线程
+
+    def _manual_paused(self) -> bool:
+        return bool(getattr(self.monitor, 'manual_pause', False))
+
+    def _primary_label(self) -> str:
+        """主按钮上该写哪几个字（三态，见 _primary_action）。
+
+        文案只取两个字（开始 / 暂停 / 继续）：看板批注要「尽量缩小」，而这个按钮是
+        控制行里最宽的一个 —— 实测「开始计数」比「开始」宽 36px，正好把整行顶出 470。
+        2026-10-11 用户又说「快捷键操作去掉…不需要快捷键操作」：括号里的键名全删了，
+        所以这里只剩两个字（键本身还留着，见 _base_keys）。
+        """
+        if not (self.monitor.alive and self._counting_started):
+            return '开始'
+        return '继续' if self._manual_paused() else '暂停'
 
     def _sync_ctrl_row(self):
         """主按钮 / 输入源按钮上的字，跟着「输入源 + 当前状态」走。
@@ -717,36 +896,46 @@ class MonitorApp:
         只在这两个控件上写字，所以每拍调用一次也不心疼（内容没变就不 configure）。
         """
         kind = self._src_kind
-        want_src = {'live': '输入：实时 ▾', 'window': '输入：窗口 ▾'}[kind]
+        want_src = {'live': '校准：自动▾', 'window': '校准：手动▾'}[kind]
         if self.btn_src.cget('text') != want_src:
             self.btn_src.configure(text=want_src)
-        if kind == 'window':
-            want = '停止计数' if self.monitor.alive else '开始计数'
-        else:
-            want = '重新校准'
+        want = self._primary_label()
         if self.btn_start.cget('text') != want:
             self.btn_start.configure(text=want)
-
     def _fit_window(self, now):
-        """内容长高了就把窗口放高一点，别把最下面的帮助行切掉。
+        """内容长高 / 长宽了就跟着把窗口放大，别把边上的东西切掉。
 
-        为什么需要：窗口尺寸是 __init__ 里照**占位文本**算出来定死的；运行时那些会换行的
-        行（性能行 / 告警行 / 费用周期）字一长就会多占一行，而窗口高度不会跟着变 ——
-        最下面的帮助行于是被切在窗口外（实测：性能行多换了一行，帮助行只剩半行）。
-        这里每 0.5 秒核一次「内容到底需要多高」，不够就长高，上限是屏幕高度。
-        只长不缩：缩会在文本忽长忽短时来回抖。
+        为什么需要：窗口尺寸是 __init__ 里照**占位文本**算出来定死的，运行时内容还会长：
+            高：性能行 / 告警行 / 费用周期这些会换行的行一长就多占一行 —— 最下面的
+                帮助行被切在窗口外（实测：性能行多换了一行，帮助行只剩半行）。
+            宽：大数字那一格是按**整数位数**预留的（见 _sync_rule），99 -> 100 那一下
+                整张卡就宽 45px —— 而窗口宽是 _refit 那一刻算死的，不管的话右列和右边
+                那几个按钮直接被窗口右边缘切掉（实测：跑到 407 帧时「时间 00:13.57」
+                只剩「时间 00:13.」）。
+        所以每 0.5 秒核一次「内容到底要多宽多高」，不够就长大，上限是屏幕尺寸。
+        只长不缩：缩会在文本忽长忽短时来回抖（要缩请走 _refit —— 展开 / 收起 / 重校准
+        那几条路都会重新按内容算一次）。
         """
         if now - self._fit_at < 0.5:
             return
         self._fit_at = now
         try:
-            need = self.root.winfo_reqheight()
+            need_h = self.root.winfo_reqheight()
+            need_w = self.root.winfo_reqwidth()
         except Exception:                    # noqa: BLE001  窗口正在销毁
             return
-        if need <= self._win_h + 2:
-            return
-        self._win_h = min(need, max(640, self.root.winfo_screenheight() - 20))
-        self._place(self._win_w, self._win_h)
+        # 判据不带「2px 容差」：这里差 2px 就是最右边那个字被切掉（实测 470 的窗口
+        # 装 472 的内容，'CSV (L)' 的右半边和时间的最后两位一起没了）。长是单向的，
+        # 偶尔被 1px 的抖动骗着多长 1px 无所谓，切掉一个字符才是真丢信息。
+        grew = False
+        if need_w > self._win_w:
+            self._win_w = min(need_w, max(420, self.root.winfo_screenwidth() - 40))
+            grew = True
+        if need_h > self._win_h:
+            self._win_h = min(need_h, max(640, self.root.winfo_screenheight() - 20))
+            grew = True
+        if grew:
+            self._place(self._win_w, self._win_h)
 
     def _draw_badge(self):
         """左上角那个白色菱形徽标（游戏里是「◆C」= 费用，这里写「◆帧」）。"""
@@ -761,32 +950,39 @@ class MonitorApp:
         """大数字那一格的几何：白线宽度 + 这一格**预留**多宽。
 
         两条都只跟**整数位数**走，而且只拿「8」去量（数字里最宽的字形），绝不跟
-        「这一拍印的是 123 还是 888.88」走。为什么必须这样：满费期间大数字带两位小数
+        「这一拍印的是 123 还是 888.8」走。为什么必须这样：满费期间大数字带一位小数
         （`elapsed_f`），而满费那些拍走的通道会在「挂钟」和「倍速未知→冻结」之间来回
         切 —— 只要跟着文本宽度走，8ms 一拍就是「小数一出现整个界面抽搐一下」。
 
-        修之前（数字格的宽度跟着这一拍的文本走）实测：
+        修之前（数字格的宽度跟着这一拍的文本走）实测（那时候满费印的是两位小数）：
 
             文本        数字格  白线   卡片宽  右列 x   面板 reqw
             123          79     71     208     212      400
             123.45      150    142     228     232      420
             -> 小数一出现：白线 71 -> 142、右边三行整体右移 20px、面板跟着长 20px
 
-        预留按「整数位个 8 + '.88'」算（能把这一位数下任何文本都装下），白线按
-        「整数位个 8」算。修之后实测：
+        预留按「整数位个 8 + '.8'」算（满费只印一位小数，能把这一位数下任何文本都
+        装下），白线按「整数位个 8」算。修之后实测（本机 150% 缩放、开了 DPI 感知，
+        和面板真正跑起来时一致）：
 
-            文本        数字格  白线   卡片宽  右列 x   面板 reqw
-            0           115     56     180     184      400
-            123         175     82     240     244      432
-            123.45      175     82     240     244      432
-            888.88      175     82     240     244      432
-            1234.56     205    112     270     274      462
-            12345.67    235    142     300     304      492
+            文本        数字格  白线   卡片宽  右列宽  面板 reqw
+            0           121     56     186     168      466
+            99          166     82     231     168      466
+            123         211    127     276     168      472
+            123.4       211    127     276     168      472
+            888.8       211    127     276     168      472
+            1234.5      256    172     321     168      517
+            12345.6     301    217     366     168      562
+
+        （数字格 = 这一格的 minsize = 量出来的 '8'x位数 + '.8' + NUM_RIGHT_PAD；
+        卡片宽 = 数字格 + 65，65 是右边那个菱形徽标占的；右列 = 右边那两行「逻辑帧 /
+        时间」共同要的宽，是个常数 168。面板 reqw 那块 2~3 位数时由控制行决定（446），
+        4 位数起才由这一行决定 —— 那时 _fit_window 会把窗口一起放大，不会切。）
 
         —— 同一位数内**没有任何东西会动**，连 123 -> 888 这种换字形都不会（1 号数字
         只要 18px、8 号要 30px，按实际文本量的话白线会在 30px 里来回跳）；位数真涨
         一位（99 -> 100）时白线和格子一起变一次，那是应该变的：游戏里那条压条本来
-        就是跟着费用位数变长的。面板最宽 492 < 窗口 560，不会顶破。
+        就是跟着费用位数变长的。
 
         怎么做到像素级精确：Label 的 `width=` 单位是**字符**，Tk 拿字体平均宽去乘
         （本机 40pt Bahnschrift 平均宽 30px），于是 162px 的需求会被抬到 186px（多出
@@ -800,8 +996,14 @@ class MonitorApp:
             n = len(str(self.lb_frames.cget('text')).split('.')[0]) or 1
             widest = '8' * n                    # 最宽的数字字形：按它预留就不会切字
             self.fr_rule.configure(width=max(56, f.measure(widest) - 8))
-            self.card.grid_columnconfigure(
-                1, minsize=f.measure(widest + '.88') + NUM_RIGHT_PAD)
+            need = f.measure(widest + '.8') + NUM_RIGHT_PAD
+            if need != self._rule_need:
+                # 位数涨一位：整张卡一下子宽 45px，这一下就得让 _fit_window 跟着
+                # 放宽，别等它自己那 0.5s 的节拍 —— 实测不管的话最右边那几个字
+                # 会被切半秒（1000 那一下）。
+                self._rule_need = need
+                self._fit_at = 0.0
+            self.card.grid_columnconfigure(1, minsize=need)
         except Exception:                    # noqa: BLE001  还没建出来/已销毁：忽略
             pass
 
@@ -820,20 +1022,24 @@ class MonitorApp:
         self.btn_close.pack(side='right', padx=(2, 9), pady=(5, 5))
         self.btn_min = self._btn(self.head, '−', self._minimize, padx=10, pady=1)
         self.btn_min.pack(side='right', padx=2, pady=(5, 5))
-        self.btn_more = self._btn(self.head, '▸ 打轴器 / 设置', self.toggle_more, padx=8, pady=1)
+        # 展开键只留一个正三角（看板批注「右上方有展开，x，-键」「展开图标变为正三角」）：
+        # 原来写「▸ 打轴器 / 设置」，比另外两个键加起来还宽 —— 标题栏因此成了整块面板
+        # 最宽的一行（525px），收起态缩不下去。
+        self.btn_more = self._btn(self.head, '▸', self.toggle_more, padx=9, pady=1)
         self.btn_more.pack(side='right', padx=2, pady=(5, 5))
         for w in (self.head, self.lb_title):
             w.bind('<Button-1>', self._drag_start)
             w.bind('<B1-Motion>', self._drag_move)
+            w.bind('<ButtonRelease-1>', self._drag_end)
         self._sep(self.root)
 
         # ---- 常驻①：大数字那一块，照着游戏里的费用显示做 ----
         # 实测那张 HUD 截图的构成：深炭灰面板上「白色菱形 + 大号白数字」，数字下面压一条
         # 粗白线。量到的比例是：面板 205x94、数字高 50（占面板高 53%）、
         # 白线 6px 厚 / 80px 宽（只占面板宽 39%）、贴着左下角。这里照抄这三样。
-        top = tk.Frame(self.root, bg=UI_BG)
-        top.pack(fill='x', **pad)
-        card = tk.Frame(top, bg=CARD)
+        self.fr_nums = tk.Frame(self.root, bg=UI_BG)
+        self.fr_nums.pack(fill='x', **pad)
+        card = tk.Frame(self.fr_nums, bg=CARD)
         card.pack(side='left')
         # 留着给 _sync_rule 用：大数字那一列按「整数位 + '.88'」预留固定宽度，小数出现 /
         # 消失时谁都不挪窝（实测、算式见 _sync_rule 的注释）。
@@ -843,7 +1049,7 @@ class MonitorApp:
         self._draw_badge()
         # width=1 是故意的：这个 Label **不参与**「本行要多宽」的竞争，宽度由
         # _sync_rule 里的列 minsize 定死（像素级精确），再用 sticky='we' 撑满那一格。
-        # 直接让 Label 按文本自适应的话，满费时印出两位小数就会把整张卡撑宽（实测
+        # 直接让 Label 按文本自适应的话，满费时多出那个小数就会把整张卡撑宽（实测
         # 208 -> 228px，右边三行跟着右移），收起小数又缩回去 —— 8ms 一拍地在抖。
         self.lb_frames = tk.Label(card, text='0', bg=CARD, fg=UI_FG,
                                   font=(FONT_NUM, 40), anchor='w', width=1)
@@ -854,7 +1060,7 @@ class MonitorApp:
                           sticky='w')
         self._sync_rule()
 
-        right = tk.Frame(top, bg=UI_BG)
+        right = tk.Frame(self.fr_nums, bg=UI_BG)
         right.pack(side='left', padx=4, pady=6)
         # 两行都 anchor='w'（左对齐）：tk 默认 anchor='center'，文字比分到的宽度长时
         # 会**两头一起切**（实测切出来第一个字就没了）。左对齐至少从头开始读。
@@ -862,39 +1068,88 @@ class MonitorApp:
         # 窗口右边切掉，用户 2026-10-09 说「状态栏可以删掉」，于是整行去掉 —— 它的内容
         # 分两类，都没有丢：跑动细节在下面「费用条」那行的「通道=」里，真出事的告警在
         # 「告警：」那行（采样已停会转红写在那里，见 _tick_body 末尾）。
-        self.lb_frames_hint = self._label(right, '逻辑帧（1 倍速 30 帧/秒）', 9, UI_DIM,
+        # 这两行的文案**短**是量出来的：右列宽度 = 两行的最大者，而右列又是「大数字卡 +
+        # 右列」这一行的宽度瓶颈（大数字卡片本身按位数要 186~366px）。原来那两句是
+        # 218px / 240px，收起态 3 位数就要 550 宽；收成 135px / 162px 之后 3 位数是
+        # 470 —— 而且一个字的信息都没少（'1X 30/秒' 和 '1 倍速 30 帧/秒' 是同一件事）。
+        self.lb_frames_hint = self._label(right, '逻辑帧 1X 30/秒', 9, UI_DIM,
                                           anchor='w')
         self.lb_frames_hint.pack(anchor='w')
-        self.lb_time = self._label(right, '游戏内时间 00:00.00', 13, anchor='w')
+        self.lb_time = self._label(right, '时间 00:00.00', 13, anchor='w')
         self.lb_time.pack(anchor='w')
 
-        # ---- 常驻②：三件 UI 的读数摘要 ----
+        # ---- 常驻②：回费效率（减费 tag）—— 2026-10-11 从展开区挪上来的 ----
+        # 看板批注「回费效率设置放在这里」（箭头指进收起态面板），展开区那一行删掉。
+        # 为什么不自动认：认错档会让绝对帧号整段漂移（差一档就是几百帧），而打轴器
+        # 要的正是绝对帧号。档位取值 = 「一费几个逻辑帧」，和倍速、画面帧率都无关。
+        rate_row = tk.Frame(self.root, bg=UI_BG)
+        rate_row.pack(fill='x', **pad)
+        self._label(rate_row, '回费效率', 10).pack(side='left')
+        cur = (self.monitor.counter.frames_per_cost if self.monitor.counter is not None
+               else DEFAULT_FRAMES_PER_COST)
+        self.rate_var = tk.StringVar(value=_rate_label(cur))
+        self._rate_labels = {}
+        for v, desc in COST_RATE_PRESETS:
+            self._rate_labels['%.0f  %s' % (v, desc)] = v
+        items = list(self._rate_labels) + [RATE_CUSTOM_LABEL]
+        self.rate_menu = tk.OptionMenu(rate_row, self.rate_var, *items,
+                                       command=self._on_rate_pick)
+        # width 必须**显式给**：不给（=0）时按钮宽度会跟着**当前值那串字**走
+        # —— 实测值写「自定义（在右边输入）」时控件 244px、切成「30  正常」掉到 132px，
+        # 也就是每切一档整块面板跟着左右一跳。给了之后宽度是个常数，切档不再跳。
+        # 9 个字符 = 151px；最长的那条档位文案 '120  回费-75%' 只要 125px，留 26px 余量
+        # 给别的机器上字号 / 字体略有出入的情况。
+        self.rate_menu.config(bg=CARD_HI, fg=UI_FG, activebackground=CARD_HI,
+                              activeforeground=UI_FG, relief='flat', highlightthickness=0,
+                              font=(FONT_UI, 9), width=9, anchor='w', padx=4, pady=2)
+        # 下拉里的高亮 = 白底深字（同上：游戏 HUD 的选中一律反色）
+        self.rate_menu['menu'].config(bg=CARD, fg=UI_FG, activebackground=RULE,
+                                      activeforeground=UI_BG, relief='flat',
+                                      font=(FONT_UI, 9))
+        self.rate_menu.pack(side='left', padx=(6, 6))
+        self._label(rate_row, '自定义', 9, UI_DIM).pack(side='left')
+        # width=4 而不是 5：三个数字（120）也放得下，整行因此窄 11px。
+        self.en_rate = tk.Entry(rate_row, width=4, bg=SUNKEN, fg=UI_FG, relief='flat',
+                                insertbackground=UI_FG, justify='center',
+                                font=(FONT_MONO, 10))
+        self.en_rate.pack(side='left', padx=(4, 4))
+        self.en_rate.bind('<Return>', lambda _e: self.apply_rate_entry())
+        self._btn(rate_row, '应用', self.apply_rate_entry).pack(side='left', padx=3)
+
+        # ---- 常驻③：告警行（平时空的）----
+        # 看板批注「面板缩小…主体显示帧数和时间就行」：原来常驻的两行**诊断证据**
+        # （费用条 / 暂停键 + 倍速 + conf/digit/glyph/ratio）搬进展开区的
+        # 「诊断 / 预览」。只有告警行留在这儿 —— 采样停了 / 校准没把握，这类事必须
+        # 一眼看得见。它平时是空的，**空着的时候整行收起来**：一个空 Label 也照占
+        # 30px 字高（加上这一行的上下 8px，占收起态高度的 10%），见 _set_warn。
         info = tk.Frame(self.root, bg=UI_BG)
         info.pack(fill='x', **pad)
-        self.lb_bar = self._label(info, '费用条 —', 10)
-        self.lb_bar.grid(row=0, column=0, columnspan=4, sticky='w')
-        # 三行各占一行（不并排）：并排的话两段（355 + 406px）会把**收起态**顶到
-        # 797px 宽，限宽又会折成两截读不懂 —— 一行一段最省事，代价只是多 33px 高。
-        self.lb_pause = self._label(info, '按钮 —', 10)
-        self.lb_pause.grid(row=1, column=0, columnspan=4, sticky='w')
-        self.lb_speed = self._label(info, '倍速 —', 10)
-        self.lb_speed.grid(row=2, column=0, columnspan=4, sticky='w')
-        # 告警行常驻（平时空的）：采样停了 / 校准没把握 这类事必须一眼看得见
+        self.fr_warn = info
         self.lb_warn = self._label(info, '', 9, WARN, anchor='w', justify='left')
-        self.lb_warn.grid(row=3, column=0, columnspan=4, sticky='w')
+        self.lb_warn.grid(row=0, column=0, columnspan=4, sticky='w')
+        # 铺一次就收起来（真有告警时 _set_warn 会按 before=fr_ctrl 摆回来）。
+        # 收的是**整条 Frame**而不是里面那个 Label：Tk 的 Frame 不会因为里面的
+        # 控件被 grid_remove / pack_forget 就缩小自己的请求高度（实测：Label 拿掉
+        # 前后 reqh 都是 23），只有把它自己从父容器里拿掉才真的腾出位置。
+        info.pack_forget()
 
-        # ---- 常驻③：控制键 ----
-        # 主按钮按**输入源**变：实时 = 重新校准，窗口 = 开始 / 停止计数。
-        # 只留这一个「最该做的那件事」，别的（框选、重解、保存…）都在展开区。
+        # ---- 常驻④：控制键 ----
+        # 看板批注：「改成校准：实时为自动校准，视频为手动校准」「开始和暂停合并」。
         ctrl = tk.Frame(self.root, bg=UI_BG)
         ctrl.pack(fill='x', **pad)
-        self.btn_src = self._btn(ctrl, '输入：实时 ▾', self._src_menu, padx=7)
+        self.fr_ctrl = ctrl          # 告警行重新铺出来时的锚点（见 _set_warn）
+        # 尖角前不留空格：'▾' 和空格一共 26px，控制行是收起态最宽的一行，去掉它
+        # 整行才落进 470（实测 132 -> 121）。
+        self.btn_src = self._btn(ctrl, '校准：自动▾', self._src_menu, padx=7)
         self.btn_src.pack(side='left', padx=(0, 6))
-        self.btn_start = self._btn(ctrl, '重新校准', self._primary_action)
+        # 开始 / 暂停二合一：没在数 -> 开始；在数 -> 暂停；按了暂停 -> 继续。
+        # 三态的字由 _sync_ctrl_row 每拍算，动作在 _primary_action。
+        self.btn_start = self._btn(ctrl, '开始', self._primary_action)
         self.btn_start.pack(side='left', padx=2)
-        self.btn_manual = self._btn(ctrl, '暂停计数 (P)', self.toggle_manual_pause)
-        self.btn_manual.pack(side='left', padx=2)
         self._btn(ctrl, '清零', self.clear_count).pack(side='left', padx=2)
+        # （「CSV」那个按钮 2026-10-11 按用户要求删了 ——用户原话「csv 是什么，删掉」。
+        #   层里那个逐帧记录能力（live.set_csv_path + run_monitor 的 --csv）留着：
+        #   离线工具和自检还在用它，只是界面上再也不露这个开关。）
 
         # 读窗口那块：校准好之后 **等用户点「开始计数」** 才起采样线程 ——
         # 用户要的就是这个顺序：打开录屏置顶 -> 读这个窗口校准 -> 点开始。
@@ -910,157 +1165,99 @@ class MonitorApp:
         self.lb_window_hint.pack(fill='x', pady=(3, 0))
 
         # ---- 常驻④：提示行（面板用来说话的那一行）----
+        # 提示行：只在「刚点过什么」之后才有一句话，说完自己清空（见 _set_note）。
+        # height=1：原来是 2 行高，于是这块地方永远空着两行 —— 用户要的「尽量缩小」。
         self.lb_note = self._label(self.root, '', 10, UI_DIM, anchor='w', justify='left',
-                                   height=2)
+                                   height=1)
         self.lb_note.pack(fill='x', padx=10, pady=(4, 6))
 
-        # ================= 展开区（默认收起，按 ▸ 才出来）=================
-        self.fr_more = tk.Frame(self.root, bg=UI_BG)
-        self._sep(self.fr_more)
+        # ================= 展开区（默认收起，点 ▸ 才出来）=================
+        # 2026-10-11 拆成两块（用户：「展开是向上展开，打轴器在计数表的上方」）：
+        #   fr_more_top —— 打轴器这一块（标题 + 刻度表）。它要在**大数字上面**，
+        #                  所以展开时是插进常驻区、不是追加到末尾（见 _pack_more）。
+        #   fr_more     —— 展开区最下面那一行（手动校准…），追加在末尾。
+        self.fr_more_top = tk.Frame(self.root, bg=UI_BG)
+        self._sep(self.fr_more_top)
 
         # ---- 打轴器（提词器）：导入 md 轴文件后，到帧就显示那一条 ----
-        prom = tk.Frame(self.fr_more, bg=UI_BG)
+        prom = tk.Frame(self.fr_more_top, bg=UI_BG)
         prom.pack(fill='x', **pad)
         head = tk.Frame(prom, bg=UI_BG)
         head.pack(fill='x')
-        self.lb_prom_title = self._label(head, '打轴器 — 未导入（按 T 或点右边按钮选 md 轴文件）',
-                                         10, UI_DIM)
+        self.lb_prom_title = self._label(
+            head, '打轴器 — 未导入（点右边「导入轴…」选 md / 直接写）', 10, UI_DIM)
         self.lb_prom_title.pack(side='left')
-        for text, cmd in (('重载', self.reload_timeline), ('导入轴 (T)', self.import_timeline)):
+        # 「导入轴…」= 开那个独立小窗（看板批注第 6 条），不是直接弹文件选择框 ——
+        # 窗口里既能拖 md 进来，也能直接写。
+        for text, cmd in (('重载', self.reload_timeline),
+                          ('导入轴…', self.open_axis_dialog)):
             self._btn(head, text, cmd).pack(side='right', padx=3)
-        # 刻度表：按帧等比例摆在一条竖直刻度上，指针（红线）固定不动，帧数上涨时
-        # 整条刻度往下滚 —— 所以轴点是从上方压下来、穿过指针、再变暗沉下去。
+        # 刻度表：按帧等比例摆在一条竖直刻度上，指针（白线）钉在正中不动。
+        # 帧数上涨 -> 整条刻度**向上滚**（走过去的轴往上、变暗）—— 第 34 节翻的方向。
         self.cv_scale = tk.Canvas(prom, width=self.scale_geom.width,
                                   height=self.scale_geom.height,
                                   bg=self.scale_theme.bg, highlightthickness=0)
         self.cv_scale.pack(anchor='w', pady=(6, 2))
         self._draw_scale_hint()
 
-        zrow = tk.Frame(prom, bg=UI_BG)
-        zrow.pack(fill='x', pady=(2, 0))
-        self._label(zrow, '刻度缩放', 9, UI_DIM).pack(side='left')
-        self.zoom_btns = {}
-        for ppf, text in SCALE_ZOOMS:
-            b = self._btn(zrow, text, lambda v=ppf: self.set_scale_zoom(v),
-                          hover=False, padx=7, pady=2)
-            b.pack(side='left', padx=3)
-            self.zoom_btns[ppf] = b
-        self._mark_zoom()
-        # 下一条 + 倒计时秒数。秒数要按当前倍速折算（2 倍速下 30 帧只有 0.5 秒，
-        # 子弹时间是恒定的 1/5），这一条 Canvas 里放不下，仍旧用 label 印。
-        self.lb_cue_next = self._label(prom, '', 11, ACCENT, True, anchor='w')
-        self.lb_cue_next.pack(fill='x')
+        # （「刻度缩放」那四个按钮 2026-10-11 删了：跨度固定 150 帧。）
+        # 本来这里还有三行「状态描述」——「刻度表固定盖 150 帧（= 5 费，指针在正中）」
+        # 「下一条 … 还差 N 帧」「轴文本 / 导入改在独立窗口里（按 T …）」。
+        # 2026-10-11 按用户要求（「状态描述全部删掉」）一起删了：刻度表自己就把
+        # 跨度、下一条、还差多少画出来了（指针 / 高亮行 / 指针下面的青柱），
+        # 再拿三行灰字复述一遍纯属占地方。
 
-        # ---- 轴文本输入：不想开文件就直接在这里写/粘，格式和 md 一样 ----
-        editor = tk.Frame(self.fr_more, bg=UI_BG)
-        editor.pack(fill='both', expand=True, **pad)
-        ehead = tk.Frame(editor, bg=UI_BG)
-        ehead.pack(fill='x')
-        self._label(ehead, '轴文本（帧号开头，格式同 md；Ctrl+Enter 应用）',
-                    10, UI_DIM).pack(side='left')
-        for text, cmd in (('清空输入框', self.clear_axis_text),
-                          ('保存为 md', self.save_axis_text),
-                          ('应用到提词器', self.apply_axis_text)):
-            self._btn(ehead, text, cmd).pack(side='right', padx=3)
-        # width 只是给窗口定「初始需要多宽」用的（Text 是 expand=True，实际宽度跟着窗口
-        # 走）。不写的话 Tk 默认按 80 字符算，光是它就能把窗口需求宽度顶到 1000+。
-        self.txt_axis = tk.Text(editor, height=7, width=40, bg=SUNKEN, fg=UI_FG, relief='flat',
-                                insertbackground=UI_FG, selectbackground=CARD_HI,
-                                font=(FONT_MONO, 10), wrap='word', undo=True)
-        self.txt_axis.pack(fill='both', expand=True, pady=(4, 0))
-        self.txt_axis.insert('1.0', AXIS_HINT)
-        # 在这两个键上返回 'break'，事件就不会继续冒泡到主窗口的快捷键
-        self.txt_axis.bind('<Escape>', self._axis_escape)
-        self.txt_axis.bind('<Control-Return>', self._axis_apply_key)
+        # （「回费速率」那一行 2026-10-11 按看板批注挪进收起态面板了，见 _build_ui
+        #   常驻②那一块 —— 展开区不再重复。）
 
-        # ---- 回费速率（减费 tag）：手动档，改完立刻生效并写回设置文件 ----
-        # 为什么不自动认：认错档会让绝对帧号整段漂移（差一档就是几百帧），而打轴器
-        # 要的正是绝对帧号。档位取值 = 「一费几个逻辑帧」，和倍速、画面帧率都无关。
-        rate_row = tk.Frame(self.fr_more, bg=UI_BG)
-        rate_row.pack(fill='x', **pad)
-        self._label(rate_row, '回费速率', 10).pack(side='left')
-        cur = (self.monitor.counter.frames_per_cost if self.monitor.counter is not None
-               else DEFAULT_FRAMES_PER_COST)
-        self.rate_var = tk.StringVar(value=_rate_label(cur))
-        self._rate_labels = {}
-        for v, desc in COST_RATE_PRESETS:
-            self._rate_labels['%.0f  %s' % (v, desc)] = v
-        items = list(self._rate_labels) + [RATE_CUSTOM_LABEL]
-        self.rate_menu = tk.OptionMenu(rate_row, self.rate_var, *items,
-                                       command=self._on_rate_pick)
-        self.rate_menu.config(bg=CARD_HI, fg=UI_FG, activebackground=CARD_HI,
-                              activeforeground=UI_FG, relief='flat', highlightthickness=0,
-                              font=(FONT_UI, 9), width=22, anchor='w',
-                              padx=4, pady=2)
-        # 下拉里的高亮 = 白底深字（同上：游戏 HUD 的选中一律反色）
-        self.rate_menu['menu'].config(bg=CARD, fg=UI_FG, activebackground=RULE,
-                                      activeforeground=UI_BG, relief='flat',
-                                      font=(FONT_UI, 9))
-        self.rate_menu.pack(side='left', padx=(6, 6))
-        self._label(rate_row, '自定义', 9, UI_DIM).pack(side='left')
-        self.en_rate = tk.Entry(rate_row, width=5, bg=SUNKEN, fg=UI_FG, relief='flat',
-                                insertbackground=UI_FG, justify='center',
-                                font=(FONT_MONO, 10))
-        self.en_rate.pack(side='left', padx=(4, 4))
-        self.en_rate.bind('<Return>', lambda _e: self.apply_rate_entry())
-        self._btn(rate_row, '应用', self.apply_rate_entry).pack(side='left', padx=3)
+        # （「局内负费」那一行 2026-10-11 按用户要求删掉了：它**一直开着** ——
+        #   费用数字左边出现减号就按一费 60 逻辑帧算（见 features.read_sign）。
+        #   以前那个 auto / on / off 下拉框是给「认不出减号」时救计数用的，现在只保留命令行
+        #   --negative（高级用法）；界面上不再有这个开关。
+        #   「认得对不对」仍然看得到：下面「费用周期」那行里的「减号 run/thr」。
 
-        # ---- 局内负费（费用条上出现减号）：一费 30 -> 60 逻辑帧 ----
-        # 默认「自动」= 按画面判（费用数字左边那条纯白横杠，见 features.read_sign）。
-        # 认不出来时能强制开 / 关，把计数救回来 —— 那个扫描框是照抄前人的
-        # （geometry.sign_rect），还没拿真录像钉过，所以下面「费用周期」那行会摆一个
-        # 「减号 run/thr」：run 是框里实测最长的纯白横杠，离 thr 差多少一眼就看得出
-        # （正常画面 run 应当明显小于 thr，见 docs 第 31 节）。
-        neg_row = tk.Frame(self.fr_more, bg=UI_BG)
-        neg_row.pack(fill='x', **pad)
-        self._label(neg_row, '局内负费', 10).pack(side='left')
-        self.neg_var = tk.StringVar(value=NEGATIVE_LABELS[self.negative_mode])
-        self.neg_menu = tk.OptionMenu(
-            neg_row, self.neg_var, *[NEGATIVE_LABELS[m] for m in NEGATIVE_MODES],
-            command=self._on_negative_pick)
-        self.neg_menu.config(bg=CARD_HI, fg=UI_FG, activebackground=CARD_HI,
-                             activeforeground=UI_FG, relief='flat', highlightthickness=0,
-                             font=(FONT_UI, 9), width=26, anchor='w', padx=4, pady=2)
-        self.neg_menu['menu'].config(bg=CARD, fg=UI_FG, activebackground=RULE,
-                                     activeforeground=UI_BG, relief='flat',
-                                     font=(FONT_UI, 9))
-        self.neg_menu.pack(side='left', padx=(6, 6))
-        self._label(neg_row, '负费时每逻辑帧只攒一半', 9, UI_DIM).pack(side='left')
+        # ---- 展开区最下面：手动校准（一个按钮，开二级窗口）----
+        # 用户 2026-10-11：
+        #     「诊断删掉，保存校准恢复默认删掉，改成手动校准，把手动校准的二级窗口图给我看」
+        # 原来这里挤着 5 个控件、两行按钮 —— 诊断/预览（二级折叠）+ 保存校准 / 恢复默认 /
+        # ROI 框 / 换窗口 + ROI 校准模式。全是「装好一次、换分辨率才再碰」的东西，
+        # 现在一起收进 open_calib_dialog() 那个二级窗口，面板上只留这一个入口。
+        # 这一块单独一个 Frame：展开时留在面板**最末尾**（默认 pack 就是追加），
+        # 打轴器则在 fr_more_top 里、展开时插到大数字上面 —— 见 _pack_more。
+        self.fr_more = tk.Frame(self.root, bg=UI_BG)
 
-        # ---- 诊断：费用周期 / 性能 / 当前输入，以及三个 ROI 的实时预览 ----
-        # 这三张预览是**调 ROI 用的**（红框 = 特征真正在取样的那条带），平时不用看，
-        # 所以跟着展开区一起收起来。
-        diag = tk.Frame(self.fr_more, bg=UI_BG)
-        diag.pack(fill='x', **pad)
-        self.lb_cycle = self._label(diag, '费用周期 —', 10, anchor='w', justify='left')
-        self.lb_cycle.grid(row=0, column=0, sticky='w')
-        self.lb_perf = self._label(diag, '性能 —', 9, UI_DIM, anchor='w', justify='left')
-        self.lb_perf.grid(row=1, column=0, sticky='w', pady=(4, 0))
-        self.lb_source = self._label(diag, '', 9, UI_DIM, anchor='w', justify='left')
-        self.lb_source.grid(row=2, column=0, sticky='w', pady=(2, 0))
-
-        prev = tk.Frame(self.fr_more, bg=UI_BG)
-        prev.pack(fill='x', **pad)
-        self.cv_bar = tk.Canvas(prev, width=704, height=46, bg=SUNKEN, highlightthickness=0)
-        self.cv_bar.pack(fill='x')
-
-        # ---- 展开区最下面那行：不常用但必要时得有 ----
         btns = tk.Frame(self.fr_more, bg=UI_BG)
         btns.pack(fill='x', **pad)
-        for text, cmd in (('保存校准', self.save_calib),
-                          ('恢复默认', self.reset_calib),
-                          ('ROI 框 (K)', self.toggle_overlay),
-                          ('换窗口', self.pick_window)):
-            self._btn(btns, text, cmd).pack(side='left', padx=3)
-        self.lb_help = self._label(
-            self.fr_more,
-            'Tab 切 ROI ｜ 方向键移动 / Shift 缩放 ｜ K ROI 框 ｜ S 保存 ｜ R 默认 ｜ C 清零 ｜ '
-            'L 记录 CSV ｜ P 暂停计数 ｜ T 导入轴 ｜ F5 重新校准 ｜ 输入框里可直接写轴（Ctrl+Enter 应用）',
-            9, FAINT, wraplength=694, justify='left')
-        self.lb_help.pack(fill='x', padx=10, pady=(4, 10))
+        self.btn_calib = self._btn(btns, '手动校准…', self.open_calib_dialog)
+        self.btn_calib.pack(side='left')
+
+        # 下面这几行读数（费用条 / 暂停键 / 费用周期 / 性能 / 当前输入）**留着控件、
+        # 不铺出来**：它们是查漏帧时唯一能看的原始证据，而用户要的是「面板上不要」。
+        # 挂在 fr_diag 里 —— 这个 Frame 从头到尾**不 pack**，_tick_body 照旧往里写，
+        # 界面上一格都不占。要真删得连同 _tick_body 里那十来处引用一起清，风险不值当。
+        self.fr_diag = tk.Frame(self.fr_more, bg=UI_BG)
+        diag = tk.Frame(self.fr_diag, bg=UI_BG)
+        diag.pack(fill='x', **pad)
+        # 这两行是从**常驻区**搬下来的（看板批注：主体只留帧数和时间）：
+        #   费用条 fill/状态/通道/本费 —— 判断「这一拍读的是哪条通道」用
+        #   暂停键 + 倍速 + 子弹 + conf/digit/glyph/ratio —— 判断「按钮认没认对」用
+        self.lb_bar = self._label(diag, '费用条 —', 10, anchor='w', justify='left')
+        self.lb_bar.grid(row=0, column=0, sticky='w')
+        self.lb_pause = self._label(diag, '暂停键 —', 10, UI_DIM, anchor='w',
+                                    justify='left')
+        self.lb_pause.grid(row=1, column=0, sticky='w', pady=(2, 0))
+        self.lb_cycle = self._label(diag, '费用周期 —', 10, anchor='w', justify='left')
+        self.lb_cycle.grid(row=2, column=0, sticky='w', pady=(4, 0))
+        self.lb_perf = self._label(diag, '性能 —', 9, UI_DIM, anchor='w', justify='left')
+        self.lb_perf.grid(row=3, column=0, sticky='w', pady=(4, 0))
+        self.lb_source = self._label(diag, '', 9, UI_DIM, anchor='w', justify='left')
+        self.lb_source.grid(row=4, column=0, sticky='w', pady=(2, 0))
+
+        # （「帮助行」那两行快捷键提示 2026-10-11 按用户要求删了 ——「快捷键全部删掉」。
+        #   键本身还在（见 _base_keys），只是不再印在面板上。）
 
         if self._more:                       # 默认收起：展开区先不 pack
-            self.fr_more.pack(fill='both', expand=True)
+            self._pack_more()
 
     def _guard(self, handler):
         """给快捷键加一层「输入框保护」。
@@ -1075,22 +1272,267 @@ class MonitorApp:
             return handler(event)
         return wrapped
 
+    def _on_escape(self):
+        """Esc = 收起展开区（2026-10-10 照用户确认的示意图改）。
+
+        以前 Esc 直接退程序 —— 用 P / K / T 的时候手滑一下就整个面板没了。
+        退出改成 Ctrl+Q（或右上角那个 ×）。
+        """
+        if self._calib:
+            self.close_calib_dialog()          # 窗口开着就先把窗口收掉（顺手退微调）
+            return
+        if self._more:
+            self.toggle_more()
+            return
+        self._set_note('已经收起了；点右上角 ▸ 展开，退出点 ×')
+
+    def _redraw_scale(self, flash: bool = False):
+        """按当前「回看偏移」重画刻度表（换缩放 / 翻条 / 换轴都走这里）。"""
+        if self._prom_state is None:
+            return
+        frame_f, cues, done = self._prom_state
+        shift = self._prom_shift
+        self._draw_scale(build_scale(frame_f - shift, cues, done, self.scale_geom,
+                                     now=frame_f), flash)
+
+    def _prom_scroll(self, direction: int, step_frames: float = 30.0):
+        """↑ ↓ 翻条：把刻度表往回 / 往前拨 30 帧（1 费 = 1 秒 = 30 帧）。
+
+        回看时指针那行印「回看」，真正的「现在」由刻度表另画一条灰线标出来
+        （见 scale_render.render）—— 只动「画哪一段」，**不碰任何计数**。
+        """
+        if self.prompter.timeline is None:
+            self._set_note('先导入 / 写一份轴，翻条才有东西可翻')
+            return
+        before = self._prom_shift
+        self._prom_shift = max(0.0, min(600.0, before + direction * step_frames))
+        self._redraw_scale()
+        if abs(self._prom_shift - before) < 1e-9:
+            self._set_note('已经在最前面了（回看 %d 帧）' % int(self._prom_shift))
+        elif self._prom_shift == 0:
+            self._set_note('回到「现在」')
+        else:
+            self._set_note('回看 %d 帧之前（↓ 回到现在）' % int(self._prom_shift))
+
+    def _set_calib_mode(self, on: bool) -> None:
+        """进出「微调 ROI」状态：只有这时才吃 Tab / 方向键 / Shift+方向键 / S / R / K。
+
+        为什么要有这个状态：那几个键原来绑在全局 —— 想按 Tab 跳控件、想按方向键翻条
+        都会被它吃掉，误按一下 ROI 就偏了，而偏几个像素读数就全错。
+
+        2026-10-11 起这个状态和「手动校准」窗口绑在一起：「手动校准…」那个按钮
+        （以及窗口里的微调键）是唯一入口，窗口一关就还原 —— 以前是一个常驻的
+        「ROI 校准模式 ▸」开关，用户要的是「改成手动校准」。
+        """
+        if self._calib == on:
+            return
+        self._calib = on
+        self._bind_keys()
+        if on:
+            self._set_note('微调 ROI：目标「%s」—— 用窗口里的按钮挪'
+                           % ROI_LABELS.get(self.target, self.target), hold=0.0)
+            if self.overlay is None:
+                self.toggle_overlay()          # 进微调就把屏幕上的框亮出来
+        else:
+            if self.overlay is not None:
+                self.toggle_overlay()
+            self._set_note('已退出微调')
+        if self._more:
+            self._refit()
+
+    # ---------------- 手动校准（二级窗口） ----------------
+
+    def open_calib_dialog(self):
+        """手动校准：选 ROI / 微调 / 看预览 / 保存 / 恢复默认 / 换窗口。
+
+        为什么收进一个独立窗口（用户 2026-10-11：「改成手动校准，把手动校准的二级
+        窗口图给我看」）：这几样都是「装好一次、换了分辨率才再碰」的东西，常驻在
+        展开区里就是两行按钮白占地方。窗口是**无模式**的（不 grab）—— 对着游戏画面
+        挪 ROI 的时候得能同时看见游戏。
+        """
+        if self._calib_win is not None:
+            self._calib_win.deiconify()
+            self._calib_win.lift()
+            return
+        top = tk.Toplevel(self.root)
+        self._calib_win = top
+        top.title('手动校准')
+        top.configure(bg=UI_BG)
+        top.attributes('-topmost', True)
+        top.resizable(False, False)
+        top.protocol('WM_DELETE_WINDOW', self.close_calib_dialog)
+
+        head = tk.Frame(top, bg=UI_BG)
+        head.pack(fill='x')
+        self._label(head, '◆ 手动校准', 10, UI_DIM).pack(side='left', padx=(12, 0),
+                                                       pady=(7, 5))
+        self._btn(head, '×', self.close_calib_dialog, padx=10, pady=1).pack(
+            side='right', padx=(2, 9), pady=(5, 5))
+        self._sep(top)
+
+        # ---- 目标：三个 ROI 谁在调（当前那个反色）----
+        row = tk.Frame(top, bg=UI_BG)
+        row.pack(fill='x', padx=10, pady=(9, 0))
+        self._label(row, '目标', 10).pack(side='left', padx=(0, 6))
+        self.calib_tgt_btns = {}
+        for name in ROI_ORDER:
+            b = self._btn(row, ROI_LABELS[name], None, hover=False)
+            b.configure(command=lambda n=name: self.set_target(n))
+            b.pack(side='left', padx=3)
+            self.calib_tgt_btns[name] = b
+
+        # ---- 预览：真正取特征的那条带用红框标出来 ----
+        prev = tk.Frame(top, bg=UI_BG)
+        prev.pack(fill='x', padx=10, pady=(9, 0))
+        self.cv_bar = tk.Canvas(prev, width=430, height=64, bg=SUNKEN,
+                                highlightthickness=0)
+        self.cv_bar.pack(fill='x')
+        self.lb_calib_pos = self._label(prev, '', 9, UI_DIM, anchor='w', justify='left')
+        self.lb_calib_pos.pack(fill='x', pady=(4, 0))
+
+        # ---- 微调：四个方向键 + 步长 ----
+        pad2 = tk.Frame(top, bg=UI_BG)
+        pad2.pack(fill='x', padx=10, pady=(9, 0))
+        self._label(pad2, '微调', 10).pack(side='left', padx=(0, 6))
+        for text, dx, dy in (('←', -1, 0), ('↑', 0, -1), ('↓', 0, 1), ('→', 1, 0)):
+            b = self._btn(pad2, text, None, padx=11, pady=1)
+            b.configure(command=lambda a=dx, c=dy: self.nudge(a, c))
+            b.pack(side='left', padx=2)
+        self._label(pad2, '步长', 9, UI_DIM).pack(side='left', padx=(12, 4))
+        self.calib_step_btns = {}
+        for step in (1, 5, 10):
+            b = self._btn(pad2, '%dpx' % step, None, hover=False, padx=6)
+            b.configure(command=lambda v=step: self.set_step(v))
+            b.pack(side='left', padx=2)
+            self.calib_step_btns[step] = b
+
+        # ---- 动作 ----
+        acts = tk.Frame(top, bg=UI_BG)
+        acts.pack(fill='x', padx=10, pady=(10, 8))
+        for text, cmd in (('ROI 框', self.toggle_overlay),
+                          ('保存校准', self.save_calib),
+                          ('恢复默认', self.reset_calib),
+                          ('重新选窗口…', self.pick_window)):
+            self._btn(acts, text, cmd).pack(side='left', padx=3)
+
+        self._set_calib_mode(True)
+        self._sync_calib_buttons()
+        self._sync_calib_pos()
+        top.update_idletasks()
+        w, h = top.winfo_reqwidth(), top.winfo_reqheight()
+        # 摆在主面板右边；右边装不下就摆左边。竖直方向跟着主面板走。
+        scr_w, scr_h = top.winfo_screenwidth(), top.winfo_screenheight()
+        x = self.root.winfo_x() + self.root.winfo_width() + 14
+        if x + w > scr_w - 8:
+            x = max(8, self.root.winfo_x() - w - 14)
+        y = min(max(8, self.root.winfo_y()), max(8, scr_h - h - 70))
+        top.geometry('%dx%d+%d+%d' % (w, h, x, y))
+
+    def close_calib_dialog(self):
+        """关掉手动校准窗口：顺手退微调、收掉屏幕上的 ROI 框。"""
+        if self._calib_win is None:
+            return
+        self._calib_win.destroy()
+        self._calib_win = None
+        self.cv_bar = None
+        # 位置读数那个 Label 跟着窗口一起没了 —— 缓存也得扔掉，否则下次开窗口
+        # 时文本没变，_set_text 会以为「不用写」，新 Label 就空着（实测过一次）。
+        self._memo.pop('calib_pos', None)
+        self.calib_tgt_btns = {}
+        self.calib_step_btns = {}
+        self._set_calib_mode(False)
+        self._refit()
+
+    def set_target(self, name: str) -> None:
+        """切换正在微调的 ROI（= 原来 Tab 键那件事，改成按按钮）。"""
+        if name not in ROI_ORDER:
+            return
+        self.target = name
+        self._sync_calib_buttons()
+        self._sync_calib_pos()
+
+    def set_step(self, step: int) -> None:
+        self.calib_step = int(step)
+        self._sync_calib_buttons()
+
+    def nudge(self, dx: int, dy: int) -> None:
+        """微调一下当前 ROI：挪 (dx, dy) x 步长。"""
+        d = self.deltas[self.target]
+        d[0] += dx * self.calib_step
+        d[1] += dy * self.calib_step
+        self._apply_deltas()
+        self._sync_calib_pos()
+
+    def _sync_calib_buttons(self) -> None:
+        """目标 / 步长按钮的选中态（白底深字 = 当前）。只在切换时调，不要每拍调。"""
+        for name, b in getattr(self, 'calib_tgt_btns', {}).items():
+            if name == self.target:
+                b.configure(bg=RULE, fg=UI_BG)
+            else:
+                b.configure(bg=CARD_HI, fg=UI_FG)
+        for step, b in getattr(self, 'calib_step_btns', {}).items():
+            if step == self.calib_step:
+                b.configure(bg=RULE, fg=UI_BG)
+            else:
+                b.configure(bg=CARD_HI, fg=UI_FG)
+
+    def _sync_calib_pos(self) -> None:
+        """把当前 ROI 的位置 / 大小刷到窗口上（每拍调，靠 _set_text 的缓存省开销）。"""
+        if self._calib_win is None:
+            return
+        lay = self.monitor.layout
+        roi = getattr(lay, self.target, None) if lay is not None else None
+        if roi is None:
+            self._set_text('calib_pos', self.lb_calib_pos, '还没读到画面，ROI 未知')
+        else:
+            self._set_text('calib_pos', self.lb_calib_pos,
+                           '%s   x=%d  y=%d   %dx%d' % (ROI_LABELS[self.target],
+                                                        roi.x, roi.y, roi.w, roi.h))
+
+    # 校准模式才吃的键。列在这里是为了「退出模式时把它们 unbind 掉」——
+    # 以前 Tab / 方向键是全局绑定的（见 toggle_calib_mode 的说明）。
+    CALIB_SEQS = ('<Tab>', '<Left>', '<Right>', '<Up>', '<Down>',
+                  '<Shift-Left>', '<Shift-Right>', '<Shift-Up>', '<Shift-Down>',
+                  's', 'S', 'r', 'R', 'k', 'K')
+
+    def _base_keys(self):
+        """常驻快捷键（不分模式）。"""
+        return (('<space>', self._primary_action),
+                ('<Escape>', self._on_escape),
+                ('<Control-q>', self.quit),
+                ('p', self.toggle_manual_pause), ('P', self.toggle_manual_pause),
+                ('c', self.clear_count), ('C', self.clear_count),
+                ('t', self.import_timeline), ('T', self.import_timeline),
+                ('<Control-r>', self.reload_timeline),
+                ('<F5>', self.recalibrate),
+                # ↑↓ 默认翻条；进了校准模式会被 _nudge 盖掉（见 _bind_keys）
+                ('<Up>', lambda: self._prom_scroll(1)),
+                ('<Down>', lambda: self._prom_scroll(-1)))
+
+    def _calib_keys(self):
+        """校准模式里额外接管的键。"""
+        return (('<Tab>', self._cycle_target),
+                ('s', self.save_calib), ('S', self.save_calib),
+                ('r', self.reset_calib), ('R', self.reset_calib),
+                ('k', self.toggle_overlay), ('K', self.toggle_overlay))
+
     def _bind_keys(self):
+        """按当前是不是校准模式，铺一遍快捷键。
+
+        每次切换都整份重铺（先 unbind 掉 CALIB_SEQS，再按模式绑）—— 这样「退出模式」
+        一定会把 Tab / 方向键还给系统、还给翻条，不会留下半套绑定。
+        """
         r = self.root
-        for seq, fn in (('<Tab>', self._cycle_target),
-                        ('<Escape>', self.quit),
-                        ('k', self.toggle_overlay), ('K', self.toggle_overlay),
-                        ('s', self.save_calib), ('S', self.save_calib),
-                        ('r', self.reset_calib), ('R', self.reset_calib),
-                        ('c', self.clear_count), ('C', self.clear_count),
-                        ('l', self.toggle_csv), ('L', self.toggle_csv),
-                        ('p', self.toggle_manual_pause), ('P', self.toggle_manual_pause),
-                        ('<F5>', self.recalibrate),
-                        ('t', self.import_timeline), ('T', self.import_timeline)):
+        for seq in self.CALIB_SEQS:
+            r.unbind(seq)
+        for seq, fn in self._base_keys():
             r.bind(seq, self._guard(lambda _e, f=fn: f()))
-        for seq in ('<Left>', '<Right>', '<Up>', '<Down>',
-                    '<Shift-Left>', '<Shift-Right>', '<Shift-Up>', '<Shift-Down>'):
-            r.bind(seq, self._guard(self._nudge))
+        if self._calib:
+            for seq, fn in self._calib_keys():
+                r.bind(seq, self._guard(lambda _e, f=fn: f()))
+            for seq in ('<Left>', '<Right>', '<Up>', '<Down>',
+                        '<Shift-Left>', '<Shift-Right>', '<Shift-Up>', '<Shift-Down>'):
+                r.bind(seq, self._guard(self._nudge))
 
     # ---------------- 校准 ----------------
 
@@ -1131,7 +1573,7 @@ class MonitorApp:
             self.target = order[0]
         else:
             self.target = order[(order.index(self.target) + 1) % len(order)]
-        self._set_note('当前校准目标：%s' % self.target)
+        self._set_note('当前校准目标：%s' % ROI_LABELS.get(self.target, self.target))
 
     def _apply_deltas(self):
         base = self._base_layout()
@@ -1253,22 +1695,78 @@ class MonitorApp:
     # ---------------- 动作 ----------------
 
     def clear_count(self):
-        """清零：数字立刻归 0，不管采样有没有在跑。
+        """清零（C）：停采样 + 数字归零 + 主按钮回到「开始计数」。
 
-        为什么还要自己按一次 0：`monitor.reset()` 之后，面板是靠下一拍采样读出的读数
-        来刷新大数字的 —— 而「读窗口校准完还没点开始计数 / 已经点了停止计数 / 录像暂停」
-        这三种情况根本没有下一拍，数字就一直挂着清零前的值（用户报的「清零要等开始计数
-        才生效、暂停期间没用」）。计数器那边其实已经归零了，这里只是把面板的显示跟上。
+        看板批注：「点清零后变成开始」。所以清零不只是把数字按回 0 —— 它还**停止
+        计数**、并把手动暂停一起收掉，把那三态拉回第一态。打轴的流程就是
+        「清零 -> 开始」。
+
+        为什么还要自己把面板上的数字按回 0：`monitor.reset()` 之后，面板是靠下一拍
+        采样读出的读数来刷新大数字的 —— 而「校准完还没点开始 / 已经点了停止 / 录像
+        暂停」这几种情况根本没有下一拍，数字就挂着清零前的值（用户报的「清零要等
+        开始计数才生效、暂停期间没用」）。计数器那边其实已经归零了，这里只是把面板的
+        显示跟上。
         """
+        if self.monitor.alive:
+            self.monitor.stop()
+        self._counting_started = False
+        self.monitor.set_manual_pause(False)
         self.monitor.reset()
         self._show_zero()
-        self._set_note('已清零')
+        self._sync_ctrl_row()
+        self._set_note('已清零（计数已停，按「开始计数」接着数）')
+
+    def _set_text(self, key: str, label, text: str, fg=None) -> None:
+        """写一个 Label，但**内容没变就一个 Tk 调用都不发**。
+
+        为什么要单独一个函数：面板每 8ms 刷一拍，一拍拍下去原本要发十几二十次
+        configure。Tk 每一次 configure 都要过一次 Tcl 解释器再触发布局计算 ——
+        实测（cProfile，本机 150% DPI）200 拍里 2321 次 configure 占了 1.95s，
+        是整拍耗时里最大的一块。文本没变就跳过之后，这一块直接归零。
+
+        key 由调用方自己起：**同一个 Label 的每一处写入都必须走这里**，否则缓存
+        会和界面对不上（现在这些 Label 都只有一两处写入，见各自的调用点）。
+        """
+        want = (text, fg)
+        if self._memo.get(key) == want:
+            return
+        self._memo[key] = want
+        if fg is None:
+            label.configure(text=text)
+        else:
+            label.configure(text=text, fg=fg)
+
+    def _set_warn(self, text: str, color=WARN) -> None:
+        """写告警行。**空文本就把这一行整个收起来**（看板批注要「尽量缩小」）。
+
+        为什么非要收：这一行平时是空的，但一个空 Label 照样占着字高（实测 30px，
+        加上这一行的上下 8px = 收起态高度的 10%）。真有告警（采样停了 / 校准没把握）
+        时再放出来 —— 那种事必须一眼看得见，占一条是值得的。
+
+        收起来要顺手把窗口也收回原高：`_fit_window` 只长不缩（怕文字忽长忽短时抖），
+        不主动重算的话告警消失后会剩一条 38px 的空档。只在「有 -> 无」这一下重算，
+        而且 0.25s 内最多一次 —— 告警在一秒里反复闪时不至于每 8ms 量一遍布局。
+        """
+        if text:
+            self._set_text('warn', self.lb_warn, text, color)
+            if not self.fr_warn.winfo_manager():
+                # before=fr_ctrl：pack 是**追加**到顺序末尾的，不指定锚点的话
+                # 这条告警会跑到控制行和提示行下面去。
+                self.fr_warn.pack(fill='x', padx=10, pady=4, before=self.fr_ctrl)
+            return
+        self._set_text('warn', self.lb_warn, '', color)
+        if self.fr_warn.winfo_manager():
+            self.fr_warn.pack_forget()
+            now = time.perf_counter()
+            if now - self._warn_at >= 0.25:
+                self._warn_at = now
+                self._refit()
 
     def _show_zero(self):
         """立刻把大数字 / 时间按回 0（不等下一拍采样）。"""
-        self.lb_frames.configure(text='0')
+        self._set_text('frames', self.lb_frames, '0')
         self._sync_rule()
-        self.lb_time.configure(text='游戏内时间 00:00.00')
+        self._set_text('time', self.lb_time, '时间 00:00.00')
 
     def toggle_manual_pause(self):
         """手动「暂停计数」：数字按住不动，方便对着游戏/录像逐段核对。
@@ -1279,10 +1777,9 @@ class MonitorApp:
         开关只管计数，不管特征提取。
         """
         on = self.monitor.toggle_manual_pause()
-        self.btn_manual.configure(text='继续计数 (P)' if on else '暂停计数 (P)',
-                                  fg=WARN if on else UI_FG)
-        self._set_note('已暂停计数（手动）：数字按住不动，再按 P 继续'
-                       if on else '已收开关：继续计数（重新起锚）')
+        self._sync_ctrl_row()          # 主按钮的字跟着三态走（开始 / 暂停 / 继续）
+        self._set_note('已暂停：数字按住不动，再点「继续」接着数'
+                       if on else '继续计数（重新起锚，停的那段不补）')
 
     def _on_rate_pick(self, label):
         """下拉框选中某一项。选「自定义」不切档，只把光标丢进输入框。"""
@@ -1315,25 +1812,6 @@ class MonitorApp:
             return
         self.apply_cost_rate(v)
 
-    def _on_negative_pick(self, label):
-        self.apply_negative(_NEG_BY_LABEL.get(label, 'auto'))
-
-    def apply_negative(self, mode):
-        """切「局内负费」档：立刻生效（相位不断）+ 写回设置文件。
-
-        换档不重新起锚：负费的进场 / 离场在游戏里就是「累加器接着走、只换速度」，
-        重新起锚反而会在那一帧丢掉 / 多记一帧（见 Counter._boundary_correction）。
-        """
-        mode = self.monitor.set_negative_mode(mode)
-        self.negative_mode = mode
-        self.neg_var.set(NEGATIVE_LABELS[mode])
-        note = '局内负费 = %s' % NEGATIVE_LABELS[mode]
-        try:
-            save_negative_mode(self.settings_path, mode)
-            self._set_note('%s，已存到 %s' % (note, os.path.abspath(self.settings_path)))
-        except OSError as exc:
-            self._set_note('%s，但存盘失败：%s' % (note, exc))
-
     def apply_cost_rate(self, value):
         """切到某个回费速率：立刻生效（已数的像素帧按比例换算）+ 写回设置文件。"""
         v = clamp_frames_per_cost(value)
@@ -1346,16 +1824,6 @@ class MonitorApp:
             self._set_note('%s，已存到 %s' % (note, os.path.abspath(self.settings_path)))
         except OSError as exc:
             self._set_note('%s，但存盘失败：%s' % (note, exc))
-
-    def toggle_csv(self):
-        if self.monitor._csv_path:
-            path = self.monitor._csv_path
-            self.monitor.set_csv_path(None)
-            self._set_note('已停止记录：%s' % path)
-        else:
-            path = os.path.join('out', 'live_%s.csv' % time.strftime('%m%d_%H%M%S'))
-            self.monitor.set_csv_path(path)
-            self._set_note('开始记录到 %s' % os.path.abspath(path))
 
     def pick_window(self):
         """「换窗口」：换实时链路读的那个窗口（不改帧来源）。
@@ -1421,14 +1889,14 @@ class MonitorApp:
             self._window_src = None
         self._release_pin()
         self._window_win = None
-        self._window_started = False
         self.fr_window.pack_forget()
         self.monitor = self.live_monitor
         self._src_kind = 'live'
         self._load_calib()                        # 实时的 ROI 微调在 layout_calib.json 里
         self._apply_deltas()
         self.monitor.start(reset_clock=False)
-        self.lb_source.configure(text='实时（游戏窗口）', fg=UI_DIM)
+        self._counting_started = self.monitor.alive
+        self.lb_source.configure(text='自动校准（实时游戏窗口）', fg=UI_DIM)
         self._set_note('已切回实时输入')
 
     # ---------------- 读窗口 ----------------
@@ -1466,6 +1934,7 @@ class MonitorApp:
             on_pick(win)
 
         lb.bind('<Double-Button-1>', choose)
+        top.bind('<Escape>', lambda _e: top.destroy())
         self._btn(top, '选这个窗口', choose, font=(FONT_UI, 10)).pack(pady=(0, 8))
 
     def read_window(self):
@@ -1541,7 +2010,8 @@ class MonitorApp:
             return False
         stage, frac, note = self._window_stage
         pct = '' if frac < 0 else ' %.0f%%' % (frac * 100.0)
-        self.lb_perf.configure(text='%s%s  %s' % (WINDOW_STAGES.get(stage, stage), pct,
+        self._set_text('perf', self.lb_perf,
+                       '%s%s  %s' % (WINDOW_STAGES.get(stage, stage), pct,
                                                  note or '…'), fg=UI_DIM)
         self._set_note(note or '正在校准窗口…', hold=0.0)
         # 看门狗在这段时间不能计时：否则校准一完就会被「之前停了 8 秒」立刻报一次
@@ -1558,7 +2028,6 @@ class MonitorApp:
         same = self._window_win is not None and self._window_win.hwnd == win.hwnd
         was_running = bool(same and self.monitor.alive)
         old = self.monitor
-        csv_path = getattr(old, '_csv_path', None)
         rate = getattr(old, 'cost_rate', DEFAULT_FRAMES_PER_COST)
         neg = parse_negative(getattr(old, 'negative_mode', 'auto'))
         paused = bool(getattr(old, 'manual_pause', False))
@@ -1582,7 +2051,7 @@ class MonitorApp:
             self.live_monitor = old             # 实时那条链路留着，等「切回实时」
 
         mon = WindowMonitor(win, source=src, layout=src.auto_layout,
-                            templates=self.templates, csv_path=csv_path, cost_rate=rate,
+                            templates=self.templates, cost_rate=rate,
                             negative=neg)
         mon.set_manual_pause(paused)            # 「暂停计数」是跨来源的开关，别被切没了
         if old_counter is not None:
@@ -1603,9 +2072,9 @@ class MonitorApp:
         self.calib_scale = None
         self.fr_window.pack(fill='x')
         self.lb_source.configure(
-            text='窗口 %s ｜ 客户区 %dx%d ｜ %s'
+            text='手动校准：窗口 %s ｜ 客户区 %dx%d ｜ %s'
                  % (win.exe, win.client[2], win.client[3],
-                    '手动框选' if src.manual else '自动校准'), fg=UI_FG)
+                    '自己框的' if src.manual else '自动试出来的'), fg=UI_FG)
         hint = [note or src.describe()]
         if not src.verified and not src.manual:
             hint.append('⚠ 自动校准没把握 → 点「框选费用条」手动圈一下费用条')
@@ -1618,26 +2087,35 @@ class MonitorApp:
         self._window_hint_base = '\n'.join(hint)
         self._pin_noted = ''
         self._refresh_window_hint()
-        self._window_started = mon.alive
+        self._counting_started = mon.alive
         self._update_start_btn()
         self._sync_pin_btn()
         self._last_ticks = mon.stats.ticks
         self._stall_since = 0.0
         self._set_note('窗口已校准：%s' % hint[0], hold=4.0)
 
-    def toggle_window_count(self):
-        """「开始计数」/「停止计数」：窗口模式下采样线程由用户点这一下才起。"""
-        if self._src_kind != 'window':
-            self._set_note('「开始计数」是窗口模式的按钮（实时模式一直在数）')
-            return
+    def toggle_count(self):
+        """「开始计数」/「停止计数」（主按钮 / 空格）：采样线程由这一下控制。
+
+        两条链路都走这里。实时链路原来没有「停」的地方（run_monitor 一进来就 start），
+        2026-10-10 照用户确认的示意图打通：停下来是真的把采样线程停掉（省 CPU、
+        也不再读屏幕），再点就重新起来。
+
+        停止期间画面照样在动，所以**恢复时必须重新起锚**（resync）—— 否则那一段
+        没读到的条会被当成「条走了这么多帧」一次性补进计数里，而用户刚说的是别数了。
+        已经数出来的帧数一直保留（要归零请按 C）。
+        """
         mon = self.monitor
         if mon.alive:
             mon.stop()
-            self._set_note('已停止计数：数出来的帧数保留，再点「开始计数」接着数')
+            self._set_note('已停止计数：已经数出来的帧数保留，再点「开始计数」接着数')
         else:
+            # reset_clock=True：停止这一段挂钟不算进来（t 从头来，dt<=0 只当一拍）。
             mon.start()
-            self._set_note('开始计数')
-        self._window_started = mon.alive
+            if mon.counter is not None:
+                mon.counter.resync()
+            self._set_note('开始计数（重新起锚，停止期间那段不补）')
+        self._counting_started = mon.alive
         self._last_ticks = mon.stats.ticks
         self._stall_since = 0.0
         self._update_start_btn()
@@ -1890,11 +2368,97 @@ class MonitorApp:
         if self.prompter.timeline is not None:
             self.apply_axis_text()
             return
-        self._set_note('还没有轴：按 T 导入 md，或直接在下面的输入框里写')
+        self._set_note('还没有轴：点「导入轴…」打开窗口，导入 md 或直接写')
+
+    def open_axis_dialog(self):
+        """「导入轴…（T）」：弹一个**独立小窗**（看板批注第 6 条）。
+
+        看板原话：「展开后加一个导入按钮 / 点击后打开新窗口，新窗口实现拖入 md 文件
+        和直接输入轴」。以前是一个常驻在展开区里的大文本框，把打轴器挤成半屏、而它
+        大部分时间是空的；挪进窗口之后展开区第一屏就只剩打轴器。
+
+        「拖进来」要 tkinterdnd2（可选依赖，见文件顶 _HAS_DND）：装了就能把 md 拖
+        进文本框；没装就点「选择 md 文件…」，其余功能一模一样。
+        """
+        if self._axis_win is not None:                 # 已经开着：抬到前面就行
+            self._axis_win.deiconify()
+            self._axis_win.lift()
+            self._axis_win.focus_force()
+            return
+        top = tk.Toplevel(self.root)
+        self._axis_win = top
+        top.title('导入 / 编辑轴')
+        top.configure(bg=UI_BG)
+        # 面板自己是置顶的，这个窗也得置顶，否则一开就被面板压住看不见。
+        top.attributes('-topmost', True)
+        top.geometry('+%d+%d' % (self.root.winfo_rootx() + 30,
+                                 self.root.winfo_rooty() + 70))
+        pad = dict(padx=10, pady=6)
+
+        if _HAS_DND:
+            hint = '把 md 轴文件拖进来，或在这里直接写（帧号开头，格式和 md 一样）'
+        else:
+            hint = ('点「选择 md 文件…」，或在这里直接写（帧号开头，格式和 md 一样）'
+                    '　｜　想支持把文件拖进来：pip install tkinterdnd2')
+        self._label(top, hint, 9, FAINT, anchor='w', justify='left').pack(fill='x', **pad)
+
+        row = tk.Frame(top, bg=UI_BG)
+        row.pack(fill='x', **pad)
+        for text, cmd in (('选择 md 文件…', self.import_timeline),
+                          ('清空', self.clear_axis_text),
+                          ('保存为 md', self.save_axis_text),
+                          ('应用到提词器', self.apply_axis_text)):
+            self._btn(row, text, cmd).pack(side='left', padx=3)
+
+        self.txt_axis = tk.Text(top, height=14, width=54, bg=SUNKEN, fg=UI_FG,
+                                relief='flat', insertbackground=UI_FG,
+                                selectbackground=CARD_HI, font=(FONT_MONO, 10),
+                                wrap='word', undo=True)
+        self.txt_axis.pack(fill='both', expand=True, **pad)
+        self.txt_axis.insert('1.0', self._axis_text)
+        # 这两个键都在窗口自己的控件上返回 'break'：不冒泡到主窗口的快捷键
+        # （Esc 在那边是「收起展开区」，Ctrl+Enter 是「应用」）。
+        self.txt_axis.bind('<Escape>', self._axis_escape)
+        self.txt_axis.bind('<Control-Return>', self._axis_apply_key)
+        top.protocol('WM_DELETE_WINDOW', self._close_axis_dialog)
+        top.bind('<Escape>', lambda _e: self._close_axis_dialog())
+        if _HAS_DND:
+            try:
+                self.txt_axis.drop_target_register(DND_FILES)
+                self.txt_axis.dnd_bind('<<Drop>>', self._axis_drop)
+            except Exception:                          # noqa: BLE001  环境缺 DnD 就当没装
+                pass
+        self.txt_axis.focus_set()
+
+    def _close_axis_dialog(self):
+        """关窗口：把窗口里的文本收回缓冲区（关着的时候以缓冲区为准）。"""
+        if self._axis_win is None:
+            return
+        if self.txt_axis is not None:
+            self._axis_text = self.txt_axis.get('1.0', 'end')
+        self.txt_axis = None
+        self._axis_win.destroy()
+        self._axis_win = None
+
+    def _axis_read(self) -> str:
+        """当前轴文本：窗口开着就取窗口里的，关着就取缓冲区。"""
+        if self.txt_axis is not None:
+            return self.txt_axis.get('1.0', 'end')
+        return self._axis_text
+
+    def _axis_drop(self, event):
+        """把拖进来的文件当轴文件读（一次拖多个就取第一个）。"""
+        try:
+            files = self.txt_axis.tk.splitlist(event.data)
+        except Exception:                              # noqa: BLE001
+            files = []
+        if files:
+            self.load_timeline(files[0])
+        return getattr(event, 'action', 'copy')
 
     def apply_axis_text(self):
-        """把输入框里的文本解析成轴，换掉当前提词用的轴。"""
-        tl = parse_lines(self.txt_axis.get('1.0', 'end').splitlines(), source='(面板输入)')
+        """把轴窗口里的文本解析成轴，换掉当前提词用的轴。"""
+        tl = parse_lines(self._axis_read().splitlines(), source='(轴窗口)')
         if not tl.cues:
             self._set_note('这段文本里没解析出轴。格式是「帧号 + 说明」，例如：120 部署银灰')
             return
@@ -1906,10 +2470,10 @@ class MonitorApp:
         self._set_note(note)
 
     def save_axis_text(self):
-        """把输入框里的文本存成 md 文件（存完仍以面板内容为准）。"""
-        text = self.txt_axis.get('1.0', 'end')
+        """把轴窗口里的文本存成 md 文件（存完仍以窗口内容为准）。"""
+        text = self._axis_read()
         if not text.strip():
-            self._set_note('输入框是空的，没东西可存')
+            self._set_note('轴文本是空的，没东西可存')
             return
         path = filedialog.asksaveasfilename(
             parent=self.root, title='把轴保存成 md 文件', defaultextension='.md',
@@ -1919,20 +2483,25 @@ class MonitorApp:
             return
         with open(path, 'w', encoding='utf-8') as fh:
             fh.write(text.rstrip('\n') + '\n')
-        self._set_note('已保存到 %s（当前轴仍按面板内容走，改完点「应用到提词器」）' % path)
+        self._set_note('已保存到 %s（当前轴仍按窗口内容走，改完点「应用到提词器」）' % path)
 
     def clear_axis_text(self):
-        """只清空输入框；已经在跑的提词轴不动。"""
-        self.txt_axis.delete('1.0', 'end')
-        self._set_note('输入框已清空（当前提词轴不变；换轴请点「应用到提词器」）')
+        """只清空轴文本；已经在跑的提词轴不动。"""
+        self._axis_text = ''
+        if self.txt_axis is not None:
+            self.txt_axis.delete('1.0', 'end')
+        self._set_note('轴文本已清空（当前提词轴不变；换轴请点「应用到提词器」）')
 
     def _maps_dir(self) -> str:
         d = os.path.join(os.getcwd(), 'maps')
         return d if os.path.isdir(d) else os.getcwd()
 
     def _set_axis_text(self, text: str) -> None:
-        self.txt_axis.delete('1.0', 'end')
-        self.txt_axis.insert('1.0', text)
+        """把文本记进缓冲区；轴窗口开着的话，顺手同步到窗口里。"""
+        self._axis_text = text
+        if self.txt_axis is not None:
+            self.txt_axis.delete('1.0', 'end')
+            self.txt_axis.insert('1.0', text)
 
     def _use_timeline(self, tl) -> None:
         """装上一份新轴（不管是 md 来的还是面板文本来的）。"""
@@ -1940,11 +2509,15 @@ class MonitorApp:
         self.lb_prom_title.configure(text='打轴器 — %s ｜ 0/%d' % (tl.name, len(tl)))
         self._prom_state = None
         self._draw_scale_hint()
-        self.lb_cue_next.configure(text='等计数器走到第一条：%d 条轴已就位' % len(tl))
+        # （原来这里往「下一条 … 还差 N 帧」那一行写提示，2026-10-11 那行删了。）
 
     def _axis_escape(self, _event):
-        """在输入框里按 Esc 只把焦点交回主窗口，不直接退出程序。"""
-        self.root.focus_set()
+        """在轴窗口里按 Esc：关掉这个窗口。
+
+        返回 'break' 是为了**不冒泡**到主窗口 —— 那边的 Esc 是「收起展开区」，
+        在这儿按一下把展开区收掉、窗还开着，看着就像没反应。
+        """
+        self._close_axis_dialog()
         return 'break'
 
     def _axis_apply_key(self, _event):
@@ -1953,7 +2526,7 @@ class MonitorApp:
 
     # ---------------- 刻度表 ----------------
 
-    def _draw_scale_hint(self, text='导入一份轴文件（按 T），这里会显示按帧排布的刻度表'):
+    def _draw_scale_hint(self, text='导入一份轴文件，这里会显示按帧排布的刻度表'):
         cv = self.cv_scale
         g = self.scale_geom
         cv.delete('all')
@@ -1963,23 +2536,6 @@ class MonitorApp:
         self._scale_photo = None
         cv.create_text(g.width / 2, g.height / 2, text=text, width=g.width - 30,
                        font=(FONT_UI, 10), fill=self.scale_theme.faint)
-
-    def _mark_zoom(self):
-        cur = self.scale_geom.px_per_frame
-        for ppf, btn in self.zoom_btns.items():
-            on = abs(ppf - cur) < 1e-9
-            # 选中 = 白底深字（反色）。游戏 HUD 里没有第二种强调色，选中就靠反色。
-            btn.configure(bg=RULE if on else CARD_HI, fg=UI_BG if on else UI_FG)
-
-    def set_scale_zoom(self, ppf):
-        """换刻度缩放：1 个逻辑帧画几个像素。轴点挤在一起就调小，隔得远就调大。"""
-        self.scale_geom.px_per_frame = float(ppf)
-        self._mark_zoom()
-        if self._prom_state is not None:
-            frame_f, cues, done = self._prom_state
-            self._draw_scale(build_scale(frame_f, cues, done, self.scale_geom))
-        self._set_note('刻度缩放 1 帧 = %.1f px（指针往上能看到 %.0f 帧）'
-                       % (ppf, self.scale_geom.frames_up()))
 
     def _draw_scale(self, lay, flash=False):
         """把一张 Layout 贴到 Canvas 上：整张图用 PIL 画好，只留**一个**图元。
@@ -2018,24 +2574,14 @@ class MonitorApp:
             self._set_note('这一拍一下跨过 %d 条轴' % len(p.newly), hold=2.0)
 
         # 刻度用带小数的帧号：满费走挂钟时那才是精确值，刻度也能一格一格地滑，而不是
-        # 整帧整帧地跳。轴逻辑那边照旧用整数（和 CSV 的绝对帧号是同一个）。
+        # 整帧整帧地跳。轴逻辑那边照旧用整数（和离线 CSV 里的绝对帧号是同一个）。
         frame_f = res.elapsed_f if res.mode.startswith('clock') else float(res.elapsed)
         self._prom_state = (frame_f, tl.cues, p.done)
-        self._draw_scale(build_scale(frame_f, tl.cues, p.done, self.scale_geom), flash)
+        self._redraw_scale(flash)
 
-        # 倒计时秒数按当前倍速折算：2 倍速下 30 帧只要 0.5 秒。
-        # 子弹时间是**绝对**的 1/5（恒 6 帧/秒），与倍速设置无关 —— 所以这里要直接
-        # 用 0.2，不能再乘 res.m（2X 下乘出来是 0.4 = 12 帧/秒，快了一倍）。
-        # 实测见 docs 3.1。
-        rate = 0.2 if res.bullet else (res.m if res.m else 1.0)
-        if p.next_cue is None:
-            self.lb_cue_next.configure(text='轴已走完（共 %d 条）' % p.total, fg=UI_DIM)
-        else:
-            secs = p.next_in / max(1e-6, 30.0 * rate)
-            self.lb_cue_next.configure(
-                text='下一条 %s ｜ 还差 %d 帧（≈ %.1f 秒）'
-                     % (clip(one_line(p.next_cue.text), 40), p.next_in, secs),
-                fg=ACCENT)
+        # （「下一条 … 还差 N 帧（≈ x 秒）」那一行 2026-10-11 按用户要求删了 ——
+        #   「状态描述全部删掉」。这点信息刻度表上本来就画着：指针下面紧挨着的那条
+        #   高亮行就是下一条，指针到它之间那条青柱的长度就是还差多少。）
 
     def quit(self):
         try:
@@ -2050,14 +2596,15 @@ class MonitorApp:
     # ---------------- 每帧刷新 ----------------
 
     def _set_note(self, text: str, hold: float = 3.0, color=None):
-        """更新底部提示行。
+        """更新底部提示行（用户点完一件事之后的一句话反馈）。
 
-        hold > 0 时这条提示会顶住 _tick 的自动提示几秒 —— 否则面板每 16ms 就把提示行
-        刷一遍，用户刚点的操作（改回费速率、保存校准）连一眼都看不见。
+        hold > 0：这句话留 `hold` 秒，然后**自己清空**（见 _tick_body 里的收尾）——
+        不自动清的话它会一直挂在那儿，看起来就像一行甩不掉的「状态描述」。
+        hold = 0：一直留着，等下一个说话的人来盖（比如「采样线程停了…」那条要一直提示）。
         color 留给「必须看一眼」的那几条用（读窗口失败这类），默认是淡灰。
         """
-        self.lb_note.configure(text=text, fg=color or UI_DIM)
-        self._note_hold = time.perf_counter() + hold
+        self._set_text('note', self.lb_note, text, color or UI_DIM)
+        self._note_hold = (time.perf_counter() + hold) if hold > 0 else 0.0
 
     def _tick(self):
         """包一层：面板刷新出错绝不能让界面**冻死**。
@@ -2080,13 +2627,21 @@ class MonitorApp:
         # 1 倍速下游戏每秒走 30 个逻辑帧，面板必须显著高于 30 Hz 才可能每拍只跳 1 帧。
         # 实测过 60ms 的旧值（16.7 Hz）会每拍跳 2 帧，看着就像在漏帧。
         now = time.perf_counter()
-        self._fit_window(now)
+        # 拖动窗口期间只做「轻活」：大数字 / 时间那几行照刷，但**跳过**刻度表重画、
+        # ROI 预览、布局重算、置顶刷新。实测（cProfile，本机 150% DPI、展开态）一整拍
+        # 16ms —— 其中刻度表的 PIL 重画 6.3ms、预览 1ms、十几次 Tk configure 约 10ms。
+        # 不跳过的话事件循环被它塞满，鼠标移动消息只能排队，拖起来就是一顿一顿的
+        # （用户报的「窗口拖拽卡顿」）。松手时 _drag_end 会补一次 _refit。
+        dragging = self._dragging
+        if not dragging:
+            self._fit_window(now)
         self._sync_ctrl_row()
         # 读窗口那条链路：目标窗口必须一直在最上面（见 _keep_pin）。
         # 我们自己的对话框开着时不抢 —— 取景器就是要盖在目标窗口上让用户对着圈的。
-        if not self._own_dialog_open():
+        if not dragging and not self._own_dialog_open():
             self._keep_pin(now)
-        self._refresh_window_hint()
+        if not dragging:
+            self._refresh_window_hint()
         self._tick_times.append(now)
         if len(self._tick_times) > 30:
             self._tick_times.pop(0)
@@ -2099,7 +2654,8 @@ class MonitorApp:
         busy = self._poll_window()
         if busy:
             up = self.monitor.latest
-            self._render_previews(up)
+            if not dragging:
+                self._render_previews(up)
             return
         upd = self.monitor.latest
         st = self.monitor.stats
@@ -2120,7 +2676,8 @@ class MonitorApp:
         stall_thr = getattr(self.monitor, 'stall_warn_s', STALL_WARN_S)
         # 读窗口这条链路是「校准完等用户点开始」：没点的时候采样线程本来就该是停的，
         # 那不是故障，别按「采样已停」报警。
-        idle = self._src_kind == 'window' and not self._window_started
+        # 「用户主动停的」不算故障 —— 实时链路现在也能停（见 toggle_count）。
+        idle = not self._counting_started
         sampling_dead = (not idle) and ((not self.monitor.alive) or stall_s >= stall_thr)
         # 「最大间隔」的告警门限必须跟着当前倍速走：采样间隔一旦超过「一个逻辑帧在屏幕上
         # 停留的时长」就会整帧漏采。停留时长 = 1000 / (30 x 倍速)：1X -> 33.3ms、
@@ -2141,24 +2698,31 @@ class MonitorApp:
             elif self._full_ticks > 0:
                 self._full_ticks -= 1
             if self._full_ticks > 0:
-                self.lb_frames.configure(text='%.2f' % res.elapsed_f)
+                # 看板批注「帧数计算 2 位但显示一位小数节省空间」：内部仍然按
+                # elapsed_f 的**两位**精度算，只是大数字印一位 —— 面板就窄了。
+                self._set_text('frames', self.lb_frames, '%.1f' % res.elapsed_f)
             else:
-                self.lb_frames.configure(text=str(res.elapsed))
+                self._set_text('frames', self.lb_frames, str(res.elapsed))
             self._sync_rule()      # 白线 / 数字那一格：只跟整数位数走
-            self.lb_time.configure(text='游戏内时间 %s' % _fmt_time(res.elapsed_f / 30.0))
+            self._set_text('time', self.lb_time,
+                           '时间 %s' % _fmt_time(res.elapsed_f / 30.0))
             # 这里原来有一条十几行的「状态 …」文案链（运行中 / 已暂停 / 起锚 / 刚回费 /
             # 相位重锚 / 不在关卡里 …）。面板那一行 2026-10-09 按用户要求删掉了，文案的
             # 去处：跑动细节看下面「费用条」那行的「通道=」和「模式=」，真出事看「告警：」
             # 那行（res.warn 原样打在那里），采样线程死了看 _tick_body 末尾那条转红的。
-            self.lb_bar.configure(
-                text='费用条 fill=%d/%d  %s  通道=%s' % (res.fill, self.monitor.layout.bar_w,
-                                                      res.bar_state, res.mode))
+            # 读数行 1：费用条 + 通道 + **本费**（照示意图把「本费」从展开区提到常驻区）
+            counter = self.monitor.counter
+            per = float(counter.frames_per_cost) if counter is not None else LOGICAL_FPS
+            into = int(round(res.phase * per))
+            self._set_text(
+                'bar', self.lb_bar,
+                '费用条 fill=%d/%d  %s  通道=%s ｜ 本费 %d/%d 帧'
+                % (res.fill, self.monitor.layout.bar_w, res.bar_state, res.mode,
+                   into, int(round(per))))
+            # 读数行 2：暂停键 + 倍速 + 子弹（原来的「按钮」「倍速」两行并到这里）。
             # 按钮没画出来时**不能**印「已暂停」：那正是「不在关卡里」的样子（见 features）。
-            self.lb_pause.configure(
-                text='按钮 ratio=%.3f solid=%.3f  %s' % (
-                    res.pause_ratio, res.pause_solid,
-                    '未画出' if not res.pause_drawn else
-                    ('运行中' if res.running else '已暂停')))
+            pause_text = ('未画出' if not res.pause_drawn
+                          else ('运行中' if res.running else '已暂停'))
             # 子弹时间下倍速数字不在画面上（res.m 是 nan），别印成「倍速 nanX」。
             if res.bullet:
                 speed_text = '子弹时间 6 帧/秒'
@@ -2168,43 +2732,50 @@ class MonitorApp:
                 speed_text = '倍速未画出（沿用上次）'
             # glyph = 「三个三角（>>>）」的形状分：子弹时间就是这么认出来的。
             # 认不出来时先看它离 GLYPH_NCC_MIN(0.55) 差多少（同「减号 run/thr」的路子）。
-            self.lb_speed.configure(
-                text='%s  conf=%s  digit=%.3f corr=%s glyph=%s' % (
-                    speed_text, 'ok' if res.corr_2x == res.corr_2x else 'low',
-                    res.digit_ratio,
-                    '%.3f' % res.corr_2x if res.corr_2x == res.corr_2x else '—',
-                    '%.3f' % res.glyph if res.glyph == res.glyph else '—'))
-            self.lb_warn.configure(text=('告警：' + res.warn) if res.warn else '',
-                                   fg=WARN)
-            self._update_cycle(res)
+            # 并成两行之后这里不再印 corr（数字模板的相关系数）—— 它是 conf 的原始值，
+            # 一行放不下三组数；要排查就展开「诊断 / 预览」看通道。
+            self._set_text(
+                'pause', self.lb_pause,
+                '%s ｜ %s  conf=%s  digit=%.3f  glyph=%s ｜ ratio=%.3f'
+                % (pause_text, speed_text,
+                   'ok' if res.corr_2x == res.corr_2x else 'low', res.digit_ratio,
+                   '%.3f' % res.glyph if res.glyph == res.glyph else '—',
+                   res.pause_solid))
+            self._set_warn('告警：' + res.warn if res.warn else '', WARN)
+            if not dragging:
+                self._update_cycle(res)
         else:
             # 这一拍没读到画面（窗口不在 / 还没进关卡 / 被最小化）：把告警行清空。
             # **必须清**：采样线程刚被「重新校准」救活、但还没读到画面时，告警行上还挂着
             # 红色的「采样已停」，留着的话用户会以为没救活 —— 实测踩到
             # （tools/check_recover.py 第 5 组就是这个场景）。真死了的话，
             # 下面 sampling_dead 那段会把它盖回去。
-            self.lb_warn.configure(text='', fg=WARN)
-        self._update_prompter(upd.result)
+            self._set_warn('', WARN)
+        if not dragging:
+            self._update_prompter(upd.result)
         # 「最大间隔」是漏帧的直接指标：采样间隔一旦超过一个逻辑帧的显示时长，
         # 就有可能整帧没被采到（表现：某一拍一次 +2）。门限见上面的 cur_m。
         # 这一行的内容按**来源**分：实时看采样率 / 有没有漏采（门限跟着倍速走，1X 33.3ms、
         # 2X 16.7ms —— 写死 33.3 的话 2 倍速下明明在漏采也不报警）。
         # 文本和「要不要标黄」都由 monitor.perf_line 给，界面只负责显示。
-        perf_text, jam = self.monitor.perf_line(ui_hz, cur_m)
-        self.lb_perf.configure(text=perf_text, fg=WARN if jam else UI_DIM)
-        win = self.monitor.window
-        lay = self.monitor.layout
-        if now < self._note_hold:
-            pass                     # 刚弹过的提示还留着，先别盖
-        elif win is not None and lay is not None:
-            self._set_note('%s  %dx%d @(%d,%d) ｜ %s' % (
-                win.exe, win.client[2], win.client[3], win.client[0], win.client[1],
-                upd.note or 'ROI %s' % self.target), hold=0.0)
-        elif upd.note:
-            self._set_note(upd.note, hold=0.0)
+        if not dragging:
+            perf_text, jam = self.monitor.perf_line(ui_hz, cur_m)
+            self._set_text('perf', self.lb_perf, perf_text, WARN if jam else UI_DIM)
+        # （这里原来每拍往提示行刷一句**状态描述**：读窗口时是
+        #   「Arknights.exe  2558x1494 @(0,0) ｜ 通道 pixel」，演示里是
+        #   「演示：1.0X ｜ 通道 wrap」。2026-10-11 按用户要求删掉 ——
+        #   「状态描述全部删掉」。提示行现在只在用户点完一件事之后说一句话，
+        #   说完就自己清空（见 _set_note / 下面那一段）。
+        #   要排查「这一拍走的哪条通道」，仍然看得到：那行读数在 fr_diag 里
+        #   （不铺出来，但 _tick_body 一直在往里写）。）
+        if self._note_hold and now >= self._note_hold:
+            self._note_hold = 0.0
+            self._set_note('')
 
-        self._render_previews(upd)
-        if self.overlay is not None:
+        if not dragging:
+            self._render_previews(upd)
+            self._sync_calib_pos()
+        if self.overlay is not None and not dragging:
             self._draw_overlay()
         if self._src_kind == 'window':
             self._update_start_btn()      # 线程被停了/死了，按钮要跟着回到「开始计数」
@@ -2216,10 +2787,9 @@ class MonitorApp:
             # 原来写在「状态」那一行（2026-10-09 那一行删了），现在写「告警：」这一行：
             # 它是常驻区里唯一的告警位置，转红 + 写到「采样线程停了…」。
             why = st.last_error or '采样线程已退出'
-            self.lb_warn.configure(
-                text='采样已停 %.1fs（%s）→ 点「重新校准」或按 F5' % (stall_s, why),
-                fg=ERR)
-            self._set_note('采样线程停了：%s。按 F5 / 点「重新校准」重开，'
+            self._set_warn('采样已停 %.1fs（%s）→ 点「重新校准」'
+                           % (stall_s, why), ERR)
+            self._set_note('采样线程停了：%s。点「重新校准」重开，'
                            '已经数出来的帧数不会丢' % why, hold=0.0, color=ERR)
 
     def _update_cycle(self, res):
@@ -2263,7 +2833,7 @@ class MonitorApp:
         else:
             parts.append('还没走完一个完整周期')
         parts.append('本费 %d/%d 帧' % (into, int(round(per))))
-        self.lb_cycle.configure(text='费用周期 ' + ' ｜ '.join(parts))
+        self._set_text('cycle', self.lb_cycle, '费用周期 ' + ' ｜ '.join(parts))
 
     def _render_previews(self, upd):
         """只画**费用条**那一条预览（红框 = 特征真正取样的那条带）。
@@ -2274,7 +2844,7 @@ class MonitorApp:
         判空是必须的：LiveUpdate 只保证「读到画面时」各字段有值，缺一路不该把整个
         _tick 打挂 —— _tick 一崩界面就冻住，报错还只在控制台里（踩过）。
         """
-        if upd.bar_img is not None:
+        if upd.bar_img is not None and self.cv_bar is not None:
             self._show(self.cv_bar, upd.bar_img, mark_rows=(5, 12))
 
     def _show(self, canvas, arr, mark_rows=None, mark_cols=None):

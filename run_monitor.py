@@ -15,9 +15,12 @@
                                            # 4 倍速快进 + 每 8 秒暂停 1.2 秒
 
 回费速率默认读设置文件 cost_rate.json（没有这个文件就按 30 = 1 秒 1 费），
-也可以在这里用 --cost-rate 覆盖；界面上那行「回费速率」改完会写回设置文件。
+也可以在这里用 --cost-rate 覆盖；界面上那行「回费效率」改完会写回设置文件。
 
-界面里的键位见 ui.py 顶部注释（Tab/方向键校准 ROI，K 显示 ROI 框，S 保存，L 记录 CSV）。
+界面里的键位见 ui.py 顶部注释：空格 开始 / 暂停 / 继续（主按钮三态合一），C 清零
+（顺手把采样停掉、按钮回「开始计数」），L 记录 CSV，T 开「导入 / 编辑轴」窗口，
+Ctrl+R 重载轴，F5 重新校准，Esc 收起展开区，Ctrl+Q 退出；ROI 校准那几个键收在
+「ROI 校准模式」里（点展开区那个按钮才进）。
 """
 
 import argparse
@@ -34,7 +37,7 @@ from akframe.live import LiveMonitor                                # noqa: E402
 from akframe.paths import data_path                                 # noqa: E402
 from akframe.settings import (DEFAULT_FRAMES_PER_COST, clamp_frames_per_cost,  # noqa: E402
                               format_frames_per_cost, load_cost_rate,
-                              load_negative_mode, parse_negative)
+                              parse_negative)
 from akframe.win32 import (arknights_ui_scaler, enable_dpi_awareness,  # noqa: E402
                            find_window, list_windows)
 
@@ -110,9 +113,14 @@ def resolve_cost_rate(args):
 
 
 def resolve_negative(args) -> str:
-    """命令行 --negative 优先；没给就读设置文件。"""
+    """局内负费档：默认一直 'auto'（按画面判）。
+
+    2026-10-11 按用户要求：界面上那个 auto / on / off 下拉框删了，负费**一直开着**。
+    以前这里会回去读设置文件里的 negative 键 —— 现在不读了，
+    否则上一次存下的 on / off 会在界面上无法改回来。命令行 --negative 仍然可用（高级用法）。
+    """
     if args.negative is None or str(args.negative).strip() == '':
-        return load_negative_mode(args.settings)
+        return 'auto'
     return parse_negative(args.negative)
 
 
@@ -269,7 +277,10 @@ def main(argv=None) -> int:
     text = DEMO_AXIS_TEXT if (args.demo_axis and not args.timeline) else None
     app = MonitorApp(mon, calib_path=args.calib, settings_path=args.settings,
                      timeline_path=args.timeline, timeline_text=text)
-    mon.start()
+    # 不自动 start（2026-10-11）：面板起来是待命态，主按钮写「开始」，
+    # 点一下才起采样线程（再点变「暂停」，清零把它拉回「开始」）。
+    # 以前这里直接 start()，结果「开始」那个态从来没出现过。
+    # 见 ui.MonitorApp._counting_started 上面那段注释。
     if args.duration:
         app.root.after(int(args.duration * 1000), app.quit)
     app.run()

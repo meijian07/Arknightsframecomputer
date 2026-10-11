@@ -7,10 +7,10 @@ tag 才会变成 60（-50%）或 120（-75%）。自动识别一旦认错档位�
 
 设置文件（默认 cost_rate.json），两个键共用一个文件：
 
-    {"frames_per_cost": 60.0, "negative": "auto"}
+    {"frames_per_cost": 60.0}
 
 frames_per_cost  = 战前减回费 tag：一费几个逻辑帧（见上）；
-negative         = 局内负费那个手动档：auto / on / off（见下面 NEGATIVE_MODES）。
+# （2026-10-11 起只有 frames_per_cost 一个键：局内负费改成一直按画面判，不再可配）
 
 文件不存在 / 读不动 / 值不是正数 -> 一律退回 30，不抛异常：这是给前端启动时读的，
 宁可给一个能用的默认值，也不要因为一个坏文件就打不开界面。
@@ -28,31 +28,32 @@ from .state import LOGICAL_FPS
 
 DEFAULT_FRAMES_PER_COST = LOGICAL_FPS      # 30：1 秒 1 费，普通关卡
 
-# ---- 局内负费（费用条上出现减号）的手动档 ----
+# ---- 局内负费（费用条上出现减号）----
 # 负费期间每逻辑帧只攒一半，一费 30 -> 60 逻辑帧（见 state.speed_for_cost_state）。
-#   auto  按画面判（费用数字左边那条纯白横杠，见 features.read_sign）—— 默认
-#   on    强制按负费算（认不出减号时救计数用）
-#   off   强制不按负费算（误判成负费时压制用）
-# 为什么留手动档：那个扫描框是照抄前人的（geometry.sign_rect），本机还没有一段真实的
-# 负费录像能对着钉它。面板上那行「减号 N/thr」就是用来对的（见 docs 第 31 节）。
-NEGATIVE_MODES = ('auto', 'on', 'off')
-NEGATIVE_LABELS = {
-    'auto': '自动（看画面里有没有减号）',
-    'on': '强制开：按负费算（一费 60 帧）',
-    'off': '强制关：按正常回费算（一费 30 帧）',
-}
+# 2026-10-11 按用户要求：界面上的 auto / on / off 下拉框删了，负费**一直开着**
+# —— 就是 'auto'：按画面判（费用数字左边那条纯白横条，见 features.read_sign）。
+# 仅保留命令行 --negative（run_monitor）作为真出问题时的逃生通道：扫描框是照抄前人的
+# （geometry.sign_rect），本机还没有一段真实的负费录像能对着钉它（见 docs 第 31 节）。
+
 MIN_FRAMES_PER_COST = 1.0
 MAX_FRAMES_PER_COST = 300.0                # 已知最慢档是 120（4 秒 1 费），留一倍余量
 
 # 前端下拉框里的档位：(一费几个逻辑帧, 说明)。39 / 45 / 90 是前人文档里出现过的
 # 非标档（1.3 / 1.5 / 3 秒 1 费），列出来省得手输；档位表见 docs 第 15.1 节。
+#
+# 说明文字必须**短**：它和帧数拼成下拉框条目的文案，而这个文案同时也印在收起态面板
+# 那个按钮上（Tk 的 OptionMenu 按钮宽度跟着显示文本走）—— 文案长一格，整个面板就宽
+# 一格。实测 '120  回费 -75%：4 秒 1 费' 比 '120  回费-75%' 多占 96px —— 档位菜单
+# 还没显式给 width 的时候，收起态面板干脆被顶到 578（帧号三位数那一下）。
+# 「几秒 1 费」可以从帧数推出来（帧数 / 30 = 秒），切完档提示行里也会原样印一遍
+# （见 format_frames_per_cost），所以不放进档位名里。
 COST_RATE_PRESETS = (
-    (30.0, '正常：1 秒 1 费'),
-    (39.0, '1.3 秒 1 费'),
-    (45.0, '1.5 秒 1 费'),
-    (60.0, '回费 -50%：2 秒 1 费'),
-    (90.0, '3 秒 1 费'),
-    (120.0, '回费 -75%：4 秒 1 费'),
+    (30.0, '正常'),
+    (39.0, '1.3 秒'),
+    (45.0, '1.5 秒'),
+    (60.0, '回费-50%'),
+    (90.0, '3 秒'),
+    (120.0, '回费-75%'),
 )
 
 
@@ -120,23 +121,9 @@ def load_cost_rate(path: str) -> float:
 def save_cost_rate(path: str, frames_per_cost: float) -> None:
     """写设置文件。写不动（目录不存在 / 只读 / 被占用）由调用方决定怎么提示。
 
-    **保留同文件里的另一个键**（negative）：两个设置共用一个 cost_rate.json，
-    整份覆盖写会把对方那一档悄悄清掉。
+    这个文件里现在只有 frames_per_cost 一个键（负费已改成一直按画面判）。
     """
     data = _read_settings(path)
     data['frames_per_cost'] = clamp_frames_per_cost(frames_per_cost)
-    with open(path, 'w', encoding='utf-8') as fh:
-        json.dump(data, fh, ensure_ascii=False, indent=2)
-
-
-def load_negative_mode(path: str) -> str:
-    """读负费手动档（auto / on / off）。文件不存在 / 损坏 -> auto。"""
-    return parse_negative(_read_settings(path).get('negative'))
-
-
-def save_negative_mode(path: str, mode: str) -> None:
-    """写负费手动档，同样保留 frames_per_cost。"""
-    data = _read_settings(path)
-    data['negative'] = parse_negative(mode)
     with open(path, 'w', encoding='utf-8') as fh:
         json.dump(data, fh, ensure_ascii=False, indent=2)

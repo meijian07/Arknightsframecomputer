@@ -23,6 +23,8 @@ Desktop 2026.10.07 - 13.56.18.01.mp4，21 秒）。从那段视频里量出来�
     6. recalibrate()：找不到窗口时不丢帧数；能把死掉的线程拉起来，而且
        **不重置时间基准 _t0**（重置会让挂钟通道拿到倒退的时间戳、算出负 dt）；
     7. 面板看门狗：心跳不涨 -> 状态行转红写「采样已停」（Tk 可用时才测）。
+       注意 2026-10-11 起面板起来是**待命**态（主按钮写「开始」，见 ui._counting_started）：
+       没点开始的时候采样线程本来就该是停的，心跳不涨**不算故障**、不许报警。
 
 用法：python tools/check_recover.py
 """
@@ -229,6 +231,20 @@ def t_watchdog_ui():
         app._tick_body()
         check('看门狗每拍记下心跳', app._last_ticks == dm.stats.ticks,
               '_last_ticks=%d ticks=%d' % (app._last_ticks, dm.stats.ticks))
+
+        # 待命态（用户还没点「开始」）：采样线程本来就该是停的 —— 心跳冻住 1 秒多
+        # 也**不许**报「采样已停」。这是 2026-10-11「开始键」那次改动的配套语义：
+        # 面板一起来就自动 start 的话，「开始」那一态根本没机会出现；既然改成待命，
+        # 看门狗就得认这个待命态，否则一开面板就红着报警。
+        dm._thread = None
+        time.sleep(1.05)
+        app._tick_body()
+        check('待命态（没点开始）：心跳不涨也不报「采样已停」',
+              '采样已停' not in app.lb_warn.cget('text'), app.lb_warn.cget('text'))
+
+        # 用户点了「开始」—— 从这一拍起看门狗才该管事。
+        app._counting_started = True
+        app._stall_since = 0.0
 
         dm._thread = AliveThread()            # 线程「活着」，但心跳从此冻住
         frozen = dm.stats.ticks

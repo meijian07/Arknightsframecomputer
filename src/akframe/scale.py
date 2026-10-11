@@ -7,11 +7,16 @@ tools/preview_scale.py）—— 而界面恰恰是最难自动验证的那部分
 
 坐标系：y 向下为正（和屏幕一致），刻度区左上角是 (0, 0)：
 
-    y(f) = pointer_y - (f - frame) * px_per_frame
+    y(f) = pointer_y + (f - frame) * px_per_frame
 
-frame 往上涨 -> 同一个 f 的 y 变大 -> 整条刻度**向下滚**。
-「现在」那条线（pointer）固定在 pointer_ratio 的高度上不动，所以轴点是从上方
-压下来、穿过 pointer、然后变暗沉到下面去。
+frame 往上涨 -> 同一个 f 的 y 变小 -> 整条刻度**向上滚**（提词器：走过去的往上走）。
+「现在」那条线（pointer）钉在刻度区**正中**（pointer_ratio = 0.5）不动，于是：
+
+    线的**上方** = 已经过去的轴（越往上越久远，颜色越暗）
+    线的**下方** = 还没到的轴（紧贴着线的那一条就是「下一条」，也是唯一高亮的那条）
+
+2026-10-11 之前是反的（pointer 在 70% 处、刻度往下滚）—— 用户在看板批注里指出：
+「后一个操作高亮不是前一个；现在针一直居中，操作向上滚动」。
 """
 
 from __future__ import annotations
@@ -38,7 +43,7 @@ class Theme:
 
     bg: str = '#141416'
     ruler_bg: str = '#0d0d0f'
-    rail: str = '#3a3a3e'          # 刻度条右边缘那条竖线
+    rail: str = '#3a3a3e'          # 刻度条右边缘那条竖线（2026-10-11 起不画了，留着不删）
     tick: str = '#4a4a4f'
     tick_major: str = '#8f8f95'
     num: str = '#9b9ba0'
@@ -61,24 +66,26 @@ class ScaleGeom:
     height: int = 250
     ruler_w: int = 46              # 左边刻度条的宽度
     pad_right: int = 6
-    pointer_ratio: float = 0.70    # 「现在」线在刻度区的相对高度
+    pointer_ratio: float = 0.50    # 「现在」线在刻度区的相对高度（0.5 = 正中）
     px_per_frame: float = 1.5      # 1 帧画多少像素（缩放档）
-    label_h: int = 18              # 轴标签的高度
-    label_gap: float = 20.0        # 相邻标签的最小间距（防重叠用）
+    # 2026-10-11 字号放大一档（见 scale_render.font_sizes），行高和最小间距跟着长：
+    # 18/20 是按 11/12px 的字定的，13px 的字塞进去上下会顶到。
+    label_h: int = 22              # 轴标签的高度
+    label_gap: float = 22.0        # 相邻标签的最小间距（防重叠用）
 
     @property
     def pointer_y(self) -> float:
         return self.height * self.pointer_ratio
 
     def y_of(self, f, frame) -> float:
-        return self.pointer_y - (f - frame) * self.px_per_frame
+        return self.pointer_y + (f - frame) * self.px_per_frame
 
     def frames_up(self) -> float:
-        """「现在」线往上还能看到多少帧。"""
+        """「现在」线**上方**能显示多少帧 —— 也就是还能往回看多少帧（过去方向）。"""
         return self.pointer_y / self.px_per_frame
 
     def frames_down(self) -> float:
-        """「现在」线往下还能看到多少帧。"""
+        """「现在」线**下方**能显示多少帧（未来方向）。"""
         return (self.height - self.pointer_y) / self.px_per_frame
 
 
@@ -108,7 +115,11 @@ class Layout:
     pointer_y: float
     ticks: list = field(default_factory=list)    # [(帧号, y, 是不是大刻度)]
     marks: list = field(default_factory=list)    # [Mark]
-    mercury: tuple = None                        # (顶, 底) —— 「现在」到下一条之间的青柱
+    # （mercury「青柱」字段 2026-10-11 删了：用户要求去掉那根竖柱，见 scale_render）
+    # 指针固定指着的那一帧 = **真实**当前帧，默认 None 就是 frame。
+    # 只有「打轴器 ↑ 回看」时两者才不一样：刻度按 frame 摆（那是视图帧），
+    # 指针那行按 frame 标「回看」，真正的「现在」另外画一条灰线（见 scale_render）。
+    now: float = None
 
     @property
     def next_mark(self):
@@ -120,17 +131,6 @@ class Layout:
     @property
     def tick_step(self) -> int:
         return _tick_steps(self.geom.px_per_frame)[0]
-
-
-def fmt_delta(delta: float) -> str:
-    """帧差怎么印。
-
-    10 帧以上取整（这时候差一两帧无所谓，多一位数字反而更难扫），
-    10 帧以内留一位小数 —— 打轴要卡的就是这种临近帧。
-    """
-    a = abs(delta)
-    v = '%d' % round(a) if a >= 10 else '%.1f' % a
-    return ('+' if delta >= 0 else '-') + v
 
 
 def one_line(text: str) -> str:
@@ -187,15 +187,18 @@ def spread_labels(marks, geom: ScaleGeom) -> None:
 
 
 def build(frame, cues, done, geom: ScaleGeom = None,
-          recent_pad: float = 0.0, future_pad: float = 0.0) -> Layout:
+          recent_pad: float = 0.0, future_pad: float = 0.0, now: float = None) -> Layout:
     """把「当前帧 + 轴 + 已经触发了几条」摆成一张刻度表。
 
-    frame : 当前帧号（可以是小数 —— 满费时计数器给的就是小数）
+    frame : 视图帧号（刻度按它摆）。可以是小数 —— 满费时计数器给的就是小数
     cues  : 全部轴，按帧号升序（就是 Timeline.cues）
     done  : 已经触发了多少条（就是 Prompt.done）。cues[done] 就是「下一条」。
+    now   : 真实当前帧。回看历史轴时传进来（frame 会比它小），默认跟 frame 一样。
     """
     g = geom or ScaleGeom()
-    out = Layout(geom=g, frame=frame, pointer_y=g.pointer_y)
+    out = Layout(geom=g, frame=frame, pointer_y=g.pointer_y, now=now)
+    if out.now is None:
+        out.now = frame
     if not cues:
         return out
 
@@ -204,10 +207,11 @@ def build(frame, cues, done, geom: ScaleGeom = None,
 
     # ---- 刻度 ----
     minor, major = _tick_steps(g.px_per_frame)
-    f_bottom = frame - g.frames_down() - minor
-    f_top = frame + g.frames_up() + minor
-    k = int(math.floor(f_bottom / minor))
-    while k * minor <= f_top:
+    # 线的上面是过去（帧号更小），下面是未来（帧号更大）—— 见模块开头那张坐标图
+    f_top = frame - g.frames_up() - minor
+    f_bottom = frame + g.frames_down() + minor
+    k = int(math.floor(f_top / minor))
+    while k * minor <= f_bottom:
         f = k * minor
         if f >= 0:
             y = g.y_of(f, frame)
@@ -218,20 +222,20 @@ def build(frame, cues, done, geom: ScaleGeom = None,
     # ---- 轴点：只捡屏幕（加一点余量）里的，不要 O(全部轴) ----
     margin = g.label_h * 2
     picked = []
-    i = done_i
+    i = done_i                      # 未来的：在指针下面，帧号越大越靠下
     while i < n:
         y = g.y_of(cues[i].frame, frame)
-        if y < -margin - future_pad:
-            break
-        if y <= g.height + margin:
-            picked.append((i, y))
-        i += 1
-    j = done_i - 1
-    while j >= 0:
-        y = g.y_of(cues[j].frame, frame)
-        if y > g.height + margin + recent_pad:
+        if y > g.height + margin + future_pad:
             break
         if y >= -margin:
+            picked.append((i, y))
+        i += 1
+    j = done_i - 1                  # 过去的：在指针上面，帧号越小越靠上
+    while j >= 0:
+        y = g.y_of(cues[j].frame, frame)
+        if y < -margin - recent_pad:
+            break
+        if y <= g.height + margin:
             picked.append((j, y))
         j -= 1
     picked.sort(key=lambda t: t[1], reverse=True)
@@ -243,9 +247,4 @@ def build(frame, cues, done, geom: ScaleGeom = None,
                               state=state))
     spread_labels(out.marks, g)
 
-    # ---- 青柱：「现在」-> 下一条 ----
-    if done_i < n:
-        top = g.y_of(cues[done_i].frame, frame)
-        top = max(0.0, min(top, g.pointer_y))
-        out.mercury = (top, g.pointer_y)
     return out

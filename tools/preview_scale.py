@@ -50,7 +50,7 @@ def main(argv=None):
     ap.add_argument('--frames', default=None,
                     help='要预览的几个「当前帧」，逗号分隔')
     ap.add_argument('--px-per-frame', type=float, default=1.5)
-    ap.add_argument('--pointer', type=float, default=0.70)
+    ap.add_argument('--pointer', type=float, default=0.50)
     ap.add_argument('--scale', type=int, default=2, help='出图放大倍数')
     ap.add_argument('--out', default=os.path.join(ROOT, 'out', 'scale_preview.png'))
     args = ap.parse_args(argv)

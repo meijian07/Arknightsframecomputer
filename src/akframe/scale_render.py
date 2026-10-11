@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from PIL import Image, ImageDraw, ImageFont
 
-from .scale import Theme, clip, fmt_delta, one_line
+from .scale import Theme, clip, one_line
 
 # 数字用 Bahnschrift（Windows 自带的窄体，和游戏 HUD 的观感接近），中文用微软雅黑。
 FONT_NUM = r'C:\Windows\Fonts\bahnschrift.ttf'
@@ -46,10 +46,15 @@ def _font(path: str, size: int):
 
 
 def font_sizes(scale: float = 1.0) -> tuple:
-    """三档字号（数字 / 轴动作 / 轴说明），随放大倍数走。"""
-    return (max(7, int(round(9 * scale))),
-            max(8, int(round(11 * scale))),
-            max(8, int(round(12 * scale))))
+    """三档字号（数字 / 轴动作 / 轴说明），随放大倍数走。
+
+    2026-10-11 按用户要求整体放大一档（9/11/12 -> 11/13/13）：面板上刻度表的字
+    原来是照着「尽量缩小」定的，缩到 9px 之后帧号已经要凑近才看得清。刻度条宽
+    (ruler_w=50) 不变，把刻度线往里收 2px、给「120」这种三位数腾出位置就够了。
+    """
+    return (max(8, int(round(11 * scale))),
+            max(9, int(round(13 * scale))),
+            max(9, int(round(13 * scale))))
 
 
 def render(lay, theme: Theme = None, scale: float = 1, flash: bool = False) -> Image.Image:
@@ -72,22 +77,20 @@ def render(lay, theme: Theme = None, scale: float = 1, flash: bool = False) -> I
     def S(v):
         return v * scale
 
-    # ---- 刻度条：底色 + 右边缘竖线 ----
+    # ---- 刻度条：只铺底色，**不画右边缘那条竖线** ----
+    # 2026-10-11 按用户要求去掉：那条竖线从头贯到尾，比刻度本身还抢眼，
+    # 而它并不承载任何信息（刻度线本身就标出了刻度条在哪）。
     dr.rectangle([0, 0, max(0, S(g.ruler_w) - 1), H - 1], fill=th.ruler_bg)
-    dr.line([S(g.ruler_w), 0, S(g.ruler_w), H], fill=th.rail)
 
     # ---- 小/大刻度线与帧号 ----
     for f, y, major in lay.ticks:
-        dr.line([S(28 if major else 34), S(y), S(g.ruler_w), S(y)],
+        dr.line([S(26 if major else 32), S(y), S(g.ruler_w), S(y)],
                 fill=th.tick_major if major else th.tick)
         if major:
             dr.text((S(3), S(y)), str(f), font=f_num, fill=th.num, anchor='lm')
 
-    # ---- 青柱：「现在」-> 下一条 ----
-    if lay.mercury:
-        top, bot = lay.mercury
-        dr.rectangle([S(g.ruler_w) - 3, S(top), S(g.ruler_w) - 1, S(bot)],
-                     fill=th.accent)
+    # （这里原来画「青柱」：指针往下到下一条那根 2px 的白柱。2026-10-11 用户要求
+    #   「去掉」—— 截图里看着像一条多余的竖线，删掉。）
 
     # ---- 轴点 ----
     x_act = g.ruler_w + 10
@@ -116,10 +119,23 @@ def render(lay, theme: Theme = None, scale: float = 1, flash: bool = False) -> I
                     clip(rest, 26), font=f_nm, anchor='lm',
                     fill=txt if hit else (th.faint if m.state == 'past'
                                           else (th.text if m.state == 'next' else th.dim)))
-        dr.text((S(g.width - g.pad_right), S(m.label_y)), fmt_delta(m.delta),
+        # 右边印**绝对帧号**（2026-10-11 照用户看板批注：不再是「+40」这种带符号的
+        # 帧差）。还差多少帧看指针线旁边那个「现在」，以及刻度表下面那句
+        # 「下一条 … 还差 N 帧」——两个都还在，信息没丢。
+        dr.text((S(g.width - g.pad_right), S(m.label_y)), '%d' % round(m.cue.frame),
                 font=f_act, fill=txt, anchor='rm')
 
-    # ---- 「现在」线：固定不动。轴点往下滚，就是它在穿过这条线 ----
+    # ---- 「现在」线：钉在正中不动。刻度整条往上滚，就是轴点在穿过这条线 ----
+    # 回看（lay.now != lay.frame）时多画一条**灰**线标出真正的「现在」在哪：
+    # 视角往上退了多少帧，那条灰线就在指针上方多少像素。指针那行这时印「回看」。
+    now = lay.now if lay.now is not None else lay.frame
+    scrubbed = abs(now - lay.frame) > 1e-6
+    if scrubbed:
+        y_now = S(g.y_of(now, lay.frame))
+        if 0.0 <= y_now <= H:
+            dr.line([0, y_now, W, y_now], fill=th.tick)
+            dr.text((S(g.width - g.pad_right), y_now), '现在 %.1f' % now,
+                    font=f_small, fill=th.num, anchor='rm')
     py = S(lay.pointer_y)
     dr.line([0, py, W, py], fill=th.accent)
     dr.polygon([(S(g.ruler_w) - 7, py - S(4)), (S(g.ruler_w) - 7, py + S(4)),
@@ -128,7 +144,7 @@ def render(lay, theme: Theme = None, scale: float = 1, flash: bool = False) -> I
     # 「现在」两个字必须走中文字体：Bahnschrift 里没有汉字，PIL 也不会像 Tk 那样
     # 自动回退，用错字体就会画成两个空豆腐块。数字仍旧用 Bahnschrift，和刻度上的
     # 帧号保持同一种观感。
-    lbl, val = '现在', '%.1f' % lay.frame
+    lbl, val = ('回看', '%.1f' % lay.frame) if scrubbed else ('现在', '%.1f' % now)
     w_lbl = dr.textlength(lbl, font=f_small)
     w_val = dr.textlength(val, font=f_num)
     nx = W - S(g.pad_right) - w_lbl - S(4) - w_val
