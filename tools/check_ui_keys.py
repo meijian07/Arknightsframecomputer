@@ -12,12 +12,12 @@
     2. 主按钮 / 空格 = **开始 -> 暂停 -> 继续**三态（看板批注「开始和暂停合并」）；
        起来时重新起锚；**用户主动暂停的**不算故障（看门狗不报「采样已停」）；
        清零（C）= 停采样 + 归零 + 把三态拉回「开始计数」；
-    3. Esc 只收起展开区、不再退程序；退出改 Ctrl+Q；
+    3. 一个键盘快捷键都不收（2026-10-12：游戏里有快捷键，绑了就会冲突）；
     4. ROI 校准模式（2026-10-11 起跟「手动校准」二级窗口绑定）：Tab / 方向键 /
        Shift+方向键 / S / R / K 只在窗口开着时绑上，关窗口（或 Esc）一定解绑
        （以前是全局的 —— 打字、翻条、误按都会碰到 ROI）；
     5. 刻度跨度**固定 150 帧**（2026-10-11 删了 [ ] 缩放档：跨度常量算出来的
-       px_per_frame 得对得上）；↑↓ 翻条（回看偏移、边界、没轴时的提示）；
+       px_per_frame 得对得上）；翻条走标题栏按钮（回看偏移、边界、没轴时提示）；
     6. 「CSV」按钮、「刻度缩放」四个键、「局内负费」下拉**都删掉了**（用户看板批注）；
     7. 诊断那一层删掉了（2026-10-11）：按钮 / 折叠方法没了，fr_diag 一直不 pack；
     8. 刻度表的「回看」：build(now=...) 时多画一条「现在」灰线（画出来的图不一样）；
@@ -34,9 +34,32 @@
     12. 第五轮：模式名换成「PC端 / 窗口」；「手动校准」**两种模式都有**（PC端开二级
         窗口、窗口走参照图取景器，按模式分派 manual_calib）；底部那一行平时写**短状态**
         （未开始 / 正在计数… / 已暂停 / 正在校准…），动作反馈说完自己让位。
+    15. 第八轮（44）：取景器右边那块放大图能**按住拖动**（看框外面），平移不改倍数；
+        框自己微调时视窗反向补，看的还是同一块画面。
+    16. 第九轮（46）：放大图能**滚轮局部放大**（盯着鼠标那一点缩，双击复位）；
+        同一轮把「吸附左端」删了（用户：实测下来一次没用过）。
     13. 第六轮（41）：切模式**自动清零**（切过去是待命态，点「开始」才数）；取景器
         **取消**之后引用要清掉（否则「手动校准」再也点不动）；「置顶」键删掉、窗口模式
         **默认置顶**（选完窗口就钉，钉完把面板抢回来）。
+    14. 第八轮（44）：「开着我们自己的对话框就别去钉」那道门拆了（它让置顶整段停摆，
+        用户报的「读取窗口无法保持置顶」），改成钉完由 _raise_ours() 把面板 +
+        对话框一起抬回来；另外 _keep_pin 不再要求 self._window_win 已就位。
+        同轮第二条真因：标记还在 ≠ 我们没被压住（用户点一下播放器，它跑到置顶层最上面），
+        所以 _keep_pin 在「标记还在」那一支也要比一次 z 序（is_above）。
+
+    17. 第十轮（47 / 48 上半）：**整个界面一个键盘快捷键都不收**（用户 2026-10-12：「把快捷键
+        删掉！！！游戏里有快捷键会冲突」）—— Esc / Ctrl+Q / 空格 / Tab / 方向键 / s / k /
+        [ ] / ↑↓ 全删了（打轴器翻条挪到标题栏那两个按钮上），所以这一份自检里所有关于
+        「哪个键归谁」的断言整组改写成「一个键盘事件都没绑」；暂停键多了两块**虚影**
+        （boxpick.pause_ghost）当对齐参考。
+    18. 第十轮（48 下半，用户：「放大做的什么鬼，先在左侧原画面创建一个框，就像 Windows 的
+        截图一样可以拖动框放大缩小移动，右侧为框内放大图，放大图下方可以微调px」）：
+        取景器分工摆清楚 —— 左边那张图 = Windows 截图那套（拖框里面 = 挪框、拖八个手柄
+        = 拉那条边 / 那个角、框外面拖 = 拉新框）；右边放大图 = 只看（左键拖 = 挪视窗、
+        滚轮 = 局部放大、双击 = 复位）；放大图**下面**两行 px 微调（左 / 右 / 上 / 下 ±1、
+        整框 ←→↑↓）回来了 —— 这一轮它们才是**唯一**的像素级入口。那套「左键拖框 /
+        Shift+拖挪视窗」作废（用户实测：在放大图里随便一拖框就跑了）。按钮那一对现在
+        **可以拉大拉小**（原来写死标称尺寸）。
 
 用法：python tools/check_ui_keys.py
 """
@@ -242,85 +265,73 @@ def t_toggle_count(app, dm):
                                       app._counting_started))
 
 
-def t_escape(app):
-    """3：Esc 收起展开区，**不再退程序**。"""
-    app.toggle_more()
-    app._tick_body()
-    app._on_escape()
-    check('展开态按 Esc：收起展开区，窗口还在',
-          (not app._more) and alive(app), '_more=%s' % app._more)
-    app._on_escape()
-    note = app.lb_note.cget('text')
-    check('收起态再按 Esc：给一句提示（而且不再报键名），窗口还在',
-          alive(app) and note and 'Ctrl+Q' not in note and 'Esc' not in note, note)
-    check('Esc / Ctrl+Q 两个键都绑上了',
-          bool(app.root.bind('<Escape>')) and bool(app.root.bind('<Control-q>')))
+def t_no_keys(app):
+    """3：**一个键盘快捷键都不收**（用户 2026-10-12：「把快捷键删掉！！！游戏里有快捷键
+    会冲突」）。
 
-
-def t_ctrl_q():
-    """3b：Ctrl+Q 真的退程序（单独开一个窗口 —— 这一下会把窗口销毁）。
-
-    按键要走真事件（event_generate），所以这个窗口得先 deiconify + 拿到焦点：
-    收起态、没有焦点的窗口收不到键事件。
+    为什么必须一条都不留：面板是浮在游戏上的，游戏自己有用键盘的操作（帧操、放技能、
+    翻干员…）。我们只要占了一个键，用户在游戏里按它就会同时打到面板上 —— 用户实测就是
+    这么发现的。所以这一组从「哪个键归谁」反过来钉：**根窗口上一个键盘事件都不许绑**。
     """
-    import tkinter as tk
-    app, dm = make_app()
-    app.root.deiconify()
-    app.root.update()
-    app.root.focus_force()
-    app.root.update()
-    try:
-        app.root.event_generate('<Control-q>', when='now')
-        app.root.update()
-    except tk.TclError:
-        pass                             # destroy 之后再 update 会抛，正是「已经退了」
-    still = alive(app)
-    check('Ctrl+Q 真的退出（窗口没了）', not still, '窗口还在' if still else '')
-    if still:
-        kill_afters(app)
-        try:
-            app.root.destroy()
-        except Exception:                # noqa: BLE001
-            pass
+    from akframe import ui as ui_mod
+
+    seqs = [s for s in app.root.bind() if s not in ('<Motion>',)]
+    keys = [s for s in seqs if not s.startswith('<Button') and not s.startswith('<B1')
+            and not s.startswith('<Double') and not s.startswith('<Enter')
+            and not s.startswith('<Leave')]
+    check('面板根窗口一个键盘事件都没绑（只剩鼠标）', keys == [], str(seqs))
+    check('原来那套绑键 / 解绑的机器整台删掉了',
+          not hasattr(ui_mod.MonitorApp, '_bind_keys')
+          and not hasattr(ui_mod.MonitorApp, '_base_keys')
+          and not hasattr(ui_mod.MonitorApp, '_calib_keys')
+          and not hasattr(app, '_on_escape'),
+          '%s %s' % (hasattr(ui_mod.MonitorApp, '_bind_keys'), hasattr(app, '_on_escape')))
+    # 打轴器的翻条挪到标题栏那两个按钮上（↑↓ 没了）——按钮在、而且真接上了 _prom_scroll
+    fr = getattr(app, 'fr_more_top', None)
+    btns = _btn_texts(fr) if fr is not None else []
+    check('打轴器标题栏有「◀ 回看 / 现在 ▶」两个按钮', '◀ 回看' in btns and '现在 ▶' in btns,
+          str(btns))
+    app._set_axis_text('300 部署 银灰\n330 技能 银灰')
+    app.apply_axis_text()
+    app._prom_scroll(1)
+    check('「◀ 回看」那条路真能翻条（回看 30 帧）',
+          abs(app._prom_shift - 30.0) < 1e-9, app._prom_shift)
+    app._prom_scroll(-99)
+    check('「现在 ▶」回到 0', app._prom_shift == 0.0, app._prom_shift)
 
 
 def t_calib_mode(app):
-    """4：ROI 校准模式的键门。"""
+    """4：ROI 校准模式（二级窗口）—— 进不进模式都**不收键盘**，微调只剩按钮。"""
     import tkinter as tk
     from akframe import ui as ui_mod
 
-    def bound(seq):
-        return bool(app.root.bind(seq))
-
-    check('平时 Tab 没被占（还给系统）', not bound('<Tab>'))
-    check('平时 s / k / Shift+方向键 也没绑',
-          not bound('s') and not bound('k') and not bound('<Shift-Up>'))
     try:
         app.open_calib_dialog()
     except tk.TclError as exc:
         skip('ROI 校准模式', '建不出二级窗口：%s' % exc)
         return
-    check('开窗口 = 进模式：Tab / s / k / Shift+方向键 全绑上',
-          app._calib and bound('<Tab>') and bound('s') and bound('k')
-          and bound('<Shift-Up>'))
+    check('开窗口 = 进模式', bool(app._calib))
+    check('进了模式也没绑键盘（Tab / 方向键 / s / k 一个都不收）',
+          not app.root.bind('<Tab>') and not app.root.bind('s')
+          and not app.root.bind('<Shift-Up>') and not hasattr(app, '_nudge'),
+          '%s %s' % (app.root.bind('<Tab>'), hasattr(app, '_nudge')))
     check('目标按钮当前那个反色（白底深字）',
           app.calib_tgt_btns[app.target].cget('bg') == ui_mod.RULE,
           app.calib_tgt_btns[app.target].cget('bg'))
-    ev = types.SimpleNamespace(keysym='Right', state=0)
-    app._nudge(ev)
-    check('模式里方向键真的挪 ROI', app.deltas[app.target][0] == 1, app.deltas)
+    # 微调那条路（原来归方向键，现在只有按钮）——直接调方法，验证接线还在
+    app.nudge(1, 0)
+    check('按钮那条路照样能挪 ROI（一步 = calib_step）',
+          app.deltas[app.target][0] == app.calib_step, app.deltas)
     app.reset_calib()
-    check('R 恢复默认把 delta 清零',
+    check('「恢复默认」把 delta 清零',
           app.deltas[app.target] == [0, 0, 0, 0], app.deltas)
     app.close_calib_dialog()
-    check('关窗口 = 退模式：那几个键全解绑',
-          (not app._calib) and not bound('<Tab>') and not bound('s')
-          and not bound('k') and not bound('<Shift-Up>'))
+    check('关窗口 = 退模式', not app._calib)
     check('关窗口后预览画布收掉（cv_bar = None）', app.cv_bar is None)
 
 
 def t_scale_and_scroll(app):
-    """5：刻度固定 150 帧（没有缩放档了）+ ↑↓ 翻条。"""
+    """5：刻度固定 150 帧（没有缩放档了）+ 标题栏按钮翻条（↑↓ 键没了）。"""
     from akframe import ui as ui_mod
 
     # 看板批注「刻度缩放固定为 150 帧」：跨度是常量，缩放那一套（[ ] 键、四个按钮、
@@ -349,12 +360,12 @@ def t_scale_and_scroll(app):
     check('轴进到提词器',
           app.prompter.timeline is not None and len(app.prompter.timeline.cues) == 3)
     app._prom_scroll(1)
-    check('↑ = 往回看 30 帧（1 费 = 1 秒）',
+    check('「◀ 回看」 = 往回看 30 帧（1 费 = 1 秒）',
           abs(app._prom_shift - 30.0) < 1e-9, app._prom_shift)
     app._prom_scroll(1, 1000.0)
     check('回看有上限（600 帧）', abs(app._prom_shift - 600.0) < 1e-9, app._prom_shift)
     app._prom_scroll(-1, 1000.0)
-    check('↓ 一路回到「现在」',
+    check('「现在 ▶」一路回到「现在」',
           app._prom_shift == 0.0 and '现在' in app.lb_note.cget('text'),
           app.lb_note.cget('text'))
 
@@ -372,6 +383,13 @@ def t_removed_controls(app):
     check('局内负费仍是「一直按画面判」',
           ui_mod.parse_negative(getattr(app, 'negative_mode', 'auto')) == 'auto',
           getattr(app, 'negative_mode', '?'))
+    # 2026-10-12：取景器里那一堆微调按钮（左端±1 / 右端±1 / 整框…）整排删了，
+    # 靠鼠标直接改框（拖身子挪 / 拖边改边）。
+    check('取景器那两排微调控件整排删掉了',
+          not hasattr(app, 'row_bar') and not hasattr(app, 'row_btn'),
+          '%s %s' % (hasattr(app, 'row_bar'), hasattr(app, 'row_btn')))
+    check('取景器微调用的 _nudge_pair 也删了',
+          not hasattr(ui_mod.BoxPicker, '_nudge_pair'))
 
 
 def t_diag_gone(app):
@@ -430,9 +448,31 @@ def t_calib_dialog(app):
               sorted(app.calib_tgt_btns))
         check('步长三档 1 / 5 / 10px', sorted(app.calib_step_btns) == [1, 5, 10],
               sorted(app.calib_step_btns))
-        check('预览画布是 430x64',
+        check('预览画布是 430x200（装得下按钮 ROI 那一档）',
               app.cv_bar is not None and int(app.cv_bar.cget('width')) == 430
-              and int(app.cv_bar.cget('height')) == 64)
+              and int(app.cv_bar.cget('height')) == 200)
+        # 放大镜（2026-10-11 用户：「最好加一个放大镜，放大部分画面方便对齐」）：
+        # 画布显示**当前目标**那个 ROI，红线就是特征真正取值的那几行（占比换算出来的）。
+        app.set_target('bar')
+        check('预览红线跟着目标走：费用条 = 行 5..12',
+              app._preview_marks((17, 253)) == ((5, 12), None),
+              str(app._preview_marks((17, 253))))
+        app.set_target('pause')
+        check('预览红线跟着目标走：暂停键 = 形状判别条带',
+              app._preview_marks((160, 200)) == ((38, 48), None),
+              str(app._preview_marks((160, 200))))
+        app.set_target('speed')
+        marks = app._preview_marks((160, 200))
+        check('预览红线跟着目标走：倍速键 = 数字条带 + 横向范围',
+              marks == ((18, 49), (60, 169)), str(marks))
+        import numpy as _np
+        arr = _np.zeros((160, 200), _np.uint8)
+        arr[marks[0][0]:marks[0][1] + 1, marks[1][0]:marks[1][1] + 1] = 255
+        app._show(app.cv_bar, arr, mark_rows=marks[0], mark_cols=marks[1])
+        photo = app._photos[app.cv_bar]
+        check('按钮 ROI 在预览里被放大（不是 1 倍、也没被裁掉）',
+              photo.width() > 200 and photo.height() <= 200 and photo.width() <= 430,
+              '%dx%d' % (photo.width(), photo.height()))
         pos = app.lb_calib_pos.cget('text')
         check('位置读数有 x= / y= 或「ROI 未知」',
               ('x=' in pos and 'y=' in pos) or '未知' in pos, pos)
@@ -509,7 +549,9 @@ def t_window_row(app):
     用户 2026-10-11：「把读取窗口功能中的框选费用条替换手动校准，原有的手动校准删除；
     置顶中删除默认置顶；下方的教程删除，两种模式的窗口大小不变，不需要展开」。
     41 轮追加：「窗口模式置顶删除，默认置顶」—— 键删了，选完窗口直接钉。
+    44 轮追加：置顶不再被「开着对话框」那道门停摆，钉完把自己的窗全抬回来。
     """
+    import tkinter as tk
     import types as _types
     from akframe import ui as ui_mod
 
@@ -548,10 +590,11 @@ def t_window_row(app):
     # ---- 默认置顶：选完窗口就该顺手 SetWindowPos(TOPMOST) + 把面板抢回来 ----
     calls = []
     raised = []
-    real = (ui_mod.set_topmost, ui_mod.is_window, ui_mod.is_topmost, app._window_worker)
-    real_raise = app._raise_panel
+    real = (ui_mod.set_topmost, ui_mod.is_window, ui_mod.is_topmost, app._window_worker,
+            ui_mod.is_above)
+    real_raise = app._raise_ours
     app._window_worker = lambda *a, **k: None      # 别真起那条后台线程
-    app._raise_panel = lambda: raised.append(1)
+    app._raise_ours = lambda: raised.append(1)
     ui_mod.set_topmost = lambda h, on=True: (calls.append((h, on)), True)[1]
     try:
         app.start_window_calib(_types.SimpleNamespace(hwnd=4242, exe="t.exe"),
@@ -570,12 +613,27 @@ def t_window_row(app):
     raised = []
     ui_mod.set_topmost = lambda h, on=True: (calls.append((h, on)), True)[1]
     ui_mod.is_window = lambda h: True
-    app._raise_panel = lambda: raised.append(1)
+    ui_mod.is_above = lambda a, b: False           # 目标没压在我们上面
+    app._raise_ours = lambda: raised.append(1)
     try:
         ui_mod.is_topmost = lambda h: True
         app._pin_at = 0.0
         app._keep_pin(1000.0)
         check('置顶标记还在：一个系统调用都不发（稳态零闪烁）', calls == [], str(calls))
+        # 标记还在 **≠** 我们没被压住：用户点一下正在读的那个播放器，系统就把它抬到
+        # 置顶层最上面，我们的面板当场被压下去（真 VLC 实测：VLC rank 17->14、面板
+        # 13->17），而标记还好端端挂着。所以标记还在那一支也得复核一遍 z 序。
+        ui_mod.is_above = lambda a, b: True
+        app._pin_at = 0.0
+        app._keep_pin(1000.5)
+        check('标记还在、但目标跑到我们上面：不发系统调用，只把自己抬回来',
+              calls == [] and raised == [1], '%s / %s' % (calls, raised))
+        ui_mod.is_above = lambda a, b: False
+        raised = []
+        app._pin_at = 0.0
+        app._keep_pin(1000.8)
+        check('没被压住就一个动作都不做（稳态零闪烁的另一半）',
+              calls == [] and raised == [], str(raised))
         ui_mod.is_topmost = lambda h: False
         app._pin_at = 0.0
         app._keep_pin(1001.0)
@@ -590,8 +648,44 @@ def t_window_row(app):
               app.lb_note.cget('text'))
     finally:
         (ui_mod.set_topmost, ui_mod.is_window, ui_mod.is_topmost,
-         app._raise_panel) = real[0], real[1], real[2], real_raise
+         app._raise_ours) = real[0], real[1], real[2], real_raise
+        ui_mod.is_above = real[4]
     app._pinned_hwnd = None
+
+    # ---- 14. 开着我们自己的对话框时，置顶**照样**复核 + 把自己人全抬回来 ----
+    # 用户 2026-10-11 第 44 轮：「读取窗口又无法保持置顶了」。病因在这儿：
+    # _tick_body 里原来挂着一道 `not self._own_dialog_open()` 的门 —— 门一关 _keep_pin
+    # 整段停摆，目标在那期间丢了标记（播放器自己重设窗口 / 换下一段视频 / 切全屏）
+    # 就再也没有人把它钉回去，而面板上什么都不会说。现在门拆了：照样复核；「别把取景器
+    # 压下去」这件事改由 _raise_ours() 负责 —— 钉完把面板和对话框一起抬回目标上面。
+    top = tk.Toplevel(app.root)
+    app.root.update()
+    calls = []
+    lifted = []
+    real2 = (ui_mod.set_topmost, ui_mod.is_window, ui_mod.is_topmost,
+             ui_mod.top_level, ui_mod.raise_window)
+    ui_mod.set_topmost = lambda h, on=True: (calls.append((h, on)), True)[1]
+    ui_mod.is_window = lambda h: True
+    ui_mod.is_topmost = lambda h: False        # 标记丢了（播放器刚重设过窗口）
+    ui_mod.top_level = lambda h: h             # 面板 / 对话框各自给回自己的句柄
+    ui_mod.raise_window = lambda h: (lifted.append(h), True)[1]
+    try:
+        check('开着一个对话框：_own_dialog_open() 为真', app._own_dialog_open())
+        panel_h, dlg_h = app.root.winfo_id(), top.winfo_id()
+        app._pinned_hwnd = 4242
+        app._pin_at = 0.0
+        app._keep_pin(time.perf_counter())
+        check('对话框开着也照样补钉（第 44 轮修的就是这条）',
+              calls == [(4242, True)], str(calls))
+        check('钉完把面板和对话框都抬回来（取景器仍然盖在目标上面）',
+              lifted == [panel_h, dlg_h], str(lifted))
+    finally:
+        top.destroy()
+        app.root.update()
+        (ui_mod.set_topmost, ui_mod.is_window, ui_mod.is_topmost,
+         ui_mod.top_level, ui_mod.raise_window) = real2
+        app._pinned_hwnd = None
+    check('对话框关掉之后 _own_dialog_open() 又为假', not app._own_dialog_open())
 
     # ---- 原来那段「教程」里唯一必须留的：面板压住了 ROI ----
     class _R:
@@ -780,6 +874,33 @@ def t_picker_cancel(app):
             if self.on_close is not None:
                 self.on_close()
 
+    # 3) 交回去什么：费用条**总是**交（它就是取景器的正题），按钮只在拖过时才交 ——
+    #    没拖过就留给后端按模板搜（拿一份没人验过的预测去盖掉搜索结果是反的）。
+    def _apply_with(dirty):
+        pk = ui_mod.BoxPicker.__new__(ui_mod.BoxPicker)
+        pk._closed = False
+        pk.top = _types.SimpleNamespace(destroy=lambda: None)
+        pk.on_close = None
+        pk.boxes = {'bar': _types.SimpleNamespace(x=1, y=2, w=114, h=17),
+                    'pause': _types.SimpleNamespace(x=3, y=4, w=91, h=73),
+                    'speed': _types.SimpleNamespace(x=5, y=6, w=91, h=73)}
+        pk.dirty = set(dirty)
+        got = []
+        pk.on_apply = got.append
+        pk._apply()
+        return got[0]
+
+    only_bar = _apply_with(())
+    check('取景器：没拖过按钮就只交费用条那一个框', not isinstance(only_bar, dict)
+          and only_bar.x == 1, repr(only_bar))
+    with_btn = _apply_with(('bar', 'pause', 'speed'))
+    check('取景器：拖过按钮就三个框一起交（按目标名）',
+          isinstance(with_btn, dict) and set(with_btn) == set(ui_mod.ROI_ORDER)
+          and with_btn['pause'].x == 3, repr(sorted(with_btn)))
+    btn_only = _apply_with(('pause', 'speed'))
+    check('取景器：只拖了按钮也要带上费用条（否则后端会去跑自动那套）',
+          isinstance(btn_only, dict) and btn_only['bar'].x == 1, repr(sorted(btn_only)))
+
     real_cls = ui_mod.BoxPicker
     app._picker = None
     app._src_kind = 'window'
@@ -801,6 +922,275 @@ def t_picker_cancel(app):
         app._picker = None
         app._src_kind = 'live'
         app._window_win = None
+
+
+def t_picker_pan(app):
+    """15：取景器：左边那张图 = Windows 截图那套；右边放大图 = 只看 + 挪视窗。
+
+    2026-10-11 第 44 轮用户要的是「放大图能自己移动，不然很难对准」；2026-10-12 第 48 轮
+    又补一句：「放大做的什么鬼，先在左侧原画面创建一个框，就像 Windows 的截图一样可以
+    拖动框放大缩小移动，右侧为框内放大图，放大图下方可以微调px」。于是分工摆清楚：
+
+        左边图：拖框里面 = 挪框、拖八个手柄 = 拉那条边 / 那个角、框外面拖 = 拉新框；
+        放大图：左键拖 = 挪视窗（看框外面），滚轮 = 局部放大，双击 = 复位；
+        放大图下面两行按钮 = 一次 1 个像素的微调。
+
+    位移一律按「按下那一刻」折算（boxpick.resize_box），不逐拍累加 —— 逐拍累加会攒下每
+    一步的取整误差，手抖一下再抖回来框就回不到原位，而这是「对 1 个像素」的活儿。
+    """
+    import types as _types
+    import numpy as np
+    from akframe import ui as ui_mod
+    from akframe.geometry import layout_for, Rect
+
+    guide = layout_for(2560, 1600)
+    frame = (np.tile(np.arange(2560, dtype=np.uint16), (1600, 1)) % 190).astype(np.uint8)
+    pk = ui_mod.BoxPicker(app.root, lambda i: (frame, guide), 3, 1, lambda _b: None)
+    try:
+        app.root.update()
+        check('取景器：放大图换成了「可以拖」的光标', pk.cv_zoom.cget('cursor') == 'fleur',
+              pk.cv_zoom.cget('cursor'))
+        pk.set_target('pause')
+        check('换目标把视窗重置回框里（别带着上一个目标的平移）',
+              pk.pan == [0.0, 0.0], str(pk.pan))
+        r = pk.box
+        # 暂停键虚影（用户 2026-10-12：「手动框选暂停键参考不明确，最好加一个暂停键的
+        # 虚影方便对齐」）：几何对 + **真的贴到画布上了**。量 pk._photo['zoom'] 的像素、
+        # 和「不画虚影」那张同一个位置比 —— 单调一次 magnify 证明不了接线没接错。
+        bp = ui_mod.boxpick
+        gp = bp.pause_ghost(r)
+
+        def pxs(poly):
+            return [p[0] for p in poly]
+
+        def pys(poly):
+            return [p[1] for p in poly]
+
+        b0p = pk._band_rows(r)[0]
+        # 斜切量：底边比顶边往右挪多少（两段真录像量出来是「字形高的 19%」）。
+        shear = int(round(bp.PAUSE_GHOST_SHEAR * (max(pys(gp[0])) - min(pys(gp[0])) + 1)))
+        check('暂停键虚影 = 两块**平行四边形**：上下两条边一样宽、底边整体往右斜切',
+              len(gp) == 2 and all(len(p) == 4 for p in gp)
+              and all(pys(p)[0] == pys(p)[1] and pys(p)[2] == pys(p)[3] for p in gp)
+              and all(pxs(p)[1] - pxs(p)[0] == pxs(p)[2] - pxs(p)[3] for p in gp)
+              and all(pxs(p)[3] - pxs(p)[0] == shear
+                      and pxs(p)[2] - pxs(p)[1] == shear for p in gp)
+              and shear > 0, '%s shear %s' % (gp, shear))
+        check('暂停键虚影：两块都在框里、第二块在第一块右边、顶边压在取样条带最上一行',
+              max(pxs(gp[0])) < min(pxs(gp[1]))
+              and all(r.x <= min(pxs(p)) and max(pxs(p)) <= r.x + r.w for p in gp)
+              and all(min(pys(p)) == b0p and max(pys(p)) <= r.y + r.h for p in gp),
+              '%s 条带上沿 %s' % (gp, b0p))
+        kzp = bp.zoom_scale(r, ui_mod.BoxPicker.ZOOM_PANEL)
+        vxp, vyp = bp.zoom_view(r, ui_mod.BoxPicker.ZOOM_PANEL, pk.pan, pk.zoom,
+                                pk._frame_size())[:2]
+        mid = gp[0]
+        cx = int((sum(pxs(mid)) / 4.0 - vxp) * kzp[0])
+        cy = int((sum(pys(mid)) / 4.0 - vyp) * kzp[1])
+
+        def zpx(photo, x, y):
+            return tuple(int(v) for v in photo.tk.call(photo, 'get', x, y))
+
+        got = zpx(pk._photo['zoom'], cx, cy)
+        plain = bp.magnify(pk.frame, r, panel=ui_mod.BoxPicker.ZOOM_PANEL,
+                           band=pk._band_rows(r), pan=pk.pan, zoom=pk.zoom,
+                           ghost=(), band_fill=True)
+        ref = ui_mod.ImageTk.PhotoImage(plain)      # 留着引用，别让 GC 收走
+        base = zpx(ref, cx, cy)
+        want_ghost = tuple(int(round(g * bp.GHOST_ALPHA / 255.0
+                                     + b * (255 - bp.GHOST_ALPHA) / 255.0))
+                           for g, b in zip(bp.GHOST, base))
+        check('放大图里真的画上了虚影（中心 = 半透明 GHOST 压在画面上）',
+              all(abs(a - b) <= 3 for a, b in zip(got, want_ghost)),
+              'got %s want %s base %s' % (got, want_ghost, base))
+        check('虚影是半透明的（没把底下那层游戏画面盖死）',
+              got != base and got != bp.GHOST, '%s base %s' % (got, base))
+        kx = ui_mod.boxpick.zoom_scale(r, ui_mod.BoxPicker.ZOOM_PANEL)[0]
+        w0, h0 = pk._photo['zoom'].width(), pk._photo['zoom'].height()
+        # 放大图现在**只**负责看（左键拖 = 挪视窗）。上一轮那套「拖身子挪框 / 拖边改边」
+        # 整段搬回左边那张图了 —— 在放大图里随便一拖框就跑，那正是「放大做的什么鬼」。
+        pk._zdown(_types.SimpleNamespace(x=100, y=60))
+        pk._zdrag(_types.SimpleNamespace(x=100 + 4 * kx, y=60))
+        check('放大图里左键拖动 = 挪视窗：往右拖 4 个画面像素 pan = -4（除以放大倍数）',
+              abs(pk.pan[0] + 4.0) < 1e-6 and pk.pan[1] == 0.0, str(pk.pan))
+        check('平移不改画布里的图尺寸（倍数只由框决定，越挪不会越小）',
+              (pk._photo['zoom'].width(), pk._photo['zoom'].height()) == (w0, h0),
+              '%dx%d' % (pk._photo['zoom'].width(), pk._photo['zoom'].height()))
+        check('放大图里那一拖只挪视窗，框一动不动（挪框在左边那张图上）',
+              pk.box == r, '%s -> %s' % (r, pk.box))
+        pk._zup()
+        check('松手之后不再跟着手走', pk._zpan_from is None)
+        # 往左上拖（鼠标往左上 = 看画面右下角）-> 视窗顶到画面右下角就不动了
+        pk._zdown(_types.SimpleNamespace(x=0, y=0))
+        pk._zdrag(_types.SimpleNamespace(x=-10 ** 6, y=-10 ** 6))
+        pk._zup()
+        check('拖出画面 -> 夹在右下角（视窗一直还在画面里）',
+              pk.pan == [float(2560 - r.w - r.x), float(1600 - r.h - r.y)], str(pk.pan))
+        pk._zdown(_types.SimpleNamespace(x=0, y=0))
+        pk._zdrag(_types.SimpleNamespace(x=10 ** 6, y=10 ** 6))
+        pk._zup()
+        check('往反方向拖出去 -> 夹在左上角（不会越拖越远，回来时不用空拖）',
+              pk.pan == [float(-r.x), float(-r.y)], str(pk.pan))
+        pk.set_target('bar')
+        # 第 45 轮（用户：「查看上下左右是否对齐」）：费用条目标的放大图里**四条边**都画着。
+        # 量的是取景器**真正贴上去的那张图**（tk photo 的 get 子命令），不是另调一次
+        # magnify —— 量后者只能证明纯函数对（第 11 组已经量了），证明不了没接错线。
+        zm = ui_mod.boxpick
+
+        def zsize():
+            p = pk._photo['zoom']
+            return p.width(), p.height()
+
+        def px(x, y):
+            p = pk._photo['zoom']
+            return tuple(int(v) for v in p.tk.call(p, 'get', x, y))
+
+        # 橙色那条是「按分辨率推测的位置」参考线（layout）—— 默认框正好等于
+        # 预测框，它会盖在四条边上（重叠处谁后画谁赢）。一个参考线遮住了真正
+        # 要看的边，那就先把它关掉，单独量四条边。
+        pk.guide = None
+        pk.redraw()
+        iz, jz = zsize()
+        jy = jz * 3 // 4            # 避开两条蓝线（取样条带）占的那两行
+        check('费用条目标的放大图：左红 / 右绿 / 上下品红四条边压在画布四边上',
+              px(0, jy) == zm.EDGE_LEFT and px(iz - 1, jy) == zm.EDGE_RIGHT
+              and px(iz // 2, 0) == zm.EDGE_TOP and px(iz // 2, jz - 1) == zm.EDGE_BOTTOM,
+              '%s %s %s %s' % (px(0, jy), px(iz - 1, jy), px(iz // 2, 0), px(iz // 2, jz - 1)))
+        b0, b1 = pk._band_rows(pk.box)          # 绝对行号（画面坐标，见 _band_rows）
+        check('取样条带落在框内（上下都在框里，蓝线不会跑到框外去）',
+              pk.box.y < b0 <= b1 < pk.box.y + pk.box.h,
+              'band=%s 框 y=%d h=%s' % ((b0, b1), pk.box.y, pk.box.h))
+        # 放大图**下面**那两行 px 微调（用户 2026-10-12：「放大图下方可以微调px」）：走的是
+        # 和拖框同一套几何（boxpick.resize_box），一次 1 个画面像素 —— 对付的就是「红线和
+        # 白块左端差 1~2px」。这里量的是**真的接线**：调 pk.nudge_edge / pk.nudge_move
+        # （按钮的 command 打的就是这两个），看框有没有按那一条边 / 整块动。
+        check('px 微调按钮是活的（上一轮删掉的那两排，现在长在放大图下面）',
+              hasattr(ui_mod.BoxPicker, 'nudge_edge')
+              and hasattr(ui_mod.BoxPicker, 'nudge_move'), '')
+        rw = pk.box
+        pk.nudge_edge('r', 1)
+        check('「右 +1」：只把右端往外挪 1 个画面像素（左端不动）',
+              pk.box == Rect(rw.x, rw.y, rw.w + 1, rw.h), '%s -> %s' % (rw, pk.box))
+        rw = pk.box
+        pk.nudge_edge('l', -1)
+        check('「左 −1」：左端动、右端不动（x 与宽一起变）',
+              pk.box == Rect(rw.x - 1, rw.y, rw.w + 1, rw.h), '%s -> %s' % (rw, pk.box))
+        rw = pk.box
+        pk.pan = [0.0, 0.0]
+        pk.nudge_move(-2, 3)
+        check('整框 ← ↑：整块平移（宽高一点不变）',
+              pk.box == Rect(rw.x - 2, rw.y + 3, rw.w, rw.h), '%s -> %s' % (rw, pk.box))
+        check('微调挪块：pan 反向补同样多（放大图不跟着跳）',
+              abs(pk.pan[0] - 2.0) < 1e-6 and abs(pk.pan[1] + 3.0) < 1e-6, str(pk.pan))
+        kb, _ = zm.zoom_scale(pk.box, ui_mod.BoxPicker.ZOOM_PANEL)
+        pk.pan = [9.0, 5.0]
+        pk.redraw()
+        # 平移（右移 9px）之后：绿线不再贴在画布最右列，而是跟着框挪到 (w-9)*kx-1 列。
+        iz2, jz2 = zsize()
+        jy2 = jz2 * 3 // 4
+        check('平移后四条边跟着框走（右边挪到 (w-9)*kx-1 列）',
+              px((pk.box.w - 9) * kb - 1, jy2) == zm.EDGE_RIGHT
+              and px(iz2 - 1, jy2) != zm.EDGE_RIGHT,
+              '最右列 %s，期望第 %d 列是绿色'
+              % (px(iz2 - 1, jy2), (pk.box.w - 9) * kb - 1))
+        pk._down(_types.SimpleNamespace(x=10, y=10))
+        check('重新拖框 = 视窗回到「就是框里」', pk.pan == [0.0, 0.0], str(pk.pan))
+        pk._up()
+        # ---- 左边那张图：Windows 截图那套（八个手柄 / 挪块 / 拉新框）----
+        # 用户 2026-10-12：「先在左侧原画面创建一个框，就像 Windows 的截图一样可以拖动框
+        # 放大缩小移动」。量三件事：_hit 把点击分派到哪儿、八个手柄认不认、拖完框是不是
+        # **正好**走那 1 个画面像素（和微调按钮同一条路：boxpick.resize_box）。
+        pk.set_target('pause')
+        app.root.update()
+        pb0 = pk.box
+        hs = pk._handle_pts(pb0)
+        check('八个手柄：四角 + 四边中点，一共八个、都不重样',
+              len(hs) == 8 and set(hs) == {'tl', 't', 'tr', 'r', 'br', 'b', 'bl', 'l'},
+              str(sorted(hs)))
+
+        def next_col(hx, hy):
+            """从 (hx, hy) 往右找一对画布坐标：_to_img 的 y 不变、x 多几个画面像素。
+
+            为什么要「找」而不是直接算：参照图按窗口缩过（本机实测 0.366 倍），1 个**画面**
+            像素不到 1 个**画布**像素，「正好 +1」的那一列常常不存在（区间宽 0.37 px、
+            里面一个整数都没有）。所以这里返回**第一个能落到的**，断言量的是它多出来的
+            那个 dx —— 拖出来的框在画面坐标里是精确的，这一点才是要害。
+            """
+            ox, oy = pk._to_img(hx, hy)
+            for d in range(1, 40):
+                ix, iy = pk._to_img(hx + d, hy)
+                if iy == oy and ix > ox:
+                    return (hx + d, hy, ix - ox)
+            return None
+
+        def next_diag(hx, hy):
+            """同 next_col，但往右下走：返回 (画布点, dx, dy)（dx / dy 都 > 0）。"""
+            ox, oy = pk._to_img(hx, hy)
+            for d in range(1, 40):
+                for e in range(1, 40):
+                    ix, iy = pk._to_img(hx + d, hy + e)
+                    if ix > ox and iy > oy:
+                        return (hx + d, hy + e, ix - ox, iy - oy)
+            return None
+
+        for kind, (hx, hy) in hs.items():
+            check('手柄 %s：按在上面就是拉那一条边 / 那个角' % kind,
+                  pk._hit(hx, hy) == ('handle', kind), str(pk._hit(hx, hy)))
+        check('按在框中间 = 挪块（不是拉边、也不是拉新框）',
+              pk._hit((hs['tl'][0] + hs['br'][0]) // 2,
+                      (hs['tl'][1] + hs['br'][1]) // 2) == ('inside', None))
+        check('按在框外面 = 拉一个新框（橡皮筋）',
+              pk._hit(5, 5) == ('new', None), str(pk._hit(5, 5)))
+        # 费用条那个框在画布上只有 9px 高：上下两条边上的**中点**手柄挤在角手柄上，不
+        # 拿出来（画出来却抓不住 = 用户拖了半天框不动）。四角照旧 —— 画的和认的是同一份。
+        pk.set_target('bar')
+        barlive = pk._live_handles(pk.box)
+        check('费用条的框太薄：上下中点手柄不画也不认，四角照旧（画的 = 认的）',
+              set(barlive) == {'tl', 'tr', 'l', 'r', 'bl', 'br'}
+              and len(pk._handle_pts(pk.box)) == 8, str(sorted(barlive)))
+        pk.set_target('pause')
+        # 拉右边那个手柄：往右拖 -> 只有右边动（动的正好是手拖出来的那几个画面像素）
+        step = next_col(hs['r'][0], hs['r'][1])
+        check('手柄那一下找得到「往右多几个画面像素」的画布点', step is not None, str(step))
+        pk._down(_types.SimpleNamespace(x=hs['r'][0], y=hs['r'][1]))
+        check('按在右边手柄上：认得是拉右边那条边（不是挪块）',
+              pk._grab[0] == 'handle' and pk._grab[1] == 'r', str(pk._grab[:2]))
+        pk._drag(_types.SimpleNamespace(x=step[0], y=step[1]))
+        pk._up()
+        check('拖右边那个手柄：只有右端往外走那几个画面像素（左端 / 上下都不动）',
+              pk.box == Rect(pb0.x, pb0.y, pb0.w + step[2], pb0.h), '%s -> %s' % (pb0, pk.box))
+        spb = pk.boxes['speed']
+        check('按钮那一对联动：拉大暂停键，倍速键**一样大**跟着长',
+              (spb.w, spb.h) == (pk.box.w, pk.box.h), '%s / %s' % (pk.box, spb))
+        # 按在框里面拖 = 整块挪（框的宽高不变）
+        pb1 = pk.box
+        mid = ((hs['tl'][0] + hs['br'][0]) // 2, (hs['tl'][1] + hs['br'][1]) // 2)
+        diag = next_diag(mid[0], mid[1])
+        check('框中间那一下找得到「往右下多几个画面像素」的画布点',
+              diag is not None, str(diag))
+        pk._down(_types.SimpleNamespace(x=mid[0], y=mid[1]))
+        pk._drag(_types.SimpleNamespace(x=diag[0], y=diag[1]))
+        pk._up()
+        check('按在框里面拖 = 整块挪（dx / dy 就是手拖出来的那几个画面像素，宽高不变）',
+              pk.box == Rect(pb1.x + diag[2], pb1.y + diag[3], pb1.w, pb1.h),
+              '%s -> %s' % (pb1, pk.box))
+        # 框外面拖 = 橡皮筋拉一个新框
+        ix0, iy0 = pk._to_img(5, 5)
+        ix1, iy1 = pk._to_img(hs['br'][0], hs['br'][1])
+        bx0, bx1 = sorted((ix0, ix1))
+        by0, by1 = sorted((iy0, iy1))
+        want = Rect(bx0, by0, max(2, bx1 - bx0), max(2, by1 - by0))
+        pk.pan = [12.0, 7.0]                # 拉新框那一下要顺手把视窗 / 缩放复位
+        pk._down(_types.SimpleNamespace(x=5, y=5))
+        check('框外面按下去就先做一件事：视窗 / 缩放复位（重新对准）',
+              pk.pan == [0.0, 0.0] and pk.zoom == 1.0, '%s %s' % (pk.pan, pk.zoom))
+        pk._drag(_types.SimpleNamespace(x=hs['br'][0], y=hs['br'][1]))
+        pk._up()
+        check('橡皮筋拉完：框 = 从按下那点到松开那点（画面坐标）',
+              pk.box == want, '%s（期望 %s）' % (pk.box, want))
+    finally:
+        pk.close()
+        app.root.update()
 
 
 def t_scrub_render():
@@ -903,6 +1293,177 @@ def t_drag(app):
     app._drag_end()
     check('松手（_drag_end）结束「拖动中」并把布局夹回来', app._dragging is False)
 
+def t_picker_zoom(app):
+    """16：取景器右边那块的**局部放大**（滚轮），以及「吸附左端」删了。
+
+    用户 2026-10-11 第 46 轮：「不要搞吸附功能了，实测下来一次没用过」、
+    「做局部放大！类似 ctrl＋滚轮 的还是框选放大都行」。
+    """
+    import numpy as np
+    from akframe import ui as ui_mod
+    from akframe.geometry import layout_for, Rect
+
+    guide = layout_for(2560, 1600)
+    frame = (np.tile(np.arange(2560, dtype=np.uint16), (1600, 1)) % 190).astype(np.uint8)
+    pk = ui_mod.BoxPicker(app.root, lambda i: (frame, guide), 3, 1, lambda _b: None)
+    try:
+        app.root.update()
+        pk.set_target('bar')
+        app.root.update()
+        # 2026-10-12：那一排（含「吸附左端」）整排删了 —— 微调改成直接拖框 / 拖边。
+        check('「吸附左端」那排微调控件整排删掉了（吸附逻辑一起走；像素微调现在长在'
+              '放大图下面 —— row_* 那几个名字不再是谁）',
+              not hasattr(pk, 'row_bar') and not hasattr(pk, 'row_btn')
+              and not hasattr(pk, '_snap')
+              and not hasattr(ui_mod.BoxPicker, '_nudge_pair')
+              and hasattr(ui_mod.BoxPicker, 'nudge_edge')
+              and hasattr(ui_mod.BoxPicker, 'nudge_move'), '')
+        # 拖完不再自动吸附：拖出来的框就是拖出来的那个
+        pk._down(types.SimpleNamespace(x=100, y=100))
+        pk._drag(types.SimpleNamespace(x=300, y=140))
+        pk._up(types.SimpleNamespace(x=300, y=140))
+        x0, y0 = int(100 / pk.scale), int(100 / pk.scale)
+        x1, y1 = int(300 / pk.scale), int(140 / pk.scale)
+        check('拖完不再自动吸附：框就是拖出来的那个',
+              pk.boxes['bar'] == Rect(x0, y0, max(2, x1 - x0), max(2, y1 - y0)),
+              '%s / %s' % (pk.boxes['bar'], Rect(x0, y0, x1 - x0, y1 - y0)))
+        # 滚轮向上 = 局部放大
+        w0, h0 = pk._photo['zoom'].width(), pk._photo['zoom'].height()
+        pk._wheel(types.SimpleNamespace(delta=120, x=200, y=80))
+        check('滚轮一格 = 放大 1.25 倍', abs(pk.zoom - 1.25) < 1e-9, str(pk.zoom))
+        check('放大之后那张图确实变大了（视窗小了一块、画得更大）',
+              (pk._photo['zoom'].width(), pk._photo['zoom'].height()) != (w0, h0),
+              '%dx%d -> %dx%d' % (w0, h0, pk._photo['zoom'].width(),
+                                  pk._photo['zoom'].height()))
+
+        def frame_at(x, y, clamp=True):
+            """放大图上 (x, y) 那一列 / 行对应的画面点（clamp = 和 _zoom_at 同一口径：
+            光标在图上空处时先夹进图里）。"""
+            r = pk.box
+            vx, vy, vw, vh, kx, ky = ui_mod.boxpick.zoom_view(
+                r, ui_mod.BoxPicker.ZOOM_PANEL, pk.pan, pk.zoom, pk._frame_size(),
+                pk._zwin_base())
+            if clamp:
+                x = min(max(x, 0), max(0, int(vw * kx) - 1))
+                y = min(max(y, 0), max(0, int(vh * ky) - 1))
+            return vx + x / float(kx), vy + y / float(ky)
+
+        pk.zoom, pk.pan = 1.0, [0.0, 0.0]
+        pk.redraw()
+        bx, by = frame_at(200, 80)
+        pk._wheel(types.SimpleNamespace(delta=120, x=200, y=80))
+        pk._wheel(types.SimpleNamespace(delta=120, x=200, y=80))
+        ax, ay = frame_at(200, 80)
+        check('放大盯着鼠标那一点：光标底下的画面点前后几乎不动',
+              abs(ax - bx) <= 1.0 and abs(ay - by) <= 1.0,
+              '(%s, %s) -> (%s, %s) zoom=%.3f' % (bx, by, ax, ay, pk.zoom))
+        for _ in range(30):
+            pk._wheel(types.SimpleNamespace(delta=-120, x=200, y=80))
+        check('一直往小了滚 = 停在缩小下限（面板装得下 = 1:1），不会再小',
+              abs(pk.zoom - pk._zoom_lo()) < 1e-9 and pk.zoom <= 1.0,
+              'zoom=%s 下限=%s' % (pk.zoom, pk._zoom_lo()))
+        for _ in range(30):
+            pk._wheel(types.SimpleNamespace(delta=120, x=200, y=80))
+        check('一直往大了滚 = 停在 ZOOM_MAX',
+              pk.zoom == ui_mod.BoxPicker.ZOOM_MAX, 'zoom=%s' % pk.zoom)
+        pk._zfit()
+        check('双击复位：倍数和平移一起回到「就是框里」',
+              pk.zoom == 1.0 and pk.pan == [0.0, 0.0], '%s %s' % (pk.zoom, pk.pan))
+        # 拖动的除数要按**当前**倍数算
+        pk._zoom_at(2.0, 200, 80)
+        kx2 = ui_mod.boxpick.zoom_scale(pk.box, ui_mod.BoxPicker.ZOOM_PANEL, pk.zoom)[0]
+        before = list(pk.pan)
+        pk._zdown(types.SimpleNamespace(x=100, y=60))
+        pk._zdrag(types.SimpleNamespace(x=100 + 2 * kx2, y=60))
+        pk._zup()
+        check('放大之后拖动：位移仍按当前倍数折算（拖 2*kx 像素 = pan 减 2）',
+              abs(pk.pan[0] - (before[0] - 2)) < 1e-6, '%s -> %s' % (before, pk.pan))
+        pk._zoom_at(2.0, 200, 80)
+        pk.set_target('pause')
+        check('换目标把缩放也复位（别带着上一个目标的倍数）',
+              pk.zoom == 1.0, str(pk.zoom))
+        pk.set_target('bar')
+        pk._zoom_at(2.0, 200, 80)
+        # 在**框外面**按下去 = 重新拉一个框 -> 视窗 / 缩放复位（框变了，视窗得跟上）。
+        # 按在框里面 / 手柄上不会复位 —— 那是在调同一个框，放大倍数得留着。
+        pk._down(types.SimpleNamespace(x=5, y=5))
+        check('重新拉框 = 缩放回 1（框变了，视窗得跟上）',
+              pk.zoom == 1.0, str(pk.zoom))
+        pk._up(types.SimpleNamespace(x=5, y=5))
+        # ---- 2026-10-13 第七轮（用户：「放大图也能用 ctrl 滚轮缩放，放大鼠标单击的地方，
+        # 不要跟随框会很乱」）----
+        check('ctrl+滚轮 也接在放大图上（和滚轮同一条路）',
+              bool(pk.cv_zoom.bind('<Control-MouseWheel>')), '')
+        # (a) 基准窗口：改框不改倍数
+        pk.set_target('bar')
+        pk.boxes['bar'] = Rect(2300, 1229, 239, 25)      # 真录像里费用条的几何
+        pk.pan, pk.zoom, pk._zbase = [0.0, 0.0], 1.0, None
+        pk.redraw()
+        base0 = list(pk._zwin_base())
+        check('基准 = 打开取景器那一刻的框', base0 == [239.0, 25.0], str(base0))
+        k0 = ui_mod.boxpick.zoom_scale(pk.box, ui_mod.BoxPicker.ZOOM_PANEL, pk.zoom,
+                                       pk._zwin_base())
+        pk.nudge_edge('r', 6)                            # 改框：框本身 +6px
+        pk.nudge_edge('b', 3)
+        k1 = ui_mod.boxpick.zoom_scale(pk.box, ui_mod.BoxPicker.ZOOM_PANEL, pk.zoom,
+                                       pk._zwin_base())
+        check('改框不改倍数（「不要跟随框」）：倍数只认基准，框变了它不动',
+              k0 == k1 and [pk.box.w, pk.box.h] != base0,
+              'k %s -> %s，框 %s / 基准 %s' % (k0, k1, (pk.box.w, pk.box.h), base0))
+        pk.boxes['bar'] = Rect(2300, 1229, 239, 25)
+        pk.pan, pk.zoom, pk._zbase = [0.0, 0.0], 1.0, None
+        pk.redraw()
+        pk._zbase = [999.0, 999.0]                       # 故意搞坏，看复位有没有重取
+        pk._zfit()
+        check('双击复位 = 缩放 / 平移归零，基准跟着当前的框重取',
+              pk.zoom == 1.0 and pk.pan == [0.0, 0.0]
+              and pk._zbase == [float(pk.box.w), float(pk.box.h)],
+              'zoom=%s pan=%s base=%s 框=%s' % (pk.zoom, pk.pan, pk._zbase, pk.box))
+        # (b) 缩到下限：视窗 = 面板装得下（1 画面像素 = 1 屏像素）
+        pk.set_target('bar')
+        pk.boxes['bar'] = Rect(2300, 1229, 239, 25)
+        pk.pan, pk.zoom, pk._zbase = [0.0, 0.0], 1.0, None
+        pk.redraw()
+        lo = pk._zoom_lo()
+        for _ in range(40):
+            pk._wheel(types.SimpleNamespace(delta=-120, x=200, y=80))
+        vw, vh, kx, ky = ui_mod.boxpick.zoom_view(
+            pk.box, ui_mod.BoxPicker.ZOOM_PANEL, pk.pan, pk.zoom, pk._frame_size(),
+            pk._zwin_base())[2:]
+        check('往下滚能缩过「整框」，停在面板装得下（视窗 = 面板宽、k = 1）',
+              abs(pk.zoom - lo) < 1e-9 and vw == ui_mod.BoxPicker.ZOOM_PANEL[0] and kx == 1,
+              'zoom=%.3f 下限=%.3f 视窗=%dx%d k=%dx%d' % (pk.zoom, lo, vw, vh, kx, ky))
+        check('下限本身 ≤ 1（1:1 就是最远的视野，再远要缩像素，不做）', lo <= 1.0, str(lo))
+        # (c) 光标落在放大图**外面**（右边 / 下面空着的那截）滚轮：锚点夹进图里，
+        #     不能像以前那样把视窗整个拽到框的左上角去。
+        pk._zfit()
+        pk.redraw()
+        iw, ih = pk._photo['zoom'].width(), pk._photo['zoom'].height()
+        gx, gy = ui_mod.BoxPicker.ZOOM_PANEL[0] - 4, ui_mod.BoxPicker.ZOOM_PANEL[1] - 4
+        check('这一格光标确实在图外（画布比图大，右边 / 下面空着一截）',
+              gx >= iw and gy >= ih, '图=%dx%d 画布=%s' % (iw, ih, ui_mod.BoxPicker.ZOOM_PANEL))
+        cx0, cy0 = min(gx, iw - 1), min(gy, ih - 1)      # 夹进图里 = 锚点
+        fx0, fy0 = frame_at(gx, gy)                      # 那个锚点对应的画面点
+        pk._wheel(types.SimpleNamespace(delta=120, x=gx, y=gy))
+        vx, vy, vw, vh, kx, ky = ui_mod.boxpick.zoom_view(
+            pk.box, ui_mod.BoxPicker.ZOOM_PANEL, pk.pan, pk.zoom, pk._frame_size(),
+            pk._zwin_base())
+        col = (fx0 - vx) * kx                            # 同一个画面点现在落在哪一列 / 行
+        row = (fy0 - vy) * ky
+        want_c, want_r = min(cx0, int(vw * kx) - 1), min(cy0, int(vh * ky) - 1)
+        # 容差 = 半个画面像素（视窗要落在整数画面行列上，见 zoom_view 的四舍五入）：
+        # 1 个画面像素 = k 列，所以落点天生能差到 k/2 列。
+        check('在图外的空处滚轮：锚点还是「离光标最近的那个画面点」（不跟着框跑）',
+              abs(col - want_c) <= kx / 2.0 + 1.0 and abs(row - want_r) <= ky / 2.0 + 1.0,
+              '列 %.2f / 行 %.2f（想要 %d / %d，k=%dx%d）' % (col, row, want_c, want_r, kx, ky))
+        check('在图外的空处滚轮：滚完那一点还在视窗里（不会滚着滚着把目标丢了）',
+              vx <= fx0 < vx + vw and vy <= fy0 < vy + vh,
+              '视窗=(%d,%d,%d,%d) 锚点=(%.1f,%.1f)' % (vx, vy, vw, vh, fx0, fy0))
+    finally:
+        pk.close()
+        app.root.update()
+
+
 
 def main():
     print('面板键位 / 折叠自检（2026-10-10 示意图那批 + 2026-10-11 看板批注）')
@@ -923,8 +1484,8 @@ def main():
             try:
                 t_readouts(app, dm)
                 t_toggle_count(app, dm)
-                print('3. Esc / Ctrl+Q')
-                t_escape(app)                  # 这一组最后会把窗口关掉
+                print('3. 一个键盘快捷键都不收（游戏里按键盘不会打到面板上）')
+                t_no_keys(app)
             finally:
                 if alive(app):
                     kill_afters(app)
@@ -932,7 +1493,6 @@ def main():
                         app.root.destroy()
                     except Exception:          # noqa: BLE001
                         pass
-            t_ctrl_q()
             app2, dm2 = make_app()             # 上面那个已经关了，重开一个
             try:
                 print('4. ROI 校准模式')
@@ -953,6 +1513,10 @@ def main():
                 t_window_row(app2)
                 print('12. PC端 / 窗口 改名 + PC端也能手动校准 + 底下一行是短状态')
                 t_status_row(app2)
+                print('15. 取景器右边的放大图能按住拖动')
+                t_picker_pan(app2)
+                print('16. 放大图能滚轮局部放大 / 「吸附左端」删了')
+                t_picker_zoom(app2)
             finally:
                 kill_afters(app2)
                 try:

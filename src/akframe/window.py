@@ -29,10 +29,10 @@ import numpy as np
 
 from .align import DY_RANGE, DX_RANGE, offset_from_frames
 from .calib import calibrate_video
-from .features import read_bar
+from .features import read_bar, read_pause, read_speed
 from .geometry import (BAR_ROI_H, BAR_W_UNIT, REF_H, REF_W, UI_SCALER_DEFAULT, Layout,
                        Rect, layout_for, layout_from_bar_box, reframe_layout,
-                       ui_edge_scale)
+                       ui_edge_scale, union_rect)
 from .live import LiveMonitor
 from .paths import data_path
 from .settings import DEFAULT_FRAMES_PER_COST
@@ -319,7 +319,8 @@ class WindowSource(VideoSource):
 
     def __init__(self, win, *, ui_scaler=None, templates=(), progress=None,
                  use_profile=True, save_on_auto=True, snap=True, client=None,
-                 offset=None, profile_path: str = None):
+                 offset=None, profile_path: str = None, bar_box=None, pause_box=None,
+                 speed_box=None):
         # 不走 VideoSource.__init__：那条路是「文件名 -> ffprobe -> 抽整段流」，
         # 窗口这三件事一件都没有。
         self.window = win
@@ -350,7 +351,16 @@ class WindowSource(VideoSource):
         # 手动框选是「用户自己指的」，直接算靠得住。
         self.verified = False
         self.manual = False
-        self._prepare(client, offset, snap, use_profile, save_on_auto, True)
+        # 手动框选交回来的那句话（面板的提示行要用），见 manual_layout。
+        self.manual_note = ''
+        if bar_box is None:
+            self._prepare(client, offset, snap, use_profile, save_on_auto, True)
+        else:
+            # 手框这条路：**自动那套整段跳过**（自动对齐 / 量条槽 / 搜右上角两个按钮）。
+            # 为什么值得专门开一条：用户已经用眼睛把 ROI 指出来了，自动那套算出来的东西
+            # 马上会被他覆盖；而其中「搜按钮」在这台机器上是 30 秒的模板互相关，白烧。
+            self.manual_layout(bar_box, pause_box=pause_box, speed_box=speed_box)
+            self._say('ready', 1.0, self.describe())
 
     def _prepare(self, client, offset, snap, use_profile, save_on_auto, force,
                  cache_dir=None):
@@ -393,17 +403,29 @@ class WindowSource(VideoSource):
         return False, ('这 %d 帧里 %s —— 要么画面里费用条没在动，要么量到的不是费用条'
                        % (VERIFY_FRAMES, why))
 
-    def manual_layout(self, box: Rect, ui_scaler: float = None):
-        """用户框出来的费用条 -> 三个 ROI，并写进校准表。返回 (layout, 提示)。
+    def manual_layout(self, box: Rect, pause_box: Rect = None, speed_box: Rect = None,
+                      ui_scaler: float = None):
+        """用户框出来的 ROI -> 三个 ROI，并写进校准表。返回 (layout, 提示)。
 
-        框完立刻做两件事：按模板把右上角两个按钮搜一遍（搜不到就关掉那两条通道，
-        费用条不受影响）；把这份 ROI 记进 window_calib.json（下次开同一个进程 + 同尺寸
-        的窗口直接套用，连自动校准都不用跑）。
+        框完立刻做两件事：把右上角两个按钮**定下来**（用户自己框了就用他的；没框就按
+        模板搜一遍，搜不到就关掉那两条通道，费用条不受影响）；把这份 ROI 记进
+        window_calib.json（下次开同一个进程 + 同尺寸的窗口直接套用，连自动校准都不用跑）。
+
+        为什么按钮也要能手动框（2026-10-11 用户：「暂停键倍速键也会截取不到，需要手动
+        校准」）：_fit_buttons_coarse 是**盲搜**，它只认「倍速数字和模板对得上」——
+        录像里没画数字（全程子弹时间、或者那段里一直没放倍速键）就搜不到，于是
+        _no_buttons 把暂停 / 倍速两条通道整段关掉，满费挂钟跟着一起废。用户一眼就知道
+        按钮在哪儿，所以给一条手工的路；**他指了就不再搜**（搜索要跑十几秒的模板互相关，
+        搜出来的位置也未必比他指的准）。
         """
         scaler = self.ui_scaler if ui_scaler is None else float(ui_scaler)
-        self._say('buttons', -1.0, '按框选钉住费用条：搜右上角两个按钮…')
         client, offset, layout = layout_from_bar_box(self.size, box, scaler)
-        layout = self._fit_buttons_coarse(layout, client, offset)
+        if pause_box is not None or speed_box is not None:
+            layout, btn_note = self._pin_buttons(layout, pause_box, speed_box)
+        else:
+            self._say('buttons', -1.0, '按框选钉住费用条：搜右上角两个按钮…')
+            layout = self._fit_buttons_coarse(layout, client, offset)
+            btn_note = ''
         self.client, self.offset = client, offset
         self.layout = layout
         self.auto_layout = layout          # 面板手动微调的基准（见 VideoSource.adopt_layout）
@@ -414,13 +436,130 @@ class WindowSource(VideoSource):
                 % (layout.bar.x, layout.bar.w, client[0], client[1],
                    offset[0], offset[1]))
         self.notes.append(note)
+        if btn_note:
+            note = '%s ｜ %s' % (note, btn_note)
         try:
-            self._save_profile(self._profile_key(), client, offset, '手动框选费用条',
+            self._save_profile(self._profile_key(), client, offset, '手动框选 ROI',
                                '%dpx 的条槽' % layout.bar.w, layout=layout)
             self.notes.append('已记进 %s（下次开同尺寸的窗口直接套用）' % self.profile_name)
         except OSError as exc:
             self.notes.append('校准表写不进去（%s）' % exc)
+        self.manual_note = note
         return layout, note
+
+    # 手动框按钮时，允许的尺寸和标称值差多少倍。为什么要夹：判别条带是按框高的**占比**
+    # 算的（geometry.PAUSE_SHAPE_BAND / SPEED_DIGIT_BAND），框拉得离字形太远（比如把整个
+    # 右上角都框进来）条带就落到字形外面去了 —— 读数是**悄悄**错的，比「关掉这条通道」更糟。
+    BTN_SIZE_MIN = 0.55
+    BTN_SIZE_MAX = 1.8
+
+    def _pin_buttons(self, layout: Layout, pause_box, speed_box) -> tuple:
+        """用户框的按钮 -> 钉进 layout：**位置和大小都用他指的**（大小夹在标称值的
+        0.55~1.8 倍之间）。
+
+        为什么允许改大小（2026-10-12 用户：「暂停键无法手动框选」）：判别条带是按 ROI 高度的
+        **占比**取的，所以只要「字形在框里的相对位置」和标称一致，读数就照样成立 ——
+        而这件事正是取景器里那两块**虚影**要回答的（虚影和字形重合 = 框对上了，包括大小）；
+        窗口里的画面被缩放过（播放器里实测 0.4777 倍）时，标称尺寸本身就不对，只搬位置根本
+        框不住字形。夹范围是保底：拉得太离谱时宁可读不准也别让条带飘到字形外面去。
+        只给了一个框时，另一个按「标称位置 + 同一个位移、**一样大**」跟过去：两个按钮在
+        游戏里固定间距、一样大，位移和尺寸就是模型里唯一未知的那两个量
+        （_fit_buttons_coarse 找的是位移）。
+        返回 (layout, 一句话说明)。
+        """
+        cur = {n: getattr(layout, n) for n in ('pause', 'speed')}
+        given = {'pause': pause_box, 'speed': speed_box}
+        boxes = {}
+        for name, box in given.items():
+            if box is None:
+                continue
+            boxes[name] = Rect(int(box.x), int(box.y),
+                               self._clamp_btn(cur[name].w, box.w, self.size[0]),
+                               self._clamp_btn(cur[name].h, box.h, self.size[1]))
+        if len(boxes) == 1:
+            name = next(iter(boxes))
+            other = 'speed' if name == 'pause' else 'pause'
+            b = boxes[name]
+            boxes[other] = Rect(cur[other].x + (b.x - cur[name].x),
+                                cur[other].y + (b.y - cur[name].y), b.w, b.h)
+        w, h = self.size
+        out = {}
+        for name, b in boxes.items():
+            bw, bh = min(b.w, w), min(b.h, h)
+            out[name] = Rect(max(0, min(b.x, w - bw)), max(0, min(b.y, h - bh)), bw, bh)
+        layout = replace(layout, pause=out['pause'], speed=out['speed'], buttons_visible=True)
+        try:
+            layout.validate()
+        except ValueError:
+            self.buttons_ok = False
+            self.notes.append('⚠ 框的按钮位置跑到画面外了 —— 暂停 / 倍速两条通道关掉')
+            return replace(layout, buttons_visible=False), ''
+        self.buttons_ok = True
+        why = self._check_manual_buttons(layout)
+        note = ('按钮按手框钉住：暂停 (%d,%d) %dx%d、倍速 (%d,%d)%s'
+                % (out['pause'].x, out['pause'].y, out['pause'].w, out['pause'].h,
+                   out['speed'].x, out['speed'].y, why))
+        self.notes.append(note)
+        return layout, note
+
+    def _clamp_btn(self, nominal: int, want: int, limit: int) -> int:
+        """手动框的按钮尺寸：夹在标称值的 BTN_SIZE_MIN~MAX 倍之间、且不超过画面。"""
+        lo = max(2, int(round(nominal * self.BTN_SIZE_MIN)))
+        hi = max(lo, min(int(round(nominal * self.BTN_SIZE_MAX)), int(limit)))
+        return max(lo, min(int(want), hi))
+
+    def _check_manual_buttons(self, layout: Layout) -> str:
+        """手动钉完按钮，抓一小段真像素验一下这两路读不读得到。返回「；…」或空串。
+
+        为什么值得再抓这一下：用户指的位置到底罩没罩住那个按钮，只有像素说了算，而
+        「罩没罩住」直接决定暂停 / 倍速 / 满费挂钟三件事的成败。读不到就把话说清楚，
+        让他回去把框挪一挪 —— 否则他只能盯着一个永远不动的读数猜原因。
+        """
+        if not self.templates:
+            return ''
+        rect = union_rect([layout.pause, layout.speed])
+        try:
+            strip = self._strip(rect, 1, VERIFY_FRAMES)
+        except Exception as exc:                          # noqa: BLE001
+            return '；自检没取到画面（%s）' % exc
+        # read_pause / read_speed 要的是「裁到 ROI 那么大的小图」，所以给一份原点在 (0,0)
+        # 的布局，画面 -> 带子的换算由下面的切片负责（和 _fit_buttons_coarse 同一个路子）。
+        lay = replace(layout, pause=Rect(0, 0, layout.pause.w, layout.pause.h),
+                      speed=Rect(0, 0, layout.speed.w, layout.speed.h))
+        n = int(strip.shape[0])
+        drawn = 0
+        ratios = []
+        speeds = []
+        bullets = 0
+        for f in strip:
+            p = layout.pause
+            crop = f[p.y - rect.y:p.y - rect.y + p.h, p.x - rect.x:p.x - rect.x + p.w]
+            if crop.shape == (p.h, p.w):
+                pr = read_pause(crop, lay)
+                ratios.append(pr.ratio)
+                if pr.drawn:
+                    drawn += 1
+            q = layout.speed
+            crop = f[q.y - rect.y:q.y - rect.y + q.h, q.x - rect.x:q.x - rect.x + q.w]
+            if crop.shape == (q.h, q.w):
+                sr = read_speed(crop, lay, self.templates)
+                if sr.bullet:
+                    bullets += 1
+                elif sr.m == sr.m:                        # nan = 没和模板对上
+                    speeds.append(sr.m)
+        parts = ['暂停键 %d/%d 帧读到字形' % (drawn, n)]
+        if ratios:
+            parts.append('占比 %.3f~%.3f' % (min(ratios), max(ratios)))
+        if drawn == 0:
+            parts.append('没读到字形，把框挪到按钮上再试')
+        if bullets:
+            parts.append('倍速键 %d/%d 帧 = 子弹时间' % (bullets, n))
+        elif speeds:
+            parts.append('倍速键 %d/%d 帧读到 %s'
+                         % (len(speeds), n, '/'.join(sorted({'%.2gX' % m for m in speeds}))))
+        else:
+            parts.append('倍速键没读到数字（子弹时间里这是正常的），把框挪到按钮上再试')
+        return '；' + '，'.join(parts)
 
     # ---------- 帧来源 ----------
 

@@ -7,27 +7,25 @@
     预览图上的红线 = 特征提取实际使用的那条带
     屏幕上加粗的方框（K 键）= 当前 ROI 位置，直接叠在游戏画面上
 
-操作（常驻）：
-    空格 开始 / 暂停 / 继续（一个按钮三态，2026-10-11 照看板合并）
-    P 暂停计数（数字按住不动）      C 清零 + 停（主按钮回到「开始计数」）
-    T 打开「导入 / 编辑轴」窗口（能拖 md 进来）
-    Ctrl+R 重载轴文件      Ctrl+Enter 应用轴窗口里的文本
-    F5 重新校准（采样停了 / 窗口动了）      ↑↓ 打轴器翻条
-    Esc 收起展开区（**不再退程序**）      Ctrl+Q 退出
+**没有任何键盘快捷键**（用户 2026-10-12：「把快捷键删掉！！！游戏里有快捷键会冲突」）。
 
-ROI 校准模式（点展开区那个按钮才进，进去之后才吃这些键）：
-    Tab 切换要校准的 ROI   方向键 移动   Shift+方向键 改大小
-    K 显示/隐藏屏幕上的 ROI 框    S 保存校准   R 恢复默认   Esc 退出模式
+计数器是**常驻在游戏旁边**的：按一下空格想暂停游戏，游戏收到「暂停」、面板也收到
+「开始计数」，两边打架。所以 2026-10-12 把一个键都不剩地删了 —— 以前绑过的有
+空格 / P / C / T / Ctrl+R / Ctrl+Enter / F5 / ↑↓ / Ctrl+Q / Esc，以及校准模式的
+Tab / 方向键 / Shift+方向键 / S / R / K。
 
-为什么把校准键收进一个模式：那六个键原来绑在全局，打字、翻条、想按 Tab 跳控件
-都会被它们吃掉，误按一下 ROI 就偏了（偏几个像素读数就全错）。
+每个动作都在界面上有按钮，功能一个没少：
+    开始 / 暂停 / 继续 = 主按钮三态        暂停计数        清零 + 停
+    手动校准（二级窗口里：目标 / ←↑↓→ / 步长 / ROI 框 / 保存校准 / 恢复默认 / 重新选窗口）
+    打轴器（导入轴… / 重载 / ◀ 回看 / 现在 ▶）
+    展开 / 收起 = 标题栏那个 ▸ / ▾        重新校准 = 「校准」那行的键        退出 = 右上角 ×
 
 回费效率（减费 tag）：默认 30 帧/费（1 秒 1 费）。点了「回费速度 -50% / -75%」的 tag
 时，在**收起态**面板「回费效率」那一行选 60 / 120，或直接填数字后点「应用」——
 改完立刻生效，并写回设置文件 cost_rate.json，下次启动自动带上。
 
 打轴器（提词器）：按 T（或展开区右上角「导入轴…」）打开一个**独立小窗**——里面既能
-把 md 文件拖进去，也能直接写（Ctrl+Enter 应用）。计数器走到对应帧号时，刻度表上那条
+把 md 文件拖进去，也能直接写（点「应用到提词器」）。计数器走到对应帧号时，刻度表上那条
 就滚到指针位置，同时把说明放大显示出来。轴文件格式见 timeline.py 顶部注释和
 maps/example.md。
 
@@ -36,8 +34,9 @@ maps/example.md。
 对着参照图手动圈）→ **点「开始计数」** 才起采样线程。游戏窗口本身也走这条路，所以
 「识别游戏」和「识别视频」是同一套代码，只是 ROI 从 window_calib.json 来
 （键 = 进程名 + 客户区尺寸）—— 见 window.py。
-读窗口时目标窗口会被自动钉在最上层，面板则每 0.7 秒被重新抬到它上面（置顶是一层，
-同一层里最后抬起来的在最上面）—— 见 _keep_pin / _raise_panel 和 docs 第 28 节。
+读窗口时目标窗口会被自动钉在最上层，我们自己的窗（面板 / 取景器 / 对话框）则每 0.7 秒
+被复核一遍：目标压到我们头上就全部抬回来（置顶是一层，同一层里最后抬起来的在最上面）
+—— 见 _keep_pin / _raise_if_covered / _raise_ours 和 docs 第 28、44 节。
 （原先还有「打开录像文件…」直接喂 mp4 的那一条，已按用户要求删掉，见 docs 第 27 节。）
 """
 
@@ -55,8 +54,9 @@ from tkinter import filedialog
 from PIL import Image, ImageDraw, ImageTk
 
 from . import boxpick
-from .geometry import (BAR_BAND_BOTTOM, BAR_BAND_TOP, Rect, apply_deltas, layout_for,
-                       load_calibration)
+from .geometry import (BAR_BAND_BOTTOM, BAR_BAND_TOP, PAUSE_SHAPE_BAND, Rect,
+                       SPEED_DIGIT_BAND, SPEED_DIGIT_COLS, apply_deltas,
+                       layout_for, layout_from_bar_box, load_calibration)
 from .live import LiveMonitor
 from .settings import (COST_RATE_PRESETS, DEFAULT_FRAMES_PER_COST,
                        clamp_frames_per_cost, format_frames_per_cost,
@@ -65,9 +65,10 @@ from .scale import ScaleGeom, Theme, build as build_scale
 from .scale_render import render as render_scale
 from .state import LOGICAL_FPS
 from .timeline import Teleprompter, parse_lines
-from .win32 import (ScreenGrabber, arknights_ui_scaler, client_rect, is_window,
-                    is_topmost, raise_window, set_click_through, set_topmost,
-                    to_gray, top_level, virtual_screen_bounds, work_area)
+from .win32 import (ScreenGrabber, arknights_ui_scaler, client_rect, is_above,
+                    is_topmost, is_window, raise_window, set_click_through,
+                    set_topmost, to_gray, top_level, virtual_screen_bounds,
+                    work_area)
 
 # 「把 md 文件拖进【导入 / 编辑轴】窗口」这一条要 tkinterdnd2（**可选**依赖）：
 #     pip install tkinterdnd2
@@ -199,7 +200,7 @@ def _fmt_time(seconds: float) -> str:
 
 
 class BoxPicker:
-    """手动框选费用条的**取景器**：摆一帧画面当参照物，让用户对着它把费用条圈出来。
+    """手动框选三个 ROI 的**取景器**：摆一帧画面当参照物，让用户对着它框。
 
     为什么不再用实时那条全屏半透明遮罩（MonitorApp.box_bar）：那是「蒙住屏幕、凭手感
     拖」的 —— 2560x1600 的画面缩到屏幕上，鼠标差 2 个像素就是 3~4 个逻辑帧的相位差。
@@ -207,13 +208,77 @@ class BoxPicker:
 
         * 刻度尺：费用条的设计是「条槽宽 = 30 个逻辑帧」，参照图上把预测的条槽画成
           30 等分的橙尺 —— 对的是刻度，不是空气；
-        * 放大镜：框内那一条带放大（横向 x 倍、纵向拉得更狠），红 / 绿竖线就是框的
-          左右边缘，白块的左端压没压在红线上，一眼就能看出来；
-        * 吸附 + 最满的一帧：「吸附左端」把左边缘钉到白块起点（那是画面上本来就有的
-          尺子）；「跳到最满的一帧」让用户拿到白块右端 = 条槽右端的那一帧。
+        * 放大镜：框那一块放大，四条彩线就是框的四条边（红 / 绿 = 左右，
+          品红 = 上下），白块的左端压没压在红线上、白条在上下两条品红线之间
+          居没居中，一眼就能看出来；能按住拖动（看框外面）、滚轮局部放大、
+          双击复位；
+        * 最满的一帧：「跳到最满的一帧」让用户拿到白块右端 = 条槽右端的那
+          一帧。（原来还有一个「吸附左端」按钮，用户 2026-10-11：「不要搞吸附功能了，
+          实测下来一次没用过」—— 按钮和 boxpick.snap_box 一起删了）。
 
-    对象用完即弃（应用 / 取消 / Esc 都调 close），面板靠 on_apply(box) 拿结果。
+    2026-10-11 第二轮（用户：「暂停键倍速键也会截取不到，需要手动校准；最好加一个
+    放大镜，放大部分画面方便对齐」）：
+
+        * 目标从「只有费用条」扩到三个（费用条 / 暂停键 / 倍速键）。自动搜按钮失败时
+          那两路以前**没有手工补救的路**（_no_buttons 一关就永远读不到），现在能自己钉；
+        * 按钮**只能挪不能缩**：read_pause / read_speed 的判别条带是按 ROI 高度的**占比**
+          取的（见 geometry.PAUSE_SHAPE_BAND / SPEED_DIGIT_BAND），尺寸一变条带就落到别
+          的地方去，所以按钮框固定用 layout_for 算出的标称尺寸，拖动只改位置；
+        * 两个按钮**联动**：游戏里它们都锚在客户区右上角、间距是常量，所以拖一个另一个
+          用同一个位移跟着走（分别夹边界会让相对位置散开 = 等于把其中一个挪错）；
+        * 放大镜跟着当前目标走：费用条看条带那几行，按钮看它的判别条带（同一条红线）。
+
+    对象用完即弃（应用 / 取消 / Esc 都调 close），面板靠 on_apply(boxes) 拿结果 ——
+    boxes 是 {目标名: Rect}，**用户没动过的按钮框不回传**，好让后端继续去自动搜。
+
+    2026-10-11 第三轮（用户：「手动校准界面右边的放大图要可以自己移动，不然很难对准」）：
+    右边那块放大图能按住拖动 —— 视窗可以从框里挪出去看周围，而框的边线照旧画着
+    （见 boxpick.magnify 的 pan）。同一轮把「暂停键对齐看哪儿」写进了顶部那几行说明。
+    2026-10-11 第四轮（用户：「费用条难以准确框选，加一个可移动的局部放大功能，
+    查看上下左右是否对齐」）：放大图里**框的四条边一起画**（原来只有左右两条）——
+    只标左右的话，上下对没对上只能猜；顺手修掉 pan=0 时右边那条画不出来（原来画在
+    sx(x + w) 上，正好等于图宽，被越界判掉了）。
+
+    2026-10-12 第五轮（用户：「框选调整成创建一个框去移动，在右侧的放大区调整框进行
+    微调」＋「手动框选暂停键参考不明确，最好加一个暂停键的虚影方便对齐」）：
+
+        * 左边那张图只负责**建框 / 挪框**（费用条拖一下画一个新框；按钮按住拖，那一对
+          一起走）；对齐全挪进右边那块放大图；
+        * 放大图里：**按住框的身子拖 = 挪框**（原来这里是平移视窗）、**按住某一条边拖
+          = 只改那一条边**、Shift+拖 / 中键拖 = 挪视窗（看框外面）、滚轮 = 局部放大、
+          双击 = 复位；
+        * 原来那两行「±1 像素」微调按钮（左端 / 右端 / 整框 / 整块挪）**全删了** ——
+          用户要的就是「在右侧放大区调整」，那一排按钮既占地方、又和放大图抢同一件事；
+        * 暂停键多了两块**淡青色虚影**（boxpick.pause_ghost = 双竖条该长的地方）：
+          它们跟着框走，和画面里真的 ❚❚ 重合就算对上了 —— 这就是「参考不明确」的答案。
+
+    2026-10-12 第六轮（用户：「放大做的什么鬼，先在左侧原画面创建一个框，就像 Windows 的
+    截图一样可以拖动框放大缩小移动，右侧为框内放大图，放大图下方可以微调px；暂停键无法
+    手动框选」）：把上一轮那套「在放大图里拖框」整个撤掉，分工改成截图工具的样子 ——
+
+        * 左边那张图：拖框里面 = 挪框、拖手柄 = 拉边 / 拉角、框外面拖 = 拉新框
+          （框在画布上太薄时，那两条边上的**中点**手柄不拿出来 —— 四角照旧，见
+          _live_handles：画的这一份和 _hit 认的这一份必须是同一个函数，画出来却抓不住
+          比不画更糟）；
+        * 右边放大图：只看（左键拖 = 挪视窗、滚轮 = 局部放大、双击 = 复位）；
+        * 放大图下面加回两行 px 微调（左 / 右 / 上 / 下 ±1、整框 ←→↑↓）——
+          和第 46 轮删掉的那两排不是一回事：那两排是**唯一**的微调入口（拖框还没做），
+          现在拖框在左边、微调在放大图底下，各管一段；
+        * 按钮那一对现在**可以拉大拉小**了（原来写死标称尺寸、只能挪）——
+          判别条带是按框高的**占比**算的，所以「虚影和字形重合」这件事本身就是把框
+          拉对尺寸的过程；右上角那一对依旧联动（拉一个另一个同样大小、同样的四个边差）；
+        * 「暂停键无法手动框选」的真因：layout 说「画面里没有右上角按钮」时，这里原来把
+          pause / speed 两个目标**直接收掉**（1x1 占位框不拿出来骗人），于是点了「暂停键」
+          什么都不发生。现在照旧给框，起点按条槽宽推一份。
+
+    2026-10-12 第七轮（用户：「暂停键是斜着的，虚影对不上」）：虚影从**正矩形**改成
+    **平行四边形**（`boxpick.pause_ghost` 现在返回四个点的多边形，斜率
+    `PAUSE_GHOST_SHEAR = 0.19`）。游戏画出来的 ❚❚ 本来就是斜切过的，正矩形不管怎么
+    挪都有一半压在字形外面 —— 这正是用户看到的「对不上」。
     """
+
+    # 放大图画布的内尺寸：画布控件是 560x190，留 2px 边框，真正画图的是 556x186。
+    ZOOM_PANEL = (556, 186)
 
     def __init__(self, parent, fetch, frames: int, index: int, on_apply, on_note=None,
                  fullest=None, on_close=None):
@@ -227,24 +292,61 @@ class BoxPicker:
         self.index = max(0, min(int(index), self.frames - 1))
         self.frame = None
         self.guide = None
-        self.box = None
-        self._drag_from = None
+        self.boxes = {}                     # {目标名: Rect}（客户区坐标）
+        self.target = ROI_ORDER[0]          # 当前在框哪一个
+        self.dirty = set()                  # 用户真拖过的目标（没动过的不回传）
+        self._grab = None                   # 左图按住：('new' / 'inside' / 'handle',
+                                            #   哪条边, 按下那一刻的 (x, y), 框, 全部框)
         self._bg = None
         self._photo = {}
         self.scale = 1.0
+        self.pan = [0.0, 0.0]               # 放大图相对框的偏移（见 boxpick.magnify）
+        self.zoom = 1.0                     # 局部放大倍数（1 = 窗口就是整个框）
+        self._zpan_from = None              # 按住放大图：挪视窗的起点
+        self._zbase = None                  # 放大倍数的基准窗口（见 _zwin_base）
 
         top = tk.Toplevel(parent)
         self.top = top
-        top.title('框选费用条（参照图）')
+        top.title('框选 ROI（参照图）')
         top.configure(bg=UI_BG)
         top.attributes('-topmost', True)
         tk.Label(top, bg=UI_BG, fg=UI_FG, font=(FONT_UI, 10), justify='left', anchor='w',
-                 text='拖一个框把费用条整个圈住：左右两端要贴住**条槽的两头**（高矮随便）。\n'
-                      '橙色 = 按画面尺寸推测的条槽位置（只是参考，30 格 = 30 个逻辑帧）；'
-                      '框完会自动把左端吸附到白块起点。').pack(fill='x', padx=10, pady=(8, 4))
+                 text='三步：① 先选目标 ② 在**左边**那张图上圈住那一块 —— 和 Windows 截图'
+                      '一样：拖框里面 = 挪框，拖四个角 / 四条边 = 放大缩小，\n'
+                      '在框外面拖 = 重新拉一个框。③ 剩下那 1~2 个像素在**右边**放大图里看'
+                      '（左键拖 = 挪视窗看框外面，滚轮 / ctrl+滚轮 = 放大缩小，''双击 = 复位），\n'
+                      '微调用放大图下面那两行按钮：左 / 右 / 上 / 下 各 ±1 个像素、'
+                      '整框 ←→↑↓（一次 1px）。\n'
+                      '四条彩线就是框的四条边（红 / 绿 = 左右，品红 = 上下），它们跟着框走，'
+                      '所以「框相对条 / 按钮偏了多少」四个方向一起看得见。\n'
+                      '橙色 = 按画面尺寸推测的位置（只是参考）。\n'
+                      '费用条：左右两条边贴住**条槽的两头**，上下让白条居中'
+                      '（读的只是框正中间那条带，框高矮不影响读数）。\n'
+                      '暂停键 / 倍速键：两个框联动（一样大、一起挪），可以随便拉大拉小。\n'
+                      '那两块**淡青色虚影**就是字形该长的地方 —— 把虚影和画面里真的 ❚❚ '
+                      '叠到一起就对上了。虚影是**斜的**：游戏把这两个竖条画成平行四边形，'
+                      '虚影照同一条斜率画，所以能叠得上；\n'
+                      '虚影比字形大 = 框拉大了，比字形小 = 框拉小了。\n'
+                      '暂停键怎么对齐：读的是框顶部那条窄带（放大图上淡蓝的那一条，'
+                      '约占框高的 24%~30%）—— 运行中的字形是双竖条 ❚❚，\n'
+                      '蓝带的上沿要正好压住竖条的最上边（暂停时是单三角 ▶，只蹭到那个尖）。'
+                      '带子整个落在字形上面 = 框挪高了；切进字形太深 = 挪低了。\n'
+                      '对完点一下游戏里的暂停键，面板「暂停键」那行应该在 运行中 / 已暂停 '
+                      '之间跟着翻。'
+                 ).pack(fill='x', padx=10, pady=(8, 4))
+
+        trow = tk.Frame(top, bg=UI_BG)
+        trow.pack(fill='x', padx=10)
+        tk.Label(trow, text='目标', bg=UI_BG, fg=UI_DIM, font=(FONT_UI, 9)).pack(side='left')
+        self.tgt_btns = {}
+        for name in ROI_ORDER:
+            b = self._btn(trow, ROI_LABELS[name], None)
+            b.configure(command=lambda n=name: self.set_target(n), padx=10)
+            b.pack(side='left', padx=3)
+            self.tgt_btns[name] = b
 
         mid = tk.Frame(top, bg=UI_BG)
-        mid.pack(fill='both', expand=True, padx=10)
+        mid.pack(fill='both', expand=True, padx=10, pady=(6, 0))
         self.cv = tk.Canvas(mid, bg=SUNKEN, highlightthickness=0, cursor='crosshair',
                             width=640, height=400)
         self.cv.pack(side='left')
@@ -252,6 +354,24 @@ class BoxPicker:
         side.pack(side='left', padx=(8, 0), anchor='n')
         self.cv_zoom = tk.Canvas(side, bg=SUNKEN, highlightthickness=0, width=560, height=190)
         self.cv_zoom.pack(anchor='w')
+        # 放大图下面那两行：px 级微调（用户 2026-10-12：「放大图下方可以微调px」）。
+        nrow = tk.Frame(side, bg=UI_BG)
+        nrow.pack(fill='x', pady=(6, 0))
+        for label, kind, step in (('左 −1', 'l', -1), ('左 +1', 'l', 1),
+                                  ('右 −1', 'r', -1), ('右 +1', 'r', 1),
+                                  ('上 −1', 't', -1), ('上 +1', 't', 1),
+                                  ('下 −1', 'b', -1), ('下 +1', 'b', 1)):
+            self._btn(nrow, label,
+                      lambda k=kind, s=step: self.nudge_edge(k, s)).pack(side='left', padx=1)
+        mrow = tk.Frame(side, bg=UI_BG)
+        mrow.pack(fill='x', pady=(2, 0))
+        tk.Label(mrow, text='整框', bg=UI_BG, fg=UI_DIM,
+                 font=(FONT_UI, 9)).pack(side='left')
+        for label, dx, dy in (('←', -1, 0), ('→', 1, 0), ('↑', 0, -1), ('↓', 0, 1)):
+            self._btn(mrow, label,
+                      lambda a=dx, b=dy: self.nudge_move(a, b)).pack(side='left', padx=2)
+        tk.Label(mrow, text='一次 1 个像素', bg=UI_BG, fg=FAINT,
+                 font=(FONT_UI, 9)).pack(side='left', padx=6)
         self.lb_read = tk.Label(side, text='', bg=UI_BG, fg=UI_FG, font=(FONT_MONO, 10),
                                 justify='left', anchor='w')
         self.lb_read.pack(fill='x', pady=(6, 0))
@@ -274,31 +394,37 @@ class BoxPicker:
             self._btn(frow, '◀ 1 帧', lambda: self.load(self.index - 1)).pack(side='left', padx=2)
             self._btn(frow, '1 帧 ▶', lambda: self.load(self.index + 1)).pack(side='left', padx=2)
             if self.fullest is not None:
-                self._btn(frow, '跳到最满的一帧', self._jump_fullest).pack(side='left', padx=6)
+                self.btn_fullest = self._btn(frow, '跳到最满的一帧', self._jump_fullest)
+                self.btn_fullest.pack(side='left', padx=6)
             self.lb_pos = tk.Label(frow, text='', bg=UI_BG, fg=UI_DIM, font=(FONT_UI, 9))
             self.lb_pos.pack(side='left', padx=6)
 
-        nrow = tk.Frame(top, bg=UI_BG)
-        nrow.pack(fill='x', padx=10, pady=(4, 0))
-        for text, cmd in (('左端 −1', self._left_out), ('左端 +1', self._left_in),
-                          ('右端 −1', self._right_in), ('右端 +1', self._right_out)):
-            self._btn(nrow, text, cmd).pack(side='left', padx=2)
-        self._btn(nrow, '吸附左端', self._snap).pack(side='left', padx=8)
-        for text, cmd in (('整框 ↑', self._up_1), ('整框 ↓', self._down_1),
-                          ('整框 ←', self._left_1), ('整框 →', self._right_1)):
-            self._btn(nrow, text, cmd).pack(side='left', padx=2)
-
+        # （这里原来有三排「±1 像素」微调按钮：2026-10-12 上午按用户要求删掉，改成在放大图
+        #   里拖框；当天晚上用户说「放大做的什么鬼……放大图下方可以微调px」，于是它们回来
+        #   了 —— 但搬到了**放大图下面**那一块，见 self.cv_zoom 后面那两行。）
         brow = tk.Frame(top, bg=UI_BG)
         brow.pack(fill='x', padx=10, pady=(6, 10))
-        self.btn_ok = self._btn(brow, '用这个框（重新抽流，几十秒）', self._apply)
+        self.btn_ok = self._btn(brow, '用这些框（按框钉住 ROI）', self._apply)
         self.btn_ok.pack(side='left')
         self._btn(brow, '取消', self.close).pack(side='left', padx=6)
 
         self.cv.bind('<Button-1>', self._down)
         self.cv.bind('<B1-Motion>', self._drag)
         self.cv.bind('<ButtonRelease-1>', self._up)
-        top.bind('<Escape>', lambda _e: self.close())
+        # 放大图：左键拖 = 挪视窗（看框外面）；滚轮 = 局部放大；双击 = 复位。
+        self.cv_zoom.configure(cursor='fleur')
+        self.cv_zoom.bind('<Button-1>', self._zdown)
+        self.cv_zoom.bind('<B1-Motion>', self._zdrag)
+        self.cv_zoom.bind('<ButtonRelease-1>', self._zup)
+        self.cv_zoom.bind('<Leave>', self._zup)
+        # Windows 上按住 Ctrl / Shift 滚会发带修饰键的那个序列，三个都绑到同一个处理上。
+        for seq in ('<MouseWheel>', '<Control-MouseWheel>', '<Shift-MouseWheel>'):
+            self.cv_zoom.bind(seq, self._wheel)
+        self.cv_zoom.bind('<Double-Button-1>', self._zfit)
+        # （原来这里绑着 <Escape> 关窗口 —— 2026-10-12 按用户要求删了，关窗口点「取消」
+        #   或右上角的 ×。）
         top.protocol('WM_DELETE_WINDOW', self.close)
+
         self.load(self.index)
 
     # ---- 小部件 ----
@@ -307,6 +433,50 @@ class BoxPicker:
                          relief='flat', font=(FONT_UI, 9), padx=6, pady=2,
                          activebackground=RULE, activeforeground=UI_BG,
                          highlightthickness=0)
+
+    # ---- 当前目标的框 ----
+    @property
+    def box(self):
+        """当前目标的框 —— 微调 / 放大镜全部作用在它上面。"""
+        return self.boxes.get(self.target)
+
+    def set_target(self, name: str) -> None:
+        """换一个要框的目标（三个 ROI 的名字见 ROI_ORDER）。"""
+        if name not in ROI_ORDER or name not in self.boxes:
+            return
+        self.target = name
+        self.pan = [0.0, 0.0]               # 换目标 = 换一个视窗（别带着上一个的平移）
+        self.zoom = 1.0
+        self._zbase = None                  # 换目标 = 重新取基准（这个目标的框）
+        self._sync_target_btns()
+        self.lb_hint.configure(text='')
+        self.redraw()
+
+    def _sync_target_btns(self) -> None:
+        """当前目标那个键反色（白底深字），其余是普通态。"""
+        for name, b in self.tgt_btns.items():
+            if name == self.target:
+                b.configure(bg=RULE, fg=UI_BG)
+            else:
+                b.configure(bg=CARD_HI, fg=UI_FG)
+
+    def _hint_for_target(self) -> str:
+        """每个目标「现在该干什么」的一句话（换目标 / 取帧失败时贴到提示行）。"""
+        how = ('左边图上拖框里面 = 挪框、拖角 / 边 = 放大缩小、框外面拖 = 拉新框；'
+               '右边放大图左键拖 = 挪视窗，滚轮 / ctrl+滚轮 = 放大缩小（缩放中心 = '
+               '鼠标那一点，最多缩到 1:1），双击 = 复位；'
+               '下面那两行按钮 = 一次 1 个像素')
+        if self.target == 'bar':
+            return ('先在左边图上圈住费用条（左右贴住条槽两头、上下让白条居中）；'
+                    '白块左端压在红线上、白条在一对品红线之间就对了。' + how)
+        if self.target == 'pause':
+            return ('在左边图上把「%s」圈出来（可以随便拉大拉小）：那两块**淡青色虚影**'
+                    '就是双竖条 ❚❚ 该长的地方 —— 和画面里的真字形叠到一起就对了；'
+                    '淡蓝那条带的上沿要正好压住竖条的最上边（暂停时是单三角 ▶，'
+                    '只蹭到那个尖）。%s' % (ROI_LABELS[self.target], how))
+        return ('在左边图上把「%s」圈出来（可以随便拉大拉小）：红 / 绿两条边夹住这个按钮，'
+                '红线之间的行就是读取用的条带。%s' % (ROI_LABELS[self.target], how))
+
 
     # ---- 载入一帧参照图 ----
     def load(self, i):
@@ -331,22 +501,41 @@ class BoxPicker:
         self.cv.configure(width=img.width, height=img.height)
         self.cv.delete('all')
         self.cv.create_image(0, 0, anchor='nw', image=self._bg)
-        if self.box is None:
-            # 从预测位置起步：对上了就直接用，没对上就在它附近拖 —— 总比从零开始强
-            self.box = Rect(int(guide.bar.x), int(guide.bar.y) - 4, int(guide.bar.w), 25)
+        if not self.boxes:
+            # 三个框都从预测位置起步：对上了就直接用，没对上就在它附近拖 —— 总比从零开始强
+            self.boxes = {
+                'bar': Rect(int(guide.bar.x), int(guide.bar.y) - 4, int(guide.bar.w), 25),
+                'pause': guide.pause,
+                'speed': guide.speed,
+            }
+            if not guide.buttons_visible:
+                # 这份 layout 认定「画面里没有右上角按钮」（校准表里就是关着的，或者画面
+                # 被裁过）：可用户**正是**为这种情况才要手动框。以前这里把两个目标直接
+                # 收掉，于是「暂停键」那个键点了没反应（用户 2026-10-12：「暂停键无法
+                # 手动框选」）。现在照旧给他框，起点按**条槽宽**推一份。
+                pb, sb = self._guess_buttons(guide.bar)
+                if pb is not None:
+                    self.boxes['pause'], self.boxes['speed'] = pb, sb
+
+            self.pan = [0.0, 0.0]
+            self.zoom = 1.0
+            self._zbase = None              # 第一次铺框 = 基准就是这几个预测框
+        if self.target not in self.boxes:
+            self.target = 'bar'
         if hasattr(self, 'lb_pos'):
             self.sk.set(self.index)
             self.lb_pos.configure(text='第 %d / %d 帧' % (self.index, self.frames - 1))
+        self._sync_target_btns()
         self.redraw()
 
     def _seek(self, _event=None):
         self.load(self.sk.get())
 
     def _jump_fullest(self):
-        if self.fullest is None or self.box is None:
+        if self.fullest is None or self.boxes.get('bar') is None:
             return
         try:
-            i = self.fullest(self.box)
+            i = self.fullest(self.boxes['bar'])
         except Exception as exc:                        # noqa: BLE001
             self.on_note('扫最满那一帧失败：%s' % exc)
             return
@@ -358,123 +547,410 @@ class BoxPicker:
                                     '现在白块的右端就是条槽右端，把右端拖到那儿'
                                % self.index)
 
+    def _guess_buttons(self, bar):
+        """读不到右上角按钮时，按**条槽宽**推一份按钮框当起点。
+
+        推出来的尺寸和位置都是猜的（正是自动那套没成功才走到这儿），所以只是**起点** ——
+        用户自己拉着虚影去对字形（见 _draw_zoom 的 ghost）。
+        """
+        try:
+            _client, _off, lay = layout_from_bar_box(self._frame_size(), bar)
+        except Exception:                       # noqa: BLE001
+            return (None, None)
+        return (lay.pause, lay.speed)
+
+
     # ---- 画 ----
     def _to_img(self, x, y):
         return int(x / self.scale), int(y / self.scale)
 
+    def _band_rows(self, r):
+        """这个目标真正被读取的那几行（画面绝对行号）—— 放大镜上的红线画在它们上面。"""
+        if self.target == 'bar':
+            # 读的时候条 ROI 是**框正中间**那 17 行（见 geometry.layout_from_bar_box），
+            # 所以这里必须按同一口径算 —— 蓝线画在别的地方会把用户带偏。
+            a, b = boxpick.band_rows_of(r)
+            return (r.y + a, r.y + b)
+        frac = PAUSE_SHAPE_BAND if self.target == 'pause' else SPEED_DIGIT_BAND
+        a, b = r.band_rows(*frac)
+        return (r.y + a, r.y + b)
+
     def redraw(self):
         self.cv.delete('box')
-        if self.box is None:
+        if self.frame is None or not self.boxes:
             return
-        b = self.box
-        x0, y0 = int(b.x * self.scale), int(b.y * self.scale)
-        x1, y1 = int((b.x + b.w) * self.scale), int((b.y + b.h) * self.scale)
-        self.cv.create_rectangle(x0, y0, x1, y1, outline='#ffffff', width=2, tags='box')
-        self.cv.create_line(x0, y0, x0, y1, fill='#ff4646', width=2, tags='box')
-        self.cv.create_line(x1, y0, x1, y1, fill='#46e66e', width=2, tags='box')
-        h, w = self.frame.shape[:2]
-        ok = b.w >= 20 and b.x >= 0 and b.h >= 3 and b.y >= 0 and b.x + b.w <= w and b.y + b.h <= h
-        self.lb_read.configure(
-            text='框 x=%d y=%d  宽 %d 高 %d\n'
-                 '条带行 %d..%d ｜ 每逻辑帧 %.2f px（宽 / 30）%s'
-                 % (b.x, b.y, b.w, b.h, b.y + BAR_BAND_TOP, b.y + BAR_BAND_BOTTOM - 1,
-                    b.w / 30.0, '' if ok else '\n⚠ 框跑到画面外 / 太窄了'))
+        for name in ROI_ORDER:
+            r = self.boxes.get(name)
+            if r is None:
+                continue
+            on = name == self.target
+            x0, y0 = int(r.x * self.scale), int(r.y * self.scale)
+            x1, y1 = int((r.x + r.w) * self.scale), int((r.y + r.h) * self.scale)
+            # 当前目标：白框 + 红 / 绿两条边 + 八个手柄（拖它就能放大缩小，见 _hit）；
+            # 另一个按钮画成灰虚线，让人看见「联动的那一个现在在哪儿」。
+            style = {'outline': '#ffffff', 'width': 2}
+            if not on:
+                style = {'outline': '#9a9a9a', 'width': 1, 'dash': (4, 3)}
+            self.cv.create_rectangle(x0, y0, x1, y1, tags='box', **style)
+            if on:
+                self.cv.create_line(x0, y0, x0, y1, fill='#ff4646', width=2, tags='box')
+                self.cv.create_line(x1, y0, x1, y1, fill='#46e66e', width=2, tags='box')
+                for hx, hy in self._live_handles(r).values():
+                    self.cv.create_rectangle(hx - self.HANDLE_PX, hy - self.HANDLE_PX,
+                                             hx + self.HANDLE_PX, hy + self.HANDLE_PX,
+                                             outline='#ffffff', tags='box')
+        self.lb_read.configure(text=self._read_text())
+        ok = self._valid()
         self.btn_ok.configure(state='normal' if ok else 'disabled',
                               bg=CARD_HI if ok else CARD, fg=UI_FG if ok else FAINT)
-        band = (b.y + BAR_BAND_TOP, b.y + BAR_BAND_BOTTOM - 1)
-        img = boxpick.magnify(self.frame, b, panel=(556, 186), layout=self.guide, band=band)
+        self._draw_zoom()
+
+
+    def _read_text(self):
+        r = self.box
+        if r is None:
+            return ''
+        head = '%s  x=%d y=%d  宽 %d 高 %d' % (ROI_LABELS.get(self.target, self.target),
+                                              r.x, r.y, r.w, r.h)
+        if self.target == 'bar':
+            return (head + '\n条带行 %d..%d ｜ 每逻辑帧 %.2f px（宽 / 30）'
+                    % (r.y + BAR_BAND_TOP, r.y + BAR_BAND_BOTTOM - 1, r.w / 30.0))
+        a, b = self._band_rows(r)
+        return (head + '\n取样条带 第 %d..%d 行（ROI 内，读取只用这几行）'
+                % (a - r.y, b - r.y))
+
+    def _valid(self):
+        r = self.box
+        if self.frame is None or r is None:
+            return False
+        h, w = self.frame.shape[:2]
+        if r.x < 0 or r.y < 0 or r.x + r.w > w or r.y + r.h > h:
+            return False
+        return r.w >= 20 if self.target == 'bar' else r.w >= 8
+
+    def _draw_zoom(self):
+        r = self.box
+        if r is None:
+            return
+        # 暂停键：淡青虚影（双竖条该长的地方）+ 条带整条填一层淡色（用户 2026-10-12：
+        # 「暂停键参考不明确」—— 两条 1px 的蓝线要回答「字的顶边压在线的哪一侧」太容易
+        # 看错，一条带的上沿就没这个歧义）；费用条不需要，那两条线本来就压在看得见的
+        # 白块上。
+        pause = self.target == 'pause'
+        img = boxpick.magnify(self.frame, r, panel=self.ZOOM_PANEL,
+                              layout=self.guide if self.target == 'bar' else None,
+                              band=self._band_rows(r), pan=self.pan, zoom=self.zoom,
+                              ghost=boxpick.pause_ghost(r) if pause else (),
+                              band_fill=pause, base=self._zwin_base())
         self._photo['zoom'] = ImageTk.PhotoImage(img)
         self.cv_zoom.delete('all')
         self.cv_zoom.create_image(0, 0, anchor='nw', image=self._photo['zoom'])
 
-    # ---- 拖框 ----
-    def _down(self, event):
-        ix, iy = self._to_img(event.x, event.y)
-        self._drag_from = (ix, iy)
+    # ---- 放大图的倍数基准（用户 2026-10-13：「不要跟随框会很乱」）----
+    def _zwin_base(self):
+        """放大倍数的**基准窗口**（画面像素）：打开取景器 / 重画框那一刻的框大小。
 
-    def _drag(self, event):
-        if self._drag_from is None:
-            return
-        ix, iy = self._to_img(event.x, event.y)
-        h, w = self.frame.shape[:2]
-        x0, x1 = sorted((max(0, min(self._drag_from[0], w - 1)), max(0, min(ix, w - 1))))
-        y0, y1 = sorted((max(0, min(self._drag_from[1], h - 1)), max(0, min(iy, h - 1))))
-        self.box = Rect(x0, y0, max(2, x1 - x0), max(2, y1 - y0))
-        self.redraw()
+        为什么不用「当前的框」：框是拿来对准的，拖手柄 / 微调 / 挪块都在改它。倍数要是
+        跟着框算（`窗口 = 框 / zoom`），改框的同时整张放大图跟着缩放 —— 眼睛刚对上的那条
+        线又跑了，手感就是「很乱」。基准定死之后，改框只动四条彩线的位置，倍数不动。
 
-    def _up(self, event):
-        if self._drag_from is None:
-            return
-        self._drag_from = None
-        self._snap(auto=True)
-        self.redraw()
+        什么时候重取（`self._zbase = None`）：换目标、第一次铺框、拉新框、双击复位 ——
+        都正是「按这个框重新对准」的那几刻。
+        """
+        if self._zbase is None:
+            r = self.box
+            if r is None:
+                return None
+            self._zbase = [float(r.w), float(r.h)]
+        return self._zbase
 
-    # ---- 微调 / 吸附 ----
+    def _zoom_lo(self):
+        """现在能缩到多小：面板装得下为止（1 画面像素 = 1 屏像素，见 boxpick.zoom_floor）。"""
+        base = self._zwin_base()
+        return boxpick.zoom_floor(base, self.ZOOM_PANEL) if base else self.ZOOM_MIN
+
+    # ---- 放大图：只看 + 挪视窗 / 滚轮局部放大 / 双击复位 ----
     #
-    # 为什么要有像素级微调：参照图按窗口大小缩过（2560 宽的录屏放进 1280 的窗口只有 0.5 倍），
-    # 鼠标拖出来天生差 1~2 个画面像素，而「一费 30 帧」的相位对 1px 都敏感（6px = 1 帧）。
-    # 所以拖完再让用户按着这几个键抠，抠的时候放大镜里看得见红 / 绿线在白块的哪一侧。
-
-    def _edge(self, dx: int, dw: int):
-        """动一条边：左端动 = x 和宽一起变；右端动 = 只变宽。"""
-        b = self.box
-        h, w = self.frame.shape[:2]
-        x, ww = b.x + dx, b.w + dw
-        if x < 0 or ww < 6 or x + ww > w or b.y + b.h > h:
-            return
-        self.box = Rect(x, b.y, ww, b.h)
-        self.redraw()
-
-    def _move(self, dx: int, dy: int):
-        b = self.box
-        h, w = self.frame.shape[:2]
-        x = max(0, min(b.x + dx, w - b.w))
-        y = max(0, min(b.y + dy, h - b.h))
-        self.box = Rect(x, y, b.w, b.h)
-        self.redraw()
-
-    def _left_out(self):
-        self._edge(-1, 1)
-
-    def _left_in(self):
-        self._edge(1, -1)
-
-    def _right_in(self):
-        self._edge(0, -1)
-
-    def _right_out(self):
-        self._edge(0, 1)
-
-    def _left_1(self):
-        self._move(-1, 0)
-
-    def _right_1(self):
-        self._move(1, 0)
-
-    def _up_1(self):
-        self._move(0, -1)
-
-    def _down_1(self):
-        self._move(0, 1)
-
-    def _snap(self):
-        """吸附左端：把左边缘钉到白块起点（画面上自带的尺子，见 boxpick.snap_box）。"""
+    # 用户 2026-10-12：「放大做的什么鬼」—— 上一轮把「拖框」放进了放大图（拖身子挪框、
+    # 拖边改边），结果在放大图里随便一拖，框就跑到别处去了。现在分工摆清楚：
+    #     左边那张图   = 建框 / 挪框 / 拉边（Windows 截图那套）
+    #     右边放大图   = 只看；左键拖 = 挪视窗（看框外面）、滚轮 = 局部放大、双击 = 复位
+    #     放大图下面两行 = 一次 1 个像素的微调
+    def _zdown(self, event):
         if self.box is None:
             return
-        box, _shift, why = boxpick.snap_box(
-            self.frame, self.box,
-            (self.box.y + BAR_BAND_TOP, self.box.y + BAR_BAND_BOTTOM - 1))
-        self.box = box
-        self.lb_hint.configure(text=why)
+        self._zpan_from = (event.x, event.y, self.pan[0], self.pan[1])
+
+    def _zdrag(self, event):
+        self._pan_drag(event)
+
+    def _zup(self, _event=None):
+        self._zpan_from = None
+
+    def _pan_drag(self, event):
+        """挪视窗：画面跟着手走（鼠标往右拖，那块画面也往右走 = 视窗往左）。"""
+        r = self.box
+        if self._zpan_from is None or r is None:
+            return
+        ox, oy, px, py = self._zpan_from
+        kx, ky = boxpick.zoom_scale(r, self.ZOOM_PANEL, self.zoom, self._zwin_base())
+        self.pan = [px - (event.x - ox) / float(kx), py - (event.y - oy) / float(ky)]
+        self._pan_clamp()
+        self._draw_zoom()
+
+
+    # ---- 放大图：滚轮 = 局部放大（用户：「做局部放大！类似 ctrl+滚轮 的还是框选放大都行」）----
+    ZOOM_STEP = 1.25                        # 一格滚轮的倍数
+    ZOOM_MIN = boxpick.ZOOM_MIN             # 老口径的下限；实际下限看 _zoom_lo
+    ZOOM_MAX = boxpick.ZOOM_MAX
+
+    def _wheel(self, event):
+        """滚轮一格 = 放大 / 缩小一档（ctrl+滚轮 / shift+滚轮 走同一条路，见上面的 bind）。
+
+        往上滚 = 放大、往下滚 = 缩小，缩到 `_zoom_lo()` 为止（面板装得下 = 1:1，见
+        boxpick.zoom_floor）；缩放中心 = 鼠标底下那一点（见 _zoom_at）。
+        """
+        if getattr(event, 'delta', 0) == 0:
+            return
+        step = self.ZOOM_STEP if event.delta > 0 else 1.0 / self.ZOOM_STEP
+        self._zoom_at(step, event.x, event.y)
+
+    def _zoom_at(self, factor, cx, cy):
+        """缩放，并且**盯着鼠标底下那一点**缩（用户 2026-10-13：「放大鼠标单击的地方」）。
+
+        为什么要盯住鼠标：放大图里差几个像素就是「框偏了」，用户是对着「白条左端」那个
+        具体位置放大的 —— 放大之后它还在鼠标底下，就不用重新找、也不用再拖一次。
+
+        **光标必须压在图上**：放大图（＝视窗 x 倍数）比画布小，右边 / 下面空着几十到
+        一百多像素。在空处滚轮时，光标底下根本没有画面点 —— 拿那个「点」当锚点，算出来的
+        视窗整个往框的左上角跑（画面上看就是「跟着框走、很乱」，用户同一句里报的正是这个）。
+        所以先把 (cx, cy) 夹进**图**里：在空处滚 = 锚在离光标最近的那条图边，图不会乱走。
+        """
+        r = self.box
+        if r is None or self.frame is None:
+            return
+        size = self._frame_size()
+        base = self._zwin_base()
+        vx, vy, vw, vh, kx, ky = boxpick.zoom_view(r, self.ZOOM_PANEL, self.pan,
+                                                   self.zoom, size, base)
+        cx = min(max(int(round(cx)), 0), max(0, int(vw * kx) - 1))    # 夹进图里
+        cy = min(max(int(round(cy)), 0), max(0, int(vh * ky) - 1))
+        fx, fy = vx + cx / float(kx), vy + cy / float(ky)    # 光标底下那个画面点
+        self.zoom = boxpick.clamp_zoom(self.zoom * factor, base, self.ZOOM_PANEL)
+        _vx, _vy, vw2, vh2, kx2, ky2 = boxpick.zoom_view(r, self.ZOOM_PANEL, self.pan,
+                                                        self.zoom, size, base)
+        # 缩完图可能变窄（视窗小了），那一列放不下就退到图里最近的一列 —— 锚点照样在
+        # 图上，只是不再正好压在光标底下（差得最多就是空出来的那几列）。
+        ax = min(cx, max(0, int(vw2 * kx2) - 1))
+        ay = min(cy, max(0, int(vh2 * ky2) - 1))
+        self.pan = [fx - ax / float(kx2) - int(r.x), fy - ay / float(ky2) - int(r.y)]
+        self._pan_clamp()
         self.redraw()
+
+    def _zfit(self, _event=None):
+        """双击 = 回到「就是框里」（缩放和平移一起复位，倍数基准也跟着当前的框重取）。"""
+        self.zoom = 1.0
+        self.pan = [0.0, 0.0]
+        self._zbase = None
+        self.redraw()
+
+    def _pan_clamp(self):
+        """把 pan 夹进「视窗还在画面里」的范围。
+
+        为什么不留给 magnify 夹：那里夹的是**画的时候**用的 vx/vy，pan 自己会越走越远 ——
+        拖出去一大截再往回拖，要先「空拖」同样距离才动，手感像卡住。
+
+        视窗多大必须跟放大镜**完全一致**（zoom > 1 时视窗比框小），所以这里把 pan 交给
+        `boxpick.zoom_view`（它负责夹）再把夹完的结果读回来 —— 各算一份上下界最容易在
+        缩放之后对不上。
+        """
+        r = self.box
+        if r is None or self.frame is None:
+            self.pan = [0.0, 0.0]
+            return
+        vx, vy = boxpick.zoom_view(r, self.ZOOM_PANEL, self.pan, self.zoom,
+                                   self._frame_size(), self._zwin_base())[:2]
+        self.pan = [vx - int(r.x), vy - int(r.y)]
+
+    def _pan_carry(self, was):
+        """框自己挪了：pan 反向补同样多，让放大图**看的是同一块画面**。
+
+        不加这一下，边看放大图边按「← 1px」微调，画面会跟着跳（1 画面 px = k 像素的
+        放大图）—— 那正是「很难对准」的来源。
+        """
+        r = self.box
+        if was is None or r is None:
+            return
+        self.pan[0] -= r.x - was.x
+        self.pan[1] -= r.y - was.y
+        self._pan_clamp()
+
+    # ---- 左边那张图：建框 / 挪框 / 拉边（Windows 截图那套） ----
+    #
+    # 用户 2026-10-12：「先在左侧原画面创建一个框，就像 Windows 的截图一样可以拖动框放大
+    # 缩小移动」。所以这里只做截图工具那三件事：
+    #     按在**手柄**上 -> 拉那一条边 / 那个角（八个手柄）
+    #     按在框**里面** -> 整块挪
+    #     按在框**外面** -> 拉一个新框（橡皮筋）
+    # 位移一律**相对按下那一刻**算（见 boxpick.resize_box）：逐拍累加会攒下每一步的取整
+    # 误差，手抖一下再抖回来框就回不到原位 —— 而这是「对 1 个像素」的活儿（6px = 1 帧）。
+    #
+    # 中点手柄什么时候不认：框在某个方向上太薄（费用条那个 25px 高的框缩到画布上只有
+    # 9px）时，那条边上的中点会挤在角手柄上 —— 那一对中点就不认。**四角永远认**：Windows
+    # 截图那套里四个角是最主要的手势，而角手柄落在两个方向的两条线上，不会跟谁抢。
+    HANDLE_PX = 3                   # 手柄方块的半边长（画布像素）
+    EDGE_PX = 3                     # 压在边线上（没正好压住方块）也算抓住了那条边
+
+    def _handle_pts(self, r):
+        """当前目标那个框的八个手柄在画布上的位置（四角 + 四边中点）。"""
+        x0, y0 = int(r.x * self.scale), int(r.y * self.scale)
+        x1, y1 = int((r.x + r.w) * self.scale), int((r.y + r.h) * self.scale)
+        mx, my = (x0 + x1) // 2, (y0 + y1) // 2
+        return {'tl': (x0, y0), 't': (mx, y0), 'tr': (x1, y0), 'r': (x1, my),
+                'br': (x1, y1), 'b': (mx, y1), 'bl': (x0, y1), 'l': (x0, my)}
+
+    def _live_handles(self, r):
+        """这个框上**既画得出来、又按得住**的那几个手柄（四角 + 认得出的中点）。
+
+        为什么画的这一份和 _hit 认的这一份必须是一个函数：画出来却抓不住比不画更糟 ——
+        用户按住那个白方块往外拖，框一动不动，又回到「放大做的什么鬼」。
+        """
+        x0, y0 = int(r.x * self.scale), int(r.y * self.scale)
+        x1, y1 = int((r.x + r.w) * self.scale), int((r.y + r.h) * self.scale)
+        tall = (y1 - y0) > 4 * self.EDGE_PX
+        wide = (x1 - x0) > 4 * self.EDGE_PX
+        out = {}
+        for kind, pt in self._handle_pts(r).items():
+            if kind in ('t', 'b') and not tall:
+                continue
+            if kind in ('l', 'r') and not wide:
+                continue
+            out[kind] = pt
+        return out
+
+    def _hit(self, x, y):
+        """左键按在画布上的哪儿 -> ('handle', 哪条边) / ('inside', None) / ('new', None)。"""
+        r = self.box
+        if r is None:
+            return ('new', None)
+        x0, y0 = int(r.x * self.scale), int(r.y * self.scale)
+        x1, y1 = int((r.x + r.w) * self.scale), int((r.y + r.h) * self.scale)
+        tall = (y1 - y0) > 4 * self.EDGE_PX
+        wide = (x1 - x0) > 4 * self.EDGE_PX
+        for kind, (hx, hy) in self._live_handles(r).items():
+            if abs(x - hx) <= self.HANDLE_PX and abs(y - hy) <= self.HANDLE_PX:
+                return ('handle', kind)
+        if not (x0 - self.EDGE_PX <= x <= x1 + self.EDGE_PX
+                and y0 - self.EDGE_PX <= y <= y1 + self.EDGE_PX):
+            return ('new', None)
+        near_t = tall and abs(y - y0) <= self.EDGE_PX
+        near_b = tall and abs(y - y1) <= self.EDGE_PX
+        near_l = wide and abs(x - x0) <= self.EDGE_PX
+        near_r = wide and abs(x - x1) <= self.EDGE_PX
+        if near_t or near_b or near_l or near_r:
+            kind = (('t' if near_t else 'b') if (near_t or near_b) else '')
+            kind += (('l' if near_l else 'r') if (near_l or near_r) else '')
+            return ('handle', kind)
+        return ('inside', None)
+
+    def _min_w(self) -> int:
+        """这个目标允许的最小宽（费用条的框要够宽，按钮小得多）。"""
+        return self.MIN_W if self.target == 'bar' else self.BTN_MIN
+
+    def _min_h(self) -> int:
+        return self.MIN_H if self.target == 'bar' else self.BTN_MIN
+
+    def _down(self, event):
+        what, kind = self._hit(event.x, event.y)
+        self._grab = (what, kind, self._to_img(event.x, event.y), self.box,
+                      dict(self.boxes))
+        if what == 'new':
+            self.pan = [0.0, 0.0]           # 拉新框 = 重新对准，视窗回到「就是框里」
+            self.zoom = 1.0
+            self._zbase = None              # 框换了，倍数基准跟着新框重取
+
+    def _drag(self, event):
+        if self._grab is None:
+            return
+        what, kind, start, was, was_all = self._grab
+        if was is None:
+            return
+        ix, iy = self._to_img(event.x, event.y)
+        ox, oy = start
+        if what == 'new':
+            h, w = self.frame.shape[:2]
+            x0, x1 = sorted((max(0, min(ox, w - 1)), max(0, min(ix, w - 1))))
+            y0, y1 = sorted((max(0, min(oy, h - 1)), max(0, min(iy, h - 1))))
+            new = Rect(x0, y0, max(2, x1 - x0), max(2, y1 - y0))
+        else:
+            new = boxpick.resize_box(was, 'move' if what == 'inside' else kind,
+                                     ix - ox, iy - oy, self._frame_size(),
+                                     self._min_w(), self._min_h())
+        if new == was:
+            return
+        self._set_boxes(was_all, new)
+        self._pan_carry(was)
+        self.redraw()
+
+    def _up(self, _event=None):
+        self._grab = None
+
+    def _set_boxes(self, was_all, new):
+        """把新框写回去；右上角那一对**联动**（拉边 / 挪块都搬同样的四个边差）。"""
+        names = ('pause', 'speed') if self.target in ('pause', 'speed') else (self.target,)
+        self.boxes = boxpick.mirror_resize(was_all, self.target, new, self._frame_size(),
+                                           names=names, min_w=self._min_w(),
+                                           min_h=self._min_h())
+        self.dirty.update(n for n in names if n in self.boxes)
+
+    # ---- 放大图下面那两行：px 级微调 ----
+    # 用户 2026-10-12：「放大图下方可以微调px」。走的和拖框**同一套**几何
+    # （boxpick.resize_box），一次一拍 1 个像素 —— 对付的就是「红线和白块左端差 1~2px」。
+    def nudge_edge(self, kind: str, step: int):
+        """只动一条边：'l' / 'r' 动横的，'t' / 'b' 动竖的。"""
+        self._nudge(kind, step if kind in ('l', 'r') else 0,
+                    step if kind in ('t', 'b') else 0)
+
+    def nudge_move(self, dx: int, dy: int):
+        """整块挪 1 个像素。"""
+        self._nudge('move', dx, dy)
+
+    def _nudge(self, kind: str, dx: int, dy: int):
+        was = self.box
+        if was is None:
+            return
+        new = boxpick.resize_box(was, kind, dx, dy, self._frame_size(),
+                                 self._min_w(), self._min_h())
+        if new == was:
+            return
+        self._set_boxes(dict(self.boxes), new)
+        self._pan_carry(was)        # 视窗反向补同样多 —— 放大图不跟着跳（第 44 轮的规矩）
+        self.redraw()
+
+    def _frame_size(self):
+        h, w = self.frame.shape[:2]
+        return (w, h)
+
+    # 框能拉到多小。为什么非要有像素级微调（而不是光靠拖）：参照图按窗口大小缩过
+    # （2560 宽的录屏放进 1280 的窗口只有 0.5 倍），鼠标拖出来天生差 1~2 个画面像素，
+    # 而「一费 30 帧」的相位对 1px 都敏感（6px = 1 帧）—— 所以拖完还要能在放大图下面
+    # 一个像素一个像素地抠，抠的时候红 / 绿线在白块的哪一侧看得清清楚楚。
+    MIN_W = 20                      # 费用条的框：条槽 30 帧、每帧 6px，20px 以下没意义
+    MIN_H = 3
+    BTN_MIN = 8                     # 按钮小得多，能拉到的下限也小
 
     # ---- 收尾 ----
     def _apply(self):
-        if self.box is None:
+        if not self.boxes:
             return
-        box = self.box
+        # 费用条那一根**总是**交回去（它就是取景器的正题：位置以参照图上的框为准，
+        # 哪怕用户一个像素都没动）；按钮只在用户真拖过时才交 —— 没动过说明「预测的位置
+        # 看着还行」，那就让后端照旧按模板去搜（搜出来的和预测的往往不是一回事，
+        # 不该拿一份没人验过的预测把它盖掉）。
+        boxes = {n: r for n, r in self.boxes.items() if n == 'bar' or n in self.dirty}
+        box = boxes.get('bar')
         self.close()
-        self.on_apply(box)
+        self.on_apply(box if len(boxes) == 1 else boxes)
 
     def close(self):
         """关掉取景器（应用 / 取消 / Esc / 右上角 × 都走这里）。
@@ -637,7 +1113,6 @@ class MonitorApp:
         self.root.protocol('WM_DELETE_WINDOW', self.quit)
 
         self._build_ui()
-        self._bind_keys()
         # 建完界面才知道内容到底要多宽多高（换台机器 / 换字体缩放就不一样），这里按实际
         # 需求夹一次：窄了右边按钮会被裁（换窗口 / 退出），矮了最下面几行会被裁
         # （回费速率 / 提示 / 帮助）。写死 724 的那版在 150% 缩放的屏幕上就是裁着的 ——
@@ -649,13 +1124,13 @@ class MonitorApp:
         if not self._counting_started:
             self._set_note('点「开始」起采样（再点 = 暂停）', hold=8.0)
         # timeline_text 是直接把轴喂进面板输入框（演示模式用：轴不来自文件，
-        # 但仍然能在面板里改、能按 Ctrl+Enter 重解析）。
+        # 但仍然能在面板里改、能点「应用到提词器」重解析）。
         if timeline_text:
             self._set_axis_text(timeline_text)
             self.apply_axis_text()
         elif timeline_path:
             self.load_timeline(timeline_path)
-        # 把键盘焦点拿回主窗口：否则 Tk 可能把焦点给输入框，快捷键（C/S/T…）就失效了
+        # 焦点拿回主窗口（没有快捷键了，但输入框里留着光标会一直闪、也容易被误敲）
         self.root.after(300, self.root.focus_set)
         self.root.after(80, self._tick)
 
@@ -946,7 +1421,7 @@ class MonitorApp:
         文案只取两个字（开始 / 暂停 / 继续）：看板批注要「尽量缩小」，而这个按钮是
         控制行里最宽的一个 —— 实测「开始计数」比「开始」宽 36px，正好把整行顶出 470。
         2026-10-11 用户又说「快捷键操作去掉…不需要快捷键操作」：括号里的键名全删了，
-        所以这里只剩两个字（键本身还留着，见 _base_keys）。
+        2026-10-12 键本身也删了（见模块顶部注释），所以这里只剩两个字。
         """
         if not (self.monitor.alive and self._counting_started):
             return '开始'
@@ -964,6 +1439,10 @@ class MonitorApp:
         want = self._primary_label()
         if self.btn_start.cget('text') != want:
             self.btn_start.configure(text=want)
+        # 回费效率那一行也在这儿刷：Counter 是**懒建**的（第一次 set_layout 才有），
+        # 建好之前那一行只能显示 monitor.cost_rate，建好之后才等于 counter 的档位 ——
+        # 两边不一致时用户会看着一个错的档位去判断帧数，见 _sync_rate_row 的说明。
+        self._sync_rate_row()
     def _fit_window(self, now):
         """内容长高 / 长宽了就跟着把窗口放大，别把边上的东西切掉。
 
@@ -1147,9 +1626,8 @@ class MonitorApp:
         rate_row = tk.Frame(self.root, bg=UI_BG)
         rate_row.pack(fill='x', **pad)
         self._label(rate_row, '回费效率', 10).pack(side='left')
-        cur = (self.monitor.counter.frames_per_cost if self.monitor.counter is not None
-               else DEFAULT_FRAMES_PER_COST)
-        self.rate_var = tk.StringVar(value=_rate_label(cur))
+        # 初值取 _current_rate()（= 真正在用的那一档），不是「默认 30」—— 见它的说明。
+        self.rate_var = tk.StringVar(value=_rate_label(self._current_rate()))
         self._rate_labels = {}
         for v, desc in COST_RATE_PRESETS:
             self._rate_labels['%.0f  %s' % (v, desc)] = v
@@ -1175,7 +1653,7 @@ class MonitorApp:
                                 insertbackground=UI_FG, justify='center',
                                 font=(FONT_MONO, 10))
         self.en_rate.pack(side='left', padx=(4, 4))
-        self.en_rate.bind('<Return>', lambda _e: self.apply_rate_entry())
+        # （原来这儿绑着 <Return>「回车就应用」——2026-10-12 按用户要求删了，只能点「应用」。）
         self._btn(rate_row, '应用', self.apply_rate_entry).pack(side='left', padx=3)
 
         # ---- 常驻③：告警行（平时空的）----
@@ -1254,8 +1732,13 @@ class MonitorApp:
         self.lb_prom_title.pack(side='left')
         # 「导入轴…」= 开那个独立小窗（看板批注第 6 条），不是直接弹文件选择框 ——
         # 窗口里既能拖 md 进来，也能直接写。
+        # 「◀ 回看 / 现在 ▶」= 原来 ↑↓ 那两个键（2026-10-12 键删了，功能挪到按钮上）：
+        # 回看只动「画哪一段」，不碰任何计数（见 _prom_scroll）。pack(side='right')
+        # 是从右往左摆，所以这里写的顺序就是屏幕上从右到左的顺序。
         for text, cmd in (('重载', self.reload_timeline),
-                          ('导入轴…', self.open_axis_dialog)):
+                          ('导入轴…', self.open_axis_dialog),
+                          ('现在 ▶', lambda: self._prom_scroll(-99)),
+                          ('◀ 回看', lambda: self._prom_scroll(1))):
             self._btn(head, text, cmd).pack(side='right', padx=3)
         # 刻度表：按帧等比例摆在一条竖直刻度上，指针（白线）钉在正中不动。
         # 帧数上涨 -> 整条刻度**向上滚**（走过去的轴往上、变暗）—— 第 34 节翻的方向。
@@ -1321,38 +1804,11 @@ class MonitorApp:
         self.lb_source = self._label(diag, '', 9, UI_DIM, anchor='w', justify='left')
         self.lb_source.grid(row=4, column=0, sticky='w', pady=(2, 0))
 
-        # （「帮助行」那两行快捷键提示 2026-10-11 按用户要求删了 ——「快捷键全部删掉」。
-        #   键本身还在（见 _base_keys），只是不再印在面板上。）
+        # （2026-10-11 先删了「帮助行」那两行快捷键提示，2026-10-12 把键本身也删了 ——
+        #   用户：「把快捷键删掉！！！游戏里有快捷键会冲突」。见 ui 顶部注释。）
 
         if self._more:                       # 默认收起：展开区先不 pack
             self._pack_more()
-
-    def _guard(self, handler):
-        """给快捷键加一层「输入框保护」。
-
-        Tk 的按键会沿 bindtags 依次送给 控件 -> 控件类 -> 顶层窗口；Text 插入字符时
-        不会返回 'break'，所以不拦一下的话，在轴输入框里打字会顺手触发主窗口的快捷键
-        （打 c 清零、打 t 弹文件框、打 s 存校准……）。
-        """
-        def wrapped(event):
-            if isinstance(self.root.focus_get(), (tk.Text, tk.Entry)):
-                return None
-            return handler(event)
-        return wrapped
-
-    def _on_escape(self):
-        """Esc = 收起展开区（2026-10-10 照用户确认的示意图改）。
-
-        以前 Esc 直接退程序 —— 用 P / K / T 的时候手滑一下就整个面板没了。
-        退出改成 Ctrl+Q（或右上角那个 ×）。
-        """
-        if self._calib:
-            self.close_calib_dialog()          # 窗口开着就先把窗口收掉（顺手退微调）
-            return
-        if self._more:
-            self.toggle_more()
-            return
-        self._set_note('已收起（点 ▸ 展开）')
 
     def _redraw_scale(self, flash: bool = False):
         """按当前「回看偏移」重画刻度表（换缩放 / 翻条 / 换轴都走这里）。"""
@@ -1364,7 +1820,7 @@ class MonitorApp:
                                      now=frame_f), flash)
 
     def _prom_scroll(self, direction: int, step_frames: float = 30.0):
-        """↑ ↓ 翻条：把刻度表往回 / 往前拨 30 帧（1 费 = 1 秒 = 30 帧）。
+        """翻条（标题栏那两个「◀ 回看 / 现在 ▶」按钮）：把刻度表往回 / 往前拨 30 帧。
 
         回看时指针那行印「回看」，真正的「现在」由刻度表另画一条灰线标出来
         （见 scale_render.render）—— 只动「画哪一段」，**不碰任何计数**。
@@ -1383,19 +1839,16 @@ class MonitorApp:
             self._set_note('回看 %d 帧' % int(self._prom_shift))
 
     def _set_calib_mode(self, on: bool) -> None:
-        """进出「微调 ROI」状态：只有这时才吃 Tab / 方向键 / Shift+方向键 / S / R / K。
+        """进出「微调 ROI」状态：进去就把屏幕上的 ROI 框亮出来，窗口一关就还原。
 
-        为什么要有这个状态：那几个键原来绑在全局 —— 想按 Tab 跳控件、想按方向键翻条
-        都会被它吃掉，误按一下 ROI 就偏了，而偏几个像素读数就全错。
-
-        2026-10-11 起这个状态和「手动校准」窗口绑在一起：「手动校准…」那个按钮
-        （以及窗口里的微调键）是唯一入口，窗口一关就还原 —— 以前是一个常驻的
-        「ROI 校准模式 ▸」开关，用户要的是「改成手动校准」。
+        2026-10-11 起它和「手动校准」那个二级窗口绑在一起（用户：「改成手动校准」）：
+        窗口是唯一入口，一关就还原 —— 以前是一个常驻的「ROI 校准模式 ▸」开关。
+        原来它管的是「哪几个键归我吃」，2026-10-12 键全删了，现在它只管两件事：
+        亮 / 收屏幕上那个 ROI 框、给一句提示。
         """
         if self._calib == on:
             return
         self._calib = on
-        self._bind_keys()
         if on:
             self._set_note('微调「%s」' % ROI_LABELS.get(self.target, self.target),
                            hold=6.0)
@@ -1452,7 +1905,11 @@ class MonitorApp:
         # ---- 预览：真正取特征的那条带用红框标出来 ----
         prev = tk.Frame(top, bg=UI_BG)
         prev.pack(fill='x', padx=10, pady=(9, 0))
-        self.cv_bar = tk.Canvas(prev, width=430, height=64, bg=SUNKEN,
+        # 预览画布 = 当前目标那个 ROI 的**真实像素**，等比放大到画布装得下为止 ——
+        # 这就是用户要的「放大镜」（原来只画费用条那一条，调暂停 / 倍速时是盲挪）。
+        # 高 200 是照着按钮 ROI 那一档定的（实测 200x160）：费用条只有 17 行高，放进这个
+        # 画布会被横向放大到占满宽度。
+        self.cv_bar = tk.Canvas(prev, width=430, height=200, bg=SUNKEN,
                                 highlightthickness=0)
         self.cv_bar.pack(fill='x')
         self.lb_calib_pos = self._label(prev, '', 9, UI_DIM, anchor='w', justify='left')
@@ -1557,50 +2014,9 @@ class MonitorApp:
                            '%s   x=%d  y=%d   %dx%d' % (ROI_LABELS[self.target],
                                                         roi.x, roi.y, roi.w, roi.h))
 
-    # 校准模式才吃的键。列在这里是为了「退出模式时把它们 unbind 掉」——
-    # 以前 Tab / 方向键是全局绑定的（见 toggle_calib_mode 的说明）。
-    CALIB_SEQS = ('<Tab>', '<Left>', '<Right>', '<Up>', '<Down>',
-                  '<Shift-Left>', '<Shift-Right>', '<Shift-Up>', '<Shift-Down>',
-                  's', 'S', 'r', 'R', 'k', 'K')
-
-    def _base_keys(self):
-        """常驻快捷键（不分模式）。"""
-        return (('<space>', self._primary_action),
-                ('<Escape>', self._on_escape),
-                ('<Control-q>', self.quit),
-                ('p', self.toggle_manual_pause), ('P', self.toggle_manual_pause),
-                ('c', self.clear_count), ('C', self.clear_count),
-                ('t', self.import_timeline), ('T', self.import_timeline),
-                ('<Control-r>', self.reload_timeline),
-                ('<F5>', self.recalibrate),
-                # ↑↓ 默认翻条；进了校准模式会被 _nudge 盖掉（见 _bind_keys）
-                ('<Up>', lambda: self._prom_scroll(1)),
-                ('<Down>', lambda: self._prom_scroll(-1)))
-
-    def _calib_keys(self):
-        """校准模式里额外接管的键。"""
-        return (('<Tab>', self._cycle_target),
-                ('s', self.save_calib), ('S', self.save_calib),
-                ('r', self.reset_calib), ('R', self.reset_calib),
-                ('k', self.toggle_overlay), ('K', self.toggle_overlay))
-
-    def _bind_keys(self):
-        """按当前是不是校准模式，铺一遍快捷键。
-
-        每次切换都整份重铺（先 unbind 掉 CALIB_SEQS，再按模式绑）—— 这样「退出模式」
-        一定会把 Tab / 方向键还给系统、还给翻条，不会留下半套绑定。
-        """
-        r = self.root
-        for seq in self.CALIB_SEQS:
-            r.unbind(seq)
-        for seq, fn in self._base_keys():
-            r.bind(seq, self._guard(lambda _e, f=fn: f()))
-        if self._calib:
-            for seq, fn in self._calib_keys():
-                r.bind(seq, self._guard(lambda _e, f=fn: f()))
-            for seq in ('<Left>', '<Right>', '<Up>', '<Down>',
-                        '<Shift-Left>', '<Shift-Right>', '<Shift-Up>', '<Shift-Down>'):
-                r.bind(seq, self._guard(self._nudge))
+    # （_base_keys / _calib_keys / _bind_keys / CALIB_SEQS 这一整套 2026-10-12 删了。
+    #   用户：「把快捷键删掉！！！游戏里有快捷键会冲突」—— 常驻在游戏旁边的计数器
+    #   不该抢任何键。每个动作在界面上都有按钮，见模块顶部注释。）
 
     # ---------------- 校准 ----------------
 
@@ -1613,35 +2029,12 @@ class MonitorApp:
                 self.deltas.setdefault(k, [0, 0, 0, 0])
             self.calib_scale = scale
 
-    def _nudge(self, event):
-        shift = bool(event.state & 0x1)
-        name = self.target
-        d = self.deltas[name]
-        step = 1
-        if event.keysym == 'Left':
-            d[2 if shift else 0] -= step
-        elif event.keysym == 'Right':
-            d[2 if shift else 0] += step
-        elif event.keysym == 'Up':
-            d[3 if shift else 0] -= step
-        elif event.keysym == 'Down':
-            d[3 if shift else 0] += step
-        self._apply_deltas()
-
     def _roi_names(self):
         '''当前 layout 里真有的 ROI 名字。'''
         lay = self.monitor.layout
         if lay is None:
             return ROI_ORDER
         return tuple(n for n in ROI_ORDER if getattr(lay, n, None) is not None)
-
-    def _cycle_target(self):
-        order = self._roi_names()
-        if self.target not in order:
-            self.target = order[0]
-        else:
-            self.target = order[(order.index(self.target) + 1) % len(order)]
-        self._set_note('校准目标：%s' % ROI_LABELS.get(self.target, self.target))
 
     def _apply_deltas(self):
         base = self._base_layout()
@@ -1879,8 +2272,28 @@ class MonitorApp:
             self.apply_cost_rate(v)
 
     def _current_rate(self) -> float:
-        return (self.monitor.counter.frames_per_cost if self.monitor.counter is not None
-                else DEFAULT_FRAMES_PER_COST)
+        """此刻**真正在用**的「一费几个逻辑帧」。
+
+        窗口模式刚起来时 monitor.counter 还是 None（Counter 要等第一次 set_layout 才建），
+        而那时真正决定档位的是 monitor.cost_rate（run_monitor 从 cost_rate.json 读出来的
+        存盘值）。旧代码这里直接回落到默认的 30，于是存盘值是 39 时面板写着「30 正常」、
+        实际却在按 39 帧/费数 —— 用户 2026-10-12 报的「1 费却是 36 帧」就是这么来的
+        （实测那段录像：30 帧/费 记 29/29/28/32 帧，39 帧/费 记 37/38/36/42 帧）。
+        """
+        if self.monitor.counter is not None:
+            return self.monitor.counter.frames_per_cost
+        rate = getattr(self.monitor, 'cost_rate', None)
+        try:
+            v = float(rate)
+        except (TypeError, ValueError):
+            return DEFAULT_FRAMES_PER_COST
+        return clamp_frames_per_cost(v) if v > 0 else DEFAULT_FRAMES_PER_COST
+
+    def _sync_rate_row(self):
+        """把「回费效率」那一行刷成 _current_rate()。填过一次就不动（每拍都会调）。"""
+        want = _rate_label(self._current_rate())
+        if self.rate_var.get() != want:
+            self.rate_var.set(want)
 
     def apply_rate_entry(self):
         """「应用」按钮 / 输入框回车：把输入框里的数当成一费逻辑帧数切档。"""
@@ -1930,7 +2343,7 @@ class MonitorApp:
     def recalibrate(self):
         """重新校准：把「从屏幕哪块读、当前相位对到哪一帧」重新对一遍。
 
-        按钮和 F5 都走这里，真正的活在 LiveMonitor.recalibrate 里：重找窗口、
+        只有「校准」那个按钮走这里，真正的活在 LiveMonitor.recalibrate 里：重找窗口、
         按当前客户区重算 ROI、采样线程死了就拉起来。**已经数出来的帧数不动** ——
         它的语义是「重新对准」，不是「清零」（清零有单独那个按钮）。
 
@@ -2016,7 +2429,6 @@ class MonitorApp:
             on_pick(win)
 
         lb.bind('<Double-Button-1>', choose)
-        top.bind('<Escape>', lambda _e: top.destroy())
         self._btn(top, '选这个窗口', choose, font=(FONT_UI, 10)).pack(pady=(0, 8))
 
     def read_window(self):
@@ -2046,15 +2458,24 @@ class MonitorApp:
                          args=(win, box, force)).start()
 
     def _window_worker(self, win, box, force: bool):
-        """后台线程：算完把结果放进 _window_result，主线程下一拍取走。"""
+        """后台线程：算完把结果放进 _window_result，主线程下一拍取走。
+
+        box 是「手动校准」交回来的东西：一个 Rect（只圈了费用条）或者
+        {目标名: Rect}（按钮也是用户自己钉的，见 BoxPicker._apply）。给了它就**不做**
+        自动对齐 / 量条槽 / 搜按钮 —— 用户已经把 ROI 指出来了（见 WindowSource）。
+        """
+        if isinstance(box, dict):
+            bar_box, pause_box = box.get('bar'), box.get('pause')
+            speed_box = box.get('speed')
+        else:
+            bar_box, pause_box, speed_box = box, None, None
+        if bar_box is not None:
+            self._window_progress('buttons', -1.0, '按框选钉住 ROI…')
         try:
             src = WindowSource(win, templates=self.templates,
-                               progress=self._window_progress, use_profile=not force)
-            note = ''
-            if box is not None:
-                # 手动校准：按框钉住费用条 -> 搜右上角两个按钮 -> 记进校准表
-                self._window_progress('buttons', -1.0, '按框选钉住费用条…')
-                _layout, note = src.manual_layout(box)
+                               progress=self._window_progress, use_profile=not force,
+                               bar_box=bar_box, pause_box=pause_box, speed_box=speed_box)
+            note = src.manual_note
         except BaseException as exc:           # noqa: BLE001  连崩溃也要报给界面看
             self._window_result = (None, exc, win, '')
         else:
@@ -2167,7 +2588,7 @@ class MonitorApp:
                            % ('自己框的' if src.manual else '自动试出来的'), hold=4.0)
 
     def toggle_count(self):
-        """「开始计数」/「停止计数」（主按钮 / 空格）：采样线程由这一下控制。
+        """「开始计数」/「停止计数」（主按钮）：采样线程由这一下控制。
 
         两条链路都走这里。实时链路原来没有「停」的地方（run_monitor 一进来就 start），
         2026-10-10 照用户确认的示意图打通：停下来是真的把采样线程停掉（省 CPU、
@@ -2203,6 +2624,10 @@ class MonitorApp:
         格子（微调差值 -> layout_calib.json），所以开二级窗口，见 open_calib_dialog。
         窗口（录屏 / 播放器）：画面被缩放过（实测 VLC 里 2560x1600 缩到 0.4777 倍），
         推出来的框落不到条上，只能**对着参照图圈一遍**（box_bar -> window_calib.json）。
+
+        两条路都有放大镜（用户 2026-10-11：「最好加一个放大镜，放大部分画面方便对齐」）：
+        二级窗口里是**当前目标那个 ROI** 的原图放大（切目标就跟着换，见 _render_previews），
+        取景器里是框内那一块放大（红线 = 特征真正取样的那几行）。
         两份校准表的键都不一样（分辨率 / 进程名 + 客户区尺寸），所以合不成一件事。
         """
         if self._src_kind == 'window':
@@ -2230,7 +2655,7 @@ class MonitorApp:
         except Exception:                      # noqa: BLE001
             ok = False
         if ok:
-            self._raise_panel()             # 抬目标会把它压到面板上面，得抢回来
+            self._raise_ours()              # 抬目标会把它压到我们所有窗上面，得抢回来
 
     def _release_pin(self):
         """把我们钉上去的置顶还回去（窗口已经关了就拉倒）。"""
@@ -2254,20 +2679,26 @@ class MonitorApp:
 
         2026-10-11 改法（用户：「在读取视频时窗口会闪解决一下」）：先问一句再动手。
         旧写法无条件 set_topmost(HWND_TOPMOST) —— 它除了打标记，还顺手把目标抬到置顶层
-        最上面，于是必须紧接着 _raise_panel() 把面板抢回来。这一抬一抢每 0.7 秒来一次，
-        全屏播放器就会盖住面板一下再让开，用户看到的就是「窗口会闪」。
+        最上面，于是必须紧接着把我们自己的窗全抢回来（_raise_ours）。这一抬一抢每 0.7 秒
+        来一次，全屏播放器就会盖住面板一下再让开，用户看到的就是「窗口会闪」。
 
         现在只有三种情况，且只有第二种会发系统调用：
             标记还在   -> 什么都不做（稳态零闪烁）
-            标记丢了   -> 补钉 + 抬面板（这一下会闪，但确实需要，否则目标会被盖住）
+            标记丢了   -> 补钉 + 抬我们的窗（这一下会闪，但确实需要，否则目标会被盖住）
             系统不让钉 -> 报一次，让用户自己在播放器里勾「总在最前」
+
+        每拍都被 _tick_body 调（拖面板期间除外），**不**看我们自己的对话框开没开 ——
+        那道门是第 39~43 轮的写法，会让置顶在里面开着的时候整段停摆，见 _raise_ours。
         """
         if now - self._pin_at < PIN_KEEP_S:
             return
         self._pin_at = now
-        hwnd, win = self._pinned_hwnd, self._window_win
-        if hwnd is None or win is None:
+        hwnd = self._pinned_hwnd
+        if hwnd is None:
             return                          # 没在读窗口：不钉（见 _pin_window）
+        # 判据里**不**看 self._window_win：第一次校准那一整段（自动那条路是几十秒）
+        # _window_win 还是 None，而那时窗口早就钉上了 —— 按老的写法这段复核是停摆的，
+        # 目标在这期间丢了标记就再没人钉（第 44 轮顺手补上）。
         if not is_window(hwnd):
             # 窗口没了（被关掉 / 播放器重建了它）。不自动换一个 —— 换窗口要重新校准、
             # 帧号也得从头数，那是用户的决定；这里只把话说明白。
@@ -2277,7 +2708,10 @@ class MonitorApp:
             return
         try:
             if is_topmost(hwnd):
-                return                      # 标记还在：这一拍一个系统调用都不发
+                # 标记还在：不用动目标（动它就闪）。但**我们自己可能被它压住了** —— 见
+                # _raise_if_covered 里的实测：用户点一下播放器，它就跑到置顶层最上面。
+                self._raise_if_covered(hwnd)
+                return
         except Exception:                   # noqa: BLE001
             pass
         try:
@@ -2286,24 +2720,81 @@ class MonitorApp:
             ok = False
         if ok:
             self._pin_noted = ''
-            self._raise_panel()             # 抬目标会把它压到面板上面，得抢回来
+            self._raise_ours()              # 抬目标会把它压到我们所有窗上面，得抢回来
             self._note_pin('置顶丢了，已重新钉上')
             return
         self._note_pin('系统不让置顶（手动勾播放器「总在最前」）')
 
-    def _raise_panel(self):
-        """把面板抬到目标窗口上面（同一置顶层里，最后抬上来的在最上面）。
+    def _our_windows(self) -> list:
+        """我们自己开着的顶层窗口：面板 + 所有还铺在屏幕上的 Toplevel。
 
-        必须跟在 set_topmost(目标, True) 后面（见 _keep_pin）。抬不起来不算故障：这条
-        链路唯一的硬要求是「目标窗口别被别的窗口盖住」，面板压不上去只影响用户看不看得
-        见数字，不该因此把提示行刷红。
+        为什么两个用途共用一个列表（第 44 轮）：_own_dialog_open() 要知道「除了面板还有
+        没有别的窗」，_raise_ours() 要挨个把它们抬起来。判据分开写就会账对不上 ——
+        一边认为没开对话框、另一边却真有扇窗压着目标。
+
+        Tk 的顶层窗有两块句柄（winfo_id() 给的是里面的 TkChild），要动 Z 序得先换成
+        外面那个，见 win32.top_level。
+        """
+        out = [self.root]
+        for w in self.root.winfo_children():
+            if isinstance(w, tk.Toplevel):
+                try:
+                    if w.winfo_exists() and w.winfo_ismapped():
+                        out.append(w)
+                except tk.TclError:
+                    continue
+        return out
+
+    def _own_dialog_open(self) -> bool:
+        """我们自己有没有开着对话框 / 取景器（= 除了面板还有别的顶层窗）。"""
+        return len(self._our_windows()) > 1
+
+    def _raise_ours(self):
+        """把我们自己的窗口全抬到目标窗口上面（同一置顶层里，最后抬上来的在最上面）。
+
+        为什么不是只抬面板（第 44 轮改）：钉目标那一下（SetWindowPos 到 HWND_TOPMOST）
+        除了打标记，还会把目标抬到**置顶层的最上面** —— 被它压下去的不只是面板，还有
+        开着的对话框和取景器。第 39~43 轮的对策是「开着对话框就干脆别去钉」
+        （_tick_body 里那道 _own_dialog_open 门），代价是那段时间置顶**整段停摆**：
+        只要目标在这期间丢了标记（播放器自己重设窗口 / 换下一段视频 / 切全屏），就再也
+        没人把它钉回去，而面板上什么都不会说 —— 用户报的「读取窗口无法保持置顶」就是它。
+
+        现在门拆了，改成「钉完把自己人全抬回来」：既不丢置顶，取景器也照样盖在目标上面。
+        抬不起来不算故障：这条链路唯一的硬要求是「目标窗口别被别的窗口盖住」，
+        面板压不上去只影响用户看不看得见数字，不该因此把提示行刷红。
+        """
+        for w in self._our_windows():
+            try:
+                hwnd = top_level(w.winfo_id())
+                if hwnd:
+                    raise_window(hwnd)
+            except Exception:                  # noqa: BLE001
+                pass
+
+    def _raise_if_covered(self, hwnd) -> bool:
+        """目标跑到我们某个窗上面了吗？是就把我们自己抬回来（返回有没有抬）。
+
+        为什么光看 WS_EX_TOPMOST 标记不够（第 44 轮的真 bug）：置顶是一**层**，同一层里
+        最后被抬起来的在最上面 —— 用户点一下正在读的那个播放器，它就被系统抬到这一层的
+        最上面，我们自己的面板 / 取景器当场被压到下面去，而标记还好好地挂着。实测真 VLC：
+
+            钉完        VLC rank=17、面板 rank=13   （面板在上面）
+            点一下 VLC   VLC rank=14、面板 rank=17   （面板被压下去）
+            之后 189 拍  set_topmost 一次都没发      （标记还在，没人发现）
+
+        所以每 PIN_KEEP_S 秒补一句 z 序的复核。抬的时候只动我们自己（raise_window），
+        **不碰目标** —— 碰目标（SetWindowPos HWND_TOPMOST）就会闪一下，那正是第 39 轮
+        用户报的「读视频时窗口会闪」。
         """
         try:
-            hwnd = top_level(self.root.winfo_id())
-            if hwnd:
-                raise_window(hwnd)
+            for w in self._our_windows():
+                h = top_level(w.winfo_id())
+                if h and is_above(hwnd, h):
+                    self._raise_ours()
+                    return True
         except Exception:                      # noqa: BLE001
             pass
+        return False
 
     def _note_pin(self, text):
         """置顶相关的提示只弹一次：_keep_pin 每 0.7 秒跑一遍，每遍都写会把提示行刷爆。"""
@@ -2311,21 +2802,6 @@ class MonitorApp:
             return
         self._pin_noted = text
         self._set_note(text, hold=6.0)
-
-    def _own_dialog_open(self) -> bool:
-        """我们自己有没有开着对话框 / 取景器。
-
-        开着的时候**别去抢置顶**（尤其是「框选费用条」那个取景器 —— 它就是要盖在
-        目标窗口上面让用户对着参照图圈的）。
-        """
-        for w in self.root.winfo_children():
-            if isinstance(w, tk.Toplevel):
-                try:
-                    if w.winfo_exists() and w.winfo_ismapped():
-                        return True
-                except tk.TclError:
-                    continue
-        return False
 
     def _roi_hits(self) -> list:
         """面板压住了哪几个**被读的 ROI**（费用条 / 暂停键 / 倍速键）。
@@ -2386,12 +2862,16 @@ class MonitorApp:
     # ---------- 框选费用条 ----------
 
     def box_bar(self):
-        """框选费用条（读窗口那条链路）：拿**参照图**让用户圈，不是蒙着屏幕凭手感拖。
+        """框选 ROI（读窗口那条链路）：拿**参照图**让用户圈，不是蒙着屏幕凭手感拖。
 
         为什么换成参照图：窗口里的画面是缩放过、还可能带黑边的（实测 VLC 里
         2560x1600 缩到 0.4777 倍），屏幕上差两个像素就是好几个逻辑帧的相位误差 ——
-        用户的原话是「手动截取不准确，需要参照物」。参照图上的刻度尺 + 放大镜 +
-        吸附左端把这一层误差压到 0，用的就是 BoxPicker 那套参照图取景器。
+        用户的原话是「手动截取不准确，需要参照物」。参照图上的刻度尺 + 放大镜（四条边 +
+        平移 + 滚轮局部放大）把这一层误差压到 0，用的就是 BoxPicker 那套参照图取景器。
+
+        2026-10-11 第二轮起三个 ROI 都能在这儿框（用户：「暂停键倍速键也会截取不到，
+        需要手动校准；最好加一个放大镜，放大部分画面方便对齐」）：自动搜按钮搜不到时，
+        暂停 / 倍速那两路只能靠用户自己指，放大镜就是给他对位置用的。
         """
         if self._src_kind != 'window' or self._window_win is None:
             self._set_note('先选一个窗口（校准 → 窗口）')
@@ -2408,7 +2888,7 @@ class MonitorApp:
 
         self._picker = BoxPicker(self.root, fetch, 1, 0, on_apply=self._apply_window_box,
                                  on_note=self._set_note, on_close=self._picker_closed)
-        self._set_note('对着参照图圈住条槽', hold=6.0)
+        self._set_note('对着参照图圈住 ROI', hold=6.0)
 
     def _picker_closed(self):
         """取景器关掉了（应用 / 取消 都算）——把引用清掉。
@@ -2420,14 +2900,18 @@ class MonitorApp:
         self._picker = None
 
     def _apply_window_box(self, box):
-        """用户框完了（客户区坐标）：按这个框重算三个 ROI，并记进窗口校准表。"""
+        """用户框完了（客户区坐标）：按这些框重算三个 ROI，并记进窗口校准表。
+
+        取景器交回来的可能是**一个框**（只圈了费用条，按钮留给后端去自动搜），也可能是
+        {目标名: Rect}（费用条 + 用户自己钉的按钮，见 BoxPicker._apply）。
+        """
         self._picker = None
         win = self._window_win
         if win is None:
             return
         self._set_note('按这个框重算 ROI（几秒钟）', hold=0.0)
-        self.start_window_calib(win, box=box,
-                                note='按框选校准（框了 %dx%d）' % (box.w, box.h))
+        what = '框了 %d 块' % len(box) if isinstance(box, dict) else '框了 %dx%d' % (box.w, box.h)
+        self.start_window_calib(win, box=box, note='按框选校准（%s）' % what)
 
     # ---------------- 打轴器 ----------------
 
@@ -2515,12 +2999,9 @@ class MonitorApp:
                                 wrap='word', undo=True)
         self.txt_axis.pack(fill='both', expand=True, **pad)
         self.txt_axis.insert('1.0', self._axis_text)
-        # 这两个键都在窗口自己的控件上返回 'break'：不冒泡到主窗口的快捷键
-        # （Esc 在那边是「收起展开区」，Ctrl+Enter 是「应用」）。
-        self.txt_axis.bind('<Escape>', self._axis_escape)
-        self.txt_axis.bind('<Control-Return>', self._axis_apply_key)
+        # （Esc / Ctrl+Enter 两个键 2026-10-12 删了：用户要求「把快捷键删掉」，
+        #   退出走窗口右上角的 ×，应用走下面那个「应用到提词器」按钮。）
         top.protocol('WM_DELETE_WINDOW', self._close_axis_dialog)
-        top.bind('<Escape>', lambda _e: self._close_axis_dialog())
         if _HAS_DND:
             try:
                 self.txt_axis.drop_target_register(DND_FILES)
@@ -2609,19 +3090,6 @@ class MonitorApp:
         self._prom_state = None
         self._draw_scale_hint()
         # （原来这里往「下一条 … 还差 N 帧」那一行写提示，2026-10-11 那行删了。）
-
-    def _axis_escape(self, _event):
-        """在轴窗口里按 Esc：关掉这个窗口。
-
-        返回 'break' 是为了**不冒泡**到主窗口 —— 那边的 Esc 是「收起展开区」，
-        在这儿按一下把展开区收掉、窗还开着，看着就像没反应。
-        """
-        self._close_axis_dialog()
-        return 'break'
-
-    def _axis_apply_key(self, _event):
-        self.apply_axis_text()
-        return 'break'
 
     # ---------------- 刻度表 ----------------
 
@@ -2757,8 +3225,10 @@ class MonitorApp:
             self._fit_window(now)
         self._sync_ctrl_row()
         # 读窗口那条链路：目标窗口必须一直在最上面（见 _keep_pin）。
-        # 我们自己的对话框开着时不抢 —— 取景器就是要盖在目标窗口上让用户对着圈的。
-        if not dragging and not self._own_dialog_open():
+        # 我们自己的对话框开着时**照样**复核（第 44 轮）：以前这里挂一道
+        # _own_dialog_open() 的门，门一关置顶整段停摆，目标丢了标记就再也回不来。
+        # 「别把取景器压下去」这件事改由 _raise_ours() 负责 —— 钉完把我们也全抬回来。
+        if not dragging:
             self._keep_pin(now)
         if not dragging:
             self._refresh_roi_warn()
@@ -2959,37 +3429,65 @@ class MonitorApp:
         self._set_text('cycle', self.lb_cycle, '费用周期 ' + ' ｜ '.join(parts))
 
     def _render_previews(self, upd):
-        """只画**费用条**那一条预览（红框 = 特征真正取样的那条带）。
+        """只画**当前校准目标**那一个 ROI 的预览（红框 = 特征真正取样的那条带）。
 
-        原来还有暂停键 / 倍速键两张 348x170 的大图，已经删掉：那两块靠 lb_pause /
-        lb_speed 那两行数字（ratio / solid / conf）本来就够定位，白占 174px 高度 ——
-        用户的原话是「不要的功能全部删掉，太臃肿了」。
+        为什么跟着目标变（2026-10-11 用户：「暂停键倍速键也会截取不到，需要手动校准；
+        最好加一个放大镜，放大部分画面方便对齐」）：以前只有费用条那一张预览，挪按钮的
+        时候看不见 ROI 罩没罩住按钮，只能盲挪。现在切到哪个目标就放大显示哪一个 ——
+        40 倍放大之后，按钮在不在框里、条带压在按钮的哪一段，一眼就能判。
         判空是必须的：LiveUpdate 只保证「读到画面时」各字段有值，缺一路不该把整个
         _tick 打挂 —— _tick 一崩界面就冻住，报错还只在控制台里（踩过）。
         """
-        if upd.bar_img is not None and self.cv_bar is not None:
-            self._show(self.cv_bar, upd.bar_img, mark_rows=(5, 12))
+        if self.cv_bar is None:
+            return
+        img = {'bar': upd.bar_img, 'pause': upd.pause_img,
+               'speed': upd.speed_img}.get(self.target)
+        if img is None:
+            return
+        rows, cols = self._preview_marks(img.shape)
+        self._show(self.cv_bar, img, mark_rows=rows, mark_cols=cols)
+
+    def _preview_marks(self, shape):
+        """预览上那两条红线（和蓝线）画在哪儿 —— 就是特征**真正取值**的那几行 / 几列。
+
+        条带全是按 ROI 尺寸的**占比**定义的（geometry.PAUSE_SHAPE_BAND 等），所以这里
+        拿一个同尺寸的空 Rect 换算，和 features.read_pause / read_speed 用的是同一套数。
+        """
+        h, w = int(shape[0]), int(shape[1])
+        if self.target == 'bar':
+            return (BAR_BAND_TOP, BAR_BAND_BOTTOM - 1), None
+        r = Rect(0, 0, w, h)
+        if self.target == 'pause':
+            return r.band_rows(*PAUSE_SHAPE_BAND), None
+        return r.band_rows(*SPEED_DIGIT_BAND), r.cols_range(*SPEED_DIGIT_COLS)
 
     def _show(self, canvas, arr, mark_rows=None, mark_cols=None):
-        """把 ROI 灰度图放大画进固定大小的画布（按比例缩放并居中，不拉伸）。
+        """把 ROI 灰度图**放大**画进固定大小的画布（等比缩放居中，不拉伸）。
 
-        红线 = 特征提取真正使用的那条带（费用条是行 5..12；暂停键是形状判别条带），
-        蓝线 = 倍速数字的横向范围。ROI 偏了的话，一眼就能从预览上看出来。
+        缩放倍数不再是整数：以前 `box_w // w` 一取整就只剩 1 倍 —— 费用条 253px 宽的
+        ROI 放进 430 的画布只画 253px，按钮 ROI（200x160）放进 64 高的画布会被**裁掉**。
+        现在按「长宽都比得进去」取浮点倍数（上限 8 倍，别让 1x1 的占位框撑爆画布），
+        再交给 PIL 最近邻缩放 —— 像素块看着是方的，正好用来对条带。
+        红线 = 特征提取真正使用的那条带（费用条是行 5..12；暂停键是形状条带；倍速键是
+        数字条带），蓝线 = 倍速数字的横向范围。ROI 偏了一眼就能从预览上看出来。
         """
         h, w = arr.shape
         box_w = int(canvas['width'])
         box_h = int(canvas['height'])
-        k = max(1, min(box_w // w, box_h // h))
-        ox = (box_w - w * k) // 2
-        oy = (box_h - h * k) // 2
-        img = Image.fromarray(arr, mode='L').convert('RGB').resize((w * k, h * k), Image.NEAREST)
+        k = min(8.0, box_w / float(w), box_h / float(h))
+        nw, nh = max(1, int(w * k)), max(1, int(h * k))
+        ox = (box_w - nw) // 2
+        oy = (box_h - nh) // 2
+        img = Image.fromarray(arr, mode='L').convert('RGB').resize((nw, nh), Image.NEAREST)
         d = ImageDraw.Draw(img)
         if mark_rows:
             r0, r1 = mark_rows
-            d.rectangle([0, r0 * k, w * k - 1, (r1 + 1) * k - 1], outline=(230, 60, 60))
+            d.rectangle([0, int(r0 * k), nw - 1, max(int(r1 * k), int((r1 + 1) * k) - 1)],
+                        outline=(230, 60, 60))
         if mark_cols:
             c0, c1 = mark_cols
-            d.rectangle([c0 * k, 0, (c1 + 1) * k - 1, h * k - 1], outline=(60, 160, 255))
+            d.rectangle([int(c0 * k), 0, max(int(c1 * k), int((c1 + 1) * k) - 1), nh - 1],
+                        outline=(60, 160, 255))
         photo = ImageTk.PhotoImage(img)
         self._photos[canvas] = photo
         canvas.delete('all')

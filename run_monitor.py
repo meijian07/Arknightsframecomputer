@@ -17,10 +17,8 @@
 回费速率默认读设置文件 cost_rate.json（没有这个文件就按 30 = 1 秒 1 费），
 也可以在这里用 --cost-rate 覆盖；界面上那行「回费效率」改完会写回设置文件。
 
-界面里的键位见 ui.py 顶部注释：空格 开始 / 暂停 / 继续（主按钮三态合一），C 清零
-（顺手把采样停掉、按钮回「开始计数」），L 记录 CSV，T 开「导入 / 编辑轴」窗口，
-Ctrl+R 重载轴，F5 重新校准，Esc 收起展开区，Ctrl+Q 退出；ROI 校准那几个键收在
-「ROI 校准模式」里（点展开区那个按钮才进）。
+界面**没有任何键盘快捷键**（2026-10-12 全删了：计数器常驻在游戏旁边，按键会跟
+游戏自己的快捷键打架）。所有操作都在面板 / 二级窗口的按钮上，清单见 ui.py 顶部注释。
 """
 
 import argparse
@@ -273,7 +271,7 @@ def main(argv=None) -> int:
 
     from akframe.ui import MonitorApp
     # 演示模式默认塞一份内置轴（除非用户明确给了 --timeline 文件）：刻度表要有轴才画得满，
-    # 轴不来自文件也不影响，面板输入框里能直接改、能按 Ctrl+Enter 重解析。
+    # 轴不来自文件也不影响，面板输入框里能直接改、能点「应用到提词器」重解析。
     text = DEMO_AXIS_TEXT if (args.demo_axis and not args.timeline) else None
     app = MonitorApp(mon, calib_path=args.calib, settings_path=args.settings,
                      timeline_path=args.timeline, timeline_text=text)

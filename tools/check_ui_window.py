@@ -183,7 +183,7 @@ def main() -> int:
               % (elapsed, frames_seen, idx0, screen.last_idx))
 
         # ---- 4. 框选费用条：框（客户区坐标）-> 钉住 ROI ----
-        # 面板这条路走的是 ui.BoxPicker（参照图 + 橙色刻度尺 + 放大镜 + 吸附左端），
+        # 面板这条路走的是 ui.BoxPicker（参照图 + 橙色刻度尺 + 放大镜：四条边 / 平移 / 滚轮局部放大），
         # 它交回来的框**已经是客户区坐标**了（见 BoxPicker._apply -> _to_img 的换算），
         # 所以「用户框完点了用这个框」那一下就是 _apply_window_box(box)。
         # 框本身 -> 客户区尺寸 / 原点 / 三个 ROI 的换算由 tools/check_boxpick.py 钉死，
@@ -210,6 +210,68 @@ def main() -> int:
               '重校准前 %d -> 之后 %d' % (elapsed, mon2.counter.elapsed))
         check('刚才在数，重校准完自己接着数', mon2.alive)
 
+        # ---- 4b. 手框按钮：用户指的位置直接钉上，**不再**跑那道几十秒的网格搜索 ----
+        # 用户 2026-10-11：「暂停键倍速键也会截取不到，需要手动校准」。自动搜按钮只认
+        # 「倍速数字和模板对得上」—— 画面里那段没画数字就搜不到，于是 _no_buttons 把暂停 /
+        # 倍速整段关掉。手框就是给它兜底的：用户把框挪了几个像素 -> 就按他指的钉。
+        pb = Rect(truth.pause.x + 3, truth.pause.y + 2, truth.pause.w, truth.pause.h)
+        sb = Rect(truth.speed.x + 3, truth.speed.y + 2, truth.speed.w, truth.speed.h)
+        t1 = time.perf_counter()
+        app._apply_window_box({'bar': Rect(x1, y1, x2 - x1, y2 - y1), 'pause': pb, 'speed': sb})
+        ok = pump(app, lambda: not app._window_busy and app.monitor is not mon2)
+        dt = time.perf_counter() - t1
+        mon3 = app.monitor
+        check('手框按钮：重新算了一份 ROI', ok,
+              'busy=%s ｜ 提示=%r' % (app._window_busy, app.lb_note.cget('text')))
+        check('手框按钮：位置就是用户指的那个（1px 不差）',
+              (mon3.layout.pause.x, mon3.layout.pause.y) == (pb.x, pb.y)
+              and (mon3.layout.speed.x, mon3.layout.speed.y) == (sb.x, sb.y),
+              '%s / %s' % (mon3.layout.pause, mon3.layout.speed))
+        check('手框按钮：两条通道是开着的（不是 _no_buttons 关掉那份）',
+              mon3.layout.buttons_visible and app._window_src.buttons_ok,
+              'visible=%s ok=%s' % (mon3.layout.buttons_visible,
+                                    app._window_src.buttons_ok))
+        check('手框按钮：没再跑那道几十秒的按钮搜索', dt < 20.0, '耗时 %.1f 秒' % dt)
+        rec2 = load_window_profiles(prof)[window_key(CW.EXE, CW.WIN_SIZE)]['layout']
+        check('手框按钮：也记进了窗口校准表（下次开同尺寸窗口直接套用）',
+              rec2['pause'] == mon3.layout.pause.to_dict()
+              and rec2['speed'] == mon3.layout.speed.to_dict(), str(rec2['pause']))
+
+        # ---- 4c. 手框按钮的**大小**：采纳用户指的，但夹在标称值的 0.55~1.8 倍 ----
+        # 用户 2026-10-12：「放大做的什么鬼……右侧为框内放大图」「暂停键无法手动框选」。
+        # 为什么允许改大小：判别条带是按 ROI 高度的**占比**取的（geometry.PAUSE_SHAPE_BAND /
+        # SPEED_DIGIT_BAND），所以只要「字形在框里的相对位置」和标称一致读数就照样成立 ——
+        # 而这件事正是取景器里那两块虚影要回答的（虚影和字形重合 = 框对上了，包括大小）。
+        # 窗口里的画面被缩放过时（播放器实测 0.4777 倍）标称尺寸本身就不对，只搬位置根本
+        # 框不住字形。为什么要夹：拉得太离谱条带就飘到字形外面去，读数是**悄悄**错的。
+        # 这一段直接量 WindowSource._pin_buttons（面板那条路的中枢），不重复跑一遍
+        # _apply_window_box 那几十秒的链路。
+        src = app._window_src
+        nominal = src.layout
+        want = Rect(nominal.pause.x, nominal.pause.y,
+                    int(round(nominal.pause.w * 1.2)), int(round(nominal.pause.h * 1.2)))
+        lay, _note = src._pin_buttons(nominal, want, None)
+        check('手框按钮：大小也用用户指的那个（1.2 倍 -> 就按 1.2 倍钉）',
+              (lay.pause.w, lay.pause.h) == (want.w, want.h),
+              '%s 期望 %s' % (lay.pause, want))
+        check('手框按钮：只给一个框时，另一个按同一个位移、**一样大**跟过去',
+              (lay.speed.w, lay.speed.h) == (want.w, want.h)
+              and (lay.speed.x - lay.pause.x, lay.speed.y - lay.pause.y)
+              == (nominal.speed.x - nominal.pause.x, nominal.speed.y - nominal.pause.y),
+              '%s / %s' % (lay.pause, lay.speed))
+        huge = Rect(nominal.pause.x, nominal.pause.y, nominal.pause.w * 5, nominal.pause.h * 5)
+        lay2, _ = src._pin_buttons(nominal, huge, None)
+        check('手框按钮：拉得离谱时夹在标称值的 1.8 倍（条带不飘出字形）',
+              (lay2.pause.w, lay2.pause.h)
+              == (int(round(nominal.pause.w * 1.8)), int(round(nominal.pause.h * 1.8))),
+              '%s 标称 %s' % (lay2.pause, nominal.pause))
+        tiny = Rect(nominal.pause.x, nominal.pause.y, 2, 2)
+        lay3, _ = src._pin_buttons(nominal, tiny, None)
+        check('手框按钮：缩得太小也夹住（0.55 倍下限）',
+              (lay3.pause.w, lay3.pause.h)
+              == (int(round(nominal.pause.w * 0.55)), int(round(nominal.pause.h * 0.55))),
+              '%s' % (lay3.pause,))
+
         # ---- 5. 保存校准 -> 落到 window_calib.json ----
         app.save_calib()
         profs = load_window_profiles(prof)
@@ -229,8 +291,11 @@ def main() -> int:
         lifted = []
         real_topmost, real_iswin = ui.set_topmost, ui.is_window
         real_top, real_raise = ui.top_level, ui.raise_window
+        real_above = ui.is_above
+        real_topmost_flag = ui.is_topmost
         ui.set_topmost = lambda hwnd, on=True: (calls.append((hwnd, on)), True)[1]
         ui.is_window = lambda hwnd: True
+        ui.is_above = lambda a, b: False           # 目标没压在我们上面
         ui.top_level = lambda hwnd: 4242           # 面板自己的顶层句柄（假的）
         ui.raise_window = lambda hwnd: (lifted.append(hwnd), True)[1]
         try:
@@ -247,6 +312,21 @@ def main() -> int:
             app._keep_pin(t_now + 0.01)
             check('间隔没到就不重复调用（别每拍都去 SetWindowPos）',
                   len(calls) == n, '%d -> %d' % (n, len(calls)))
+            # ---- 5b2. 标记还在 ≠ 我们没被压住（第 44 轮的真 bug）----
+            # 置顶是**一层**，同一层里最后被抬起来的在最上面：用户点一下正在读的那个
+            # 播放器，系统就把它抬到这一层最上面，我们的面板当场被压下去，而
+            # WS_EX_TOPMOST 标记还好端端挂着（真 VLC 实测：VLC rank 17->14、面板 13->17，
+            # 之后 189 拍一个 set_topmost 都没发）。所以标记还在那一支也要比一次 z 序。
+            # 先让「标记还在」成立（上面那条走的是「补钉」支，这里要另一支）
+            ui.is_topmost = lambda hwnd: True
+            ui.is_above = lambda a, b: True
+            lifted = []
+            app._pin_at = 0.0
+            app._keep_pin(t_now + 1.0)
+            check('标记还在、但目标被抬到我们上面：不发系统调用，只把面板抬回来',
+                  len(calls) == n and lifted == [4242],
+                  'calls=%d lifted=%s' % (len(calls), lifted))
+            ui.is_above = lambda a, b: False
             # 句柄失效 = 窗口被关掉 / 播放器换了一个 —— 放开置顶并当面说清楚，
             # 不能闷着（闷着就是用户看到的「说好的置顶没了」）
             ui.is_window = lambda hwnd: False
@@ -257,6 +337,8 @@ def main() -> int:
         finally:
             ui.set_topmost, ui.is_window = real_topmost, real_iswin
             ui.top_level, ui.raise_window = real_top, real_raise
+            ui.is_above = real_above
+            ui.is_topmost = real_topmost_flag
 
         # ---- 5c. 面板压住**被读的 ROI**：那块抓到的是面板自己，必须当面告警 ----
         # 判据是三个 ROI，不是整个客户区 —— 全屏播放器的客户区覆盖整块屏幕，按客户区判
@@ -302,14 +384,41 @@ def main() -> int:
         check('没压住之后那条告警的状态位也清回去了（下次压住才会再报）',
               app._roi_warn == '', repr(app._roi_warn))
 
-        # ---- 5d. 我们自己开着对话框时不去抢置顶 ----
-        # 「框选费用条」那个取景器就是要盖在目标窗口上面让用户对着参照图圈的，
-        # 这时候把目标窗口抬上来会把取景器盖住。
+        # ---- 5d. 我们自己开着对话框时：置顶照样复核，而且把我们自己的窗全抬回来 ----
+        # 「框选费用条」那个取景器就是要盖在目标窗口上面让用户对着参照图圈的，所以钉完
+        # 目标必须把我们自己的窗再抬回来。第 39~43 轮是用「开着对话框就**别去钉**」实现
+        # 这一点的（_tick_body 里那道 _own_dialog_open 门），代价是置顶在那段时间**整段
+        # 停摆**：目标只要在这期间丢了标记（播放器自己重设窗口 / 换下一段视频 / 切全屏），
+        # 就再也没有人把它钉回去，面板上还什么都不会说 —— 用户报的「读取窗口又无法保持
+        # 置顶了」就是它（第 44 轮）。现在门拆了：照样复核，钉完 _raise_ours() 把我们也
+        # 抬回来，取景器照样盖在目标上面。
+        calls = []
+        lifted2 = []
+        real2 = (ui.set_topmost, ui.is_window, ui.is_topmost,
+                 ui.top_level, ui.raise_window)
+        ui.set_topmost = lambda hwnd, on=True: (calls.append((hwnd, on)), True)[1]
+        ui.is_window = lambda hwnd: True
+        ui.is_topmost = lambda hwnd: False         # 标记丢了（播放器刚重设过窗口）
+        ui.top_level = lambda hwnd: hwnd           # 面板 / 对话框各自给回自己的句柄
+        ui.raise_window = lambda hwnd: (lifted2.append(hwnd), True)[1]
         top = tk.Toplevel(app.root)
         app.root.update()
-        check('开着自己的对话框时不抢置顶', app._own_dialog_open())
-        top.destroy()
-        app.root.update()
+        try:
+            check('开着自己的对话框时 _own_dialog_open() 为真', app._own_dialog_open())
+            panel_h, dlg_h = app.root.winfo_id(), top.winfo_id()
+            app._pinned_hwnd = win.hwnd
+            app._pin_at = 0.0
+            app._keep_pin(time.perf_counter())
+            check('对话框开着也照样补钉（第 44 轮修的就是这条）',
+                  calls == [(win.hwnd, True)], str(calls))
+            check('钉完把面板和对话框都抬回来（取景器仍然盖在目标上面）',
+                  lifted2 == [panel_h, dlg_h], str(lifted2))
+        finally:
+            top.destroy()
+            app.root.update()
+            (ui.set_topmost, ui.is_window, ui.is_topmost,
+             ui.top_level, ui.raise_window) = real2
+            app._pinned_hwnd = None
         check('对话框关掉之后又能抢了', not app._own_dialog_open())
 
         # ---- 6. 切回实时 ----

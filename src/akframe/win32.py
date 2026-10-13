@@ -40,6 +40,7 @@ SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
 SWP_NOACTIVATE = 0x0010
 GA_ROOT = 2                           # GetAncestor：一直往上找到所在的那个顶层窗口
+GW_HWNDNEXT = 2                       # GetWindow：Z 序里的下一个窗（见 is_above）
 
 
 def enable_dpi_awareness() -> str:
@@ -273,6 +274,44 @@ def raise_window(hwnd: int) -> bool:
     flags = SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
     return bool(_user32.SetWindowPos(ctypes.c_void_p(int(hwnd)),
                                      ctypes.c_void_p(0), 0, 0, 0, 0, flags))
+
+
+def is_above(a: int, b: int) -> bool:
+    """窗口 a 在窗口 b **上面**吗（沿桌面 Z 序走，先撞到谁就是谁在上面）。
+
+    为什么置顶那条链路要问这一句（第 44 轮的真 bug）：把目标钉成置顶层之后，**目标自己**
+    再被激活一次（用户点一下播放器 = 它切前台），系统就把它抬到**置顶层的最上面** ——
+    那一刻我们自己的面板 / 取景器被压到视频下面去了。而「WS_EX_TOPMOST 标记还在」这条
+    判据看不见这件事（标记确实还在），于是 _keep_pin 一个动作都不做，面板再也回不来：
+    用户看到的就是「置顶没用」。实测（真 VLC 窗口 1378x844，见 docs 第 44 节）：
+
+        钉完      VLC rank=17、面板 rank=13   （面板在上面，对的）
+        点一下 VLC  VLC rank=14、面板 rank=17   （面板被压下去了）
+        之后 189 拍  set_topmost 一次都没发     （标记还在，没人发现面板被压住）
+
+    实现为什么不是 GetWindow(GW_HWNDPREV) 一个个往上数：那要沿链表走很多步，而这里
+    只要「谁先出现」。从最顶上那个窗往下走，撞到 a 就是 a 在上面、撞到 b 就是 b 在上面；
+    两边都没撞到（句柄已经不在列表里）返回 False（和「查不到」一个口径）。
+
+    注：GW_HWNDNEXT 这条链表是**整个窗口管理器**的 Z 序（顶层窗后面紧跟着它的子窗），
+    所以拿两个顶层窗的句柄来比是对的。
+    """
+    want_a, want_b = int(a), int(b)
+    _user32.GetTopWindow.restype = ctypes.c_void_p
+    _user32.GetTopWindow.argtypes = [ctypes.c_void_p]
+    _user32.GetWindow.restype = ctypes.c_void_p
+    _user32.GetWindow.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    h = _user32.GetTopWindow(None)
+    n = 0
+    while h and n < 40000:                     # 兜个底，别在坏掉的环境里转圈
+        v = int(h)
+        if v == want_a:
+            return True
+        if v == want_b:
+            return False
+        h = _user32.GetWindow(ctypes.c_void_p(v), GW_HWNDNEXT)
+        n += 1
+    return False
 
 
 class _BITMAPINFOHEADER(ctypes.Structure):

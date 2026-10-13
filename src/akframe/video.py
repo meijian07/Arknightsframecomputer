@@ -1096,7 +1096,7 @@ class VideoMonitor(LiveMonitor):
 
     # 录像一拍可能要喂 2000 帧（全速档 / 往回拖一大段），一两秒很正常 —— 而面板的
     # 看门狗门限默认是 1 秒（那是照实时 120Hz 定的）。不放宽的话，「全速跑完整段」
-    # 会被判成「采样线程已停」，然后热心地建议你按 F5。
+    # 会被判成「采样线程已停」，然后热心地建议你去点「重新校准」。
     stall_warn_s = 15.0
 
     def __init__(self, source: VideoSource, *, rate: float = 120.0, templates=(),
