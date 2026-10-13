@@ -30,14 +30,13 @@ import numpy as np
 from .align import DY_RANGE, DX_RANGE, offset_from_frames
 from .calib import calibrate_video
 from .features import read_bar, read_pause, read_speed
-from .geometry import (BAR_ROI_H, BAR_W_UNIT, REF_H, REF_W, UI_SCALER_DEFAULT, Layout,
-                       Rect, layout_for, layout_from_bar_box, reframe_layout,
-                       ui_edge_scale, union_rect)
+from .geometry import (UI_SCALER_DEFAULT, Layout, Rect, layout_for,
+                       layout_from_bar_box, reframe_layout, union_rect)
 from .live import LiveMonitor
 from .paths import data_path
 from .settings import DEFAULT_FRAMES_PER_COST
 from .video import (CHECK_SAMPLES, MEASURE_FRAMES, ROI_NAMES, VideoSource, pad_layout)
-from .win32 import (ScreenGrabber, arknights_ui_scaler, client_rect, set_topmost, to_gray)
+from .win32 import (ScreenGrabber, arknights_ui_scaler, client_rect, to_gray)
 
 WINDOW_PROFILE_NAME = 'window_calib.json'
 WINDOW_SEARCH_FRAMES = 14     # 搜按钮 / 通用取帧时默认抓几张
@@ -286,10 +285,6 @@ class WindowMonitor(LiveMonitor):
                                    (lay.width, lay.height), off, self.ui_scaler,
                                    source=source, note=note, layout=lay,
                                    path=self.profiles_path)
-
-    def pin(self, on: bool = True) -> bool:
-        """把目标窗口钉到最上层 —— 被盖住就等于读不到（见 win32.set_topmost）。"""
-        return bool(self.window is not None and set_topmost(self.window.hwnd, on))
 
     def describe(self) -> str:
         w = self.window

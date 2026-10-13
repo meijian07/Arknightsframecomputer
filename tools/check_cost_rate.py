@@ -224,7 +224,6 @@ def settings_round_trip():
     用户在输入框里也什么都可能敲进来，所以夹取要兜住。
     返回失败项列表。
     """
-    import json
     import shutil
     import tempfile
 

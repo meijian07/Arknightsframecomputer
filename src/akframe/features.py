@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .geometry import (ARROW_MIN_CONTRAST, ARROW_RATIO_MIN, ARROW_REL, ARROW_SOLID_MIN,
+from .geometry import (ARROW_MIN_CONTRAST, ARROW_REL, ARROW_SOLID_MIN,
                        CORR_2X_MIN, DIGIT_RATIO_MIN, PAUSE_GLYPH_MIN, PAUSE_SHAPE_BAND,
                        RUN_PAUSE_RATIO_MIN, SPEED_ARROW_BAND, SPEED_DIGIT_BAND,
                        SPEED_DIGIT_COLS, Layout)
@@ -720,11 +720,9 @@ def read_speed(roi: np.ndarray, layout: Layout, templates=()) -> SpeedReading:
         if hi - med >= ARROW_MIN_CONTRAST:
             thr_arrow = med + ARROW_REL * (hi - med)
             arrow_mask = arrow >= thr_arrow
-            arrow_ratio = float(arrow_mask.sum()) / float(arrow_mask.size)
             arrow_solid = solid_frac(arrow_mask, 1)
         else:
             # 整块 ROI 没有对比度（按钮淡出 / 被遮罩糊平）：画面上根本没画东西
-            arrow_ratio = 0.0
             arrow_solid = 0.0
         # 子弹时间的判据：这三个三角的形状分（对缩放 / 平移不敏感）。
         glyph = _glyph_score(roi, _glyph_templates(templates))
@@ -747,9 +745,8 @@ def read_speed(roi: np.ndarray, layout: Layout, templates=()) -> SpeedReading:
     norm = np.clip((band.astype(np.float32) - med) / span, 0.0, 1.0)
 
     best_m = None
-    best_name = ''
     best_corr = -2.0
-    for m_val, name, arr in templates:
+    for m_val, _name, arr in templates:
         if m_val < 0:
             # 形状模板（三个三角）：形状跟数字条带完全不同，别拿它比数字。
             continue
@@ -760,7 +757,7 @@ def read_speed(roi: np.ndarray, layout: Layout, templates=()) -> SpeedReading:
             continue
         c = _ncc(norm, tpl)
         if c > best_corr:
-            best_m, best_name, best_corr = m_val, name, c
+            best_m, best_corr = m_val, c
     corr = best_corr if best_m is not None else float('nan')
 
     if best_m is None or best_corr < CORR_2X_MIN:

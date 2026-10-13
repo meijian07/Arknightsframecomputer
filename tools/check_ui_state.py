@@ -26,7 +26,6 @@
 用法：python tools/check_ui_state.py
 """
 
-import json
 import os
 import sys
 
@@ -38,7 +37,7 @@ sys.path.insert(0, os.path.join(ROOT, 'src'))
 from akframe.cli import DEFAULT_TEMPLATES, load_templates            # noqa: E402
 from akframe.features import (GLYPH_NCC_MIN, BarReading, PauseReading,  # noqa: E402
                               SpeedReading, read_bar, read_pause, read_speed)
-from akframe.geometry import ARROW_SOLID_MIN, PAUSE_GLYPH_MIN        # noqa: E402
+from akframe.geometry import PAUSE_GLYPH_MIN                        # noqa: E402
 from akframe.state import Counter                                    # noqa: E402
 from akframe.video import VideoSource                                # noqa: E402
 

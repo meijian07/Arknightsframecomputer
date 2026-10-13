@@ -121,17 +121,6 @@ class Layout:
     # 指针那行按 frame 标「回看」，真正的「现在」另外画一条灰线（见 scale_render）。
     now: float = None
 
-    @property
-    def next_mark(self):
-        for m in self.marks:
-            if m.state == 'next':
-                return m
-        return None
-
-    @property
-    def tick_step(self) -> int:
-        return _tick_steps(self.geom.px_per_frame)[0]
-
 
 def one_line(text: str) -> str:
     """轴说明里可能有换行；刻度表一行只画得下一条，换行折叠成 ·。"""

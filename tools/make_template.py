@@ -23,7 +23,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src'))
 
-from akframe import capture, features  # noqa: E402
+from akframe import capture  # noqa: E402
 from akframe.geometry import Layout, SPEED_DIGIT_BAND, SPEED_DIGIT_COLS  # noqa: E402
 
 

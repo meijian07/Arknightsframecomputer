@@ -29,7 +29,7 @@ from dataclasses import replace
 import numpy as np
 
 from .features import SpeedReading, read_bar, read_pause
-from .geometry import (PAUSE_SHAPE_BAND, SPEED_DIGIT_BAND, SPEED_DIGIT_COLS,
+from .geometry import (SPEED_DIGIT_BAND, SPEED_DIGIT_COLS,
                        UI_SCALER_DEFAULT, Layout, layout_for)
 from .live import LiveMonitor, LiveUpdate
 from .settings import DEFAULT_FRAMES_PER_COST

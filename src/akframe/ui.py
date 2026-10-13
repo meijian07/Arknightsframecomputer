@@ -137,7 +137,6 @@ CARD_HI = '#2a2a2d'      # 按钮 / 悬停
 SUNKEN = '#0f0f11'       # 预览画布、输入框：比底更深，像游戏里的凹槽
 RULE = '#ffffff'         # 白色分隔线 / 大数字下面那条粗线
 RULE_DIM = '#3a3a3e'     # 1px 的淡分隔
-ACCENT = '#ffffff'       # 主强调色 = 白（游戏 HUD 只有白）
 WARN = '#e6a33c'
 ERR = '#e0574c'          # 采样线程停了这类「必须去看一眼」的状态
 # ROI 三色是**功能色**（叠在游戏画面上时靠颜色认是哪一路），不能跟着单色化走，
@@ -281,14 +280,13 @@ class BoxPicker:
     ZOOM_PANEL = (556, 186)
 
     def __init__(self, parent, fetch, frames: int, index: int, on_apply, on_note=None,
-                 fullest=None, on_close=None):
+                 on_close=None):
         self.fetch = fetch                  # fetch(i) -> (灰度帧, 参考 layout)
         self.on_close = on_close            # 收尾回调（应用 / 取消 / Esc 都会走）
         self._closed = False
         self.frames = max(1, int(frames))
         self.on_apply = on_apply
         self.on_note = on_note or (lambda text, hold=3.0: None)
-        self.fullest = fullest              # fullest(box) -> 帧号（-1 = 找不到）
         self.index = max(0, min(int(index), self.frames - 1))
         self.frame = None
         self.guide = None
@@ -375,9 +373,6 @@ class BoxPicker:
         self.lb_read = tk.Label(side, text='', bg=UI_BG, fg=UI_FG, font=(FONT_MONO, 10),
                                 justify='left', anchor='w')
         self.lb_read.pack(fill='x', pady=(6, 0))
-        self.lb_hint = tk.Label(side, text='', bg=UI_BG, fg=WARN, font=(FONT_UI, 9),
-                                justify='left', anchor='w', wraplength=560)
-        self.lb_hint.pack(fill='x', pady=(4, 0))
 
         frow = tk.Frame(top, bg=UI_BG)
         frow.pack(fill='x', padx=10, pady=(8, 0))
@@ -393,9 +388,6 @@ class BoxPicker:
             self.sk.bind('<ButtonRelease-1>', self._seek)
             self._btn(frow, '◀ 1 帧', lambda: self.load(self.index - 1)).pack(side='left', padx=2)
             self._btn(frow, '1 帧 ▶', lambda: self.load(self.index + 1)).pack(side='left', padx=2)
-            if self.fullest is not None:
-                self.btn_fullest = self._btn(frow, '跳到最满的一帧', self._jump_fullest)
-                self.btn_fullest.pack(side='left', padx=6)
             self.lb_pos = tk.Label(frow, text='', bg=UI_BG, fg=UI_DIM, font=(FONT_UI, 9))
             self.lb_pos.pack(side='left', padx=6)
 
@@ -449,7 +441,6 @@ class BoxPicker:
         self.zoom = 1.0
         self._zbase = None                  # 换目标 = 重新取基准（这个目标的框）
         self._sync_target_btns()
-        self.lb_hint.configure(text='')
         self.redraw()
 
     def _sync_target_btns(self) -> None:
@@ -459,23 +450,6 @@ class BoxPicker:
                 b.configure(bg=RULE, fg=UI_BG)
             else:
                 b.configure(bg=CARD_HI, fg=UI_FG)
-
-    def _hint_for_target(self) -> str:
-        """每个目标「现在该干什么」的一句话（换目标 / 取帧失败时贴到提示行）。"""
-        how = ('左边图上拖框里面 = 挪框、拖角 / 边 = 放大缩小、框外面拖 = 拉新框；'
-               '右边放大图左键拖 = 挪视窗，滚轮 / ctrl+滚轮 = 放大缩小（缩放中心 = '
-               '鼠标那一点，最多缩到 1:1），双击 = 复位；'
-               '下面那两行按钮 = 一次 1 个像素')
-        if self.target == 'bar':
-            return ('先在左边图上圈住费用条（左右贴住条槽两头、上下让白条居中）；'
-                    '白块左端压在红线上、白条在一对品红线之间就对了。' + how)
-        if self.target == 'pause':
-            return ('在左边图上把「%s」圈出来（可以随便拉大拉小）：那两块**淡青色虚影**'
-                    '就是双竖条 ❚❚ 该长的地方 —— 和画面里的真字形叠到一起就对了；'
-                    '淡蓝那条带的上沿要正好压住竖条的最上边（暂停时是单三角 ▶，'
-                    '只蹭到那个尖）。%s' % (ROI_LABELS[self.target], how))
-        return ('在左边图上把「%s」圈出来（可以随便拉大拉小）：红 / 绿两条边夹住这个按钮，'
-                '红线之间的行就是读取用的条带。%s' % (ROI_LABELS[self.target], how))
 
 
     # ---- 载入一帧参照图 ----
@@ -530,22 +504,6 @@ class BoxPicker:
 
     def _seek(self, _event=None):
         self.load(self.sk.get())
-
-    def _jump_fullest(self):
-        if self.fullest is None or self.boxes.get('bar') is None:
-            return
-        try:
-            i = self.fullest(self.boxes['bar'])
-        except Exception as exc:                        # noqa: BLE001
-            self.on_note('扫最满那一帧失败：%s' % exc)
-            return
-        if i < 0:
-            self.lb_hint.configure(text='这一帧里没扫到白块（费用条可能一直没动）')
-            return
-        self.load(i)
-        self.lb_hint.configure(text='已跳到费用条最满的一帧（第 %d 帧）：'
-                                    '现在白块的右端就是条槽右端，把右端拖到那儿'
-                               % self.index)
 
     def _guess_buttons(self, bar):
         """读不到右上角按钮时，按**条槽宽**推一份按钮框当起点。
@@ -1079,7 +1037,6 @@ class MonitorApp:
         self.root.title('明日方舟 全局帧数计数器')
         self.root.configure(bg=UI_BG)
         self.root.attributes('-topmost', True)
-        sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
         # 默认**收起**（小面板）。真正的尺寸等 _build_ui() 之后按内容需求算（见 _refit）。
         self._more = False
@@ -2042,7 +1999,7 @@ class MonitorApp:
             return
         try:
             self.monitor.set_layout(apply_deltas(base, self.deltas, self.calib_scale))
-        except ValueError as exc:
+        except ValueError:
             self._set_note('ROI 越界（已忽略）')
 
     def _base_layout(self):
@@ -2072,8 +2029,8 @@ class MonitorApp:
             src = self.monitor.src
             what = '窗口'
             try:
-                path = src.save_current(layout=self.monitor.layout, source='面板校准',
-                                        note='面板上挪过 / 确认过的 ROI')
+                src.save_current(layout=self.monitor.layout, source='面板校准',
+                                note='面板上挪过 / 确认过的 ROI')
             except OSError as exc:
                 self._set_note('%s存盘失败：%s' % (what, exc))
                 return
@@ -2318,7 +2275,7 @@ class MonitorApp:
         try:
             save_cost_rate(self.settings_path, v)
             self._set_note('%s（已存盘）' % note)
-        except OSError as exc:
+        except OSError:
             self._set_note('%s（存盘失败）' % note)
 
     def pick_window(self):

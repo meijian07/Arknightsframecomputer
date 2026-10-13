@@ -177,17 +177,6 @@ class LiveMonitor:
         # 外接矩形变了，之前按尺寸缓存的 DIB 不再需要（ScreenGrabber 自己按尺寸复用）
         self._grabber = None
 
-    def set_negative_mode(self, mode) -> str:
-        """切「局内负费」手动档（auto / on / off）。返回归一之后的档名。
-
-        换档**不重新起锚**（相位是连续的）：下一拍起按新速度走，那一拍会被当成
-        负费转场帧做亚帧修正（见 Counter._boundary_correction）。
-        """
-        self.negative_mode = parse_negative(mode)
-        if self.counter is not None:
-            self.counter.set_negative_override(negative_override(self.negative_mode))
-        return self.negative_mode
-
     def set_cost_rate(self, spec) -> float:
         """改回费速率：数字 = 手工档（一费几个逻辑帧）；'auto' = 开自动识别。
 

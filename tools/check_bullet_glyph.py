@@ -26,7 +26,6 @@ speed_b_digit 就是这一条：它单独看形状分（+0.647）是过阈值的
 用法：python tools/check_bullet_glyph.py
 """
 
-import json
 import os
 import sys
 
@@ -35,7 +34,7 @@ import numpy as np
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'src'))
 
-from akframe.capture import iter_cached, open_video                      # noqa: E402
+from akframe.capture import open_video                                  # noqa: E402
 from akframe.cli import load_templates                                    # noqa: E402
 from akframe.features import (GLYPH_NCC_MIN, _glyph_norm,                 # noqa: E402
                               _glyph_norm_flat, _glyph_score, _glyph_templates,

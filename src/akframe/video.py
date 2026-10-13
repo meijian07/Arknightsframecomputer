@@ -62,7 +62,6 @@ from .geometry import (BAR_BAND_TOP, BAR_CENTER_FROM_BOTTOM_UNIT, BAR_ROI_H,
 from .live import LiveMonitor, LiveUpdate
 from .paths import app_dir
 from .settings import DEFAULT_FRAMES_PER_COST
-from .state import LOGICAL_FPS
 
 ROI_NAMES = ('bar', 'pause', 'speed')
 
@@ -95,8 +94,6 @@ WIDTH_TOL = 0.04
 # （2560x1600 上预测的条槽左边缘比真实位置偏右 9px），而同尺寸下不会超过 2px。
 LEFT_TOL = 4
 
-# 播放倍速档位。0.0 = 全速（每拍尽可能多喂，几秒跑完整段）。
-PLAY_SPEEDS = (('0.5x', 0.5), ('1x', 1.0), ('2x', 2.0), ('4x', 4.0), ('全速', 0.0))
 # 一拍最多喂多少帧：全速档靠它「既不停顿也不丢帧」。2000 帧约 0.4~0.8 秒的活，
 # 放在采样线程里做，界面（主线程）照常刷新。
 MAX_BATCH = 2000
@@ -1091,7 +1088,7 @@ class VideoMonitor(LiveMonitor):
 
     ui.MonitorApp 完全不用改就能驱动它（latest / stats / counter / layout / reset /
     set_manual_pause / set_cost_rate / CSV 全是继承来的）；新增的只有播放控制：
-    play() / pause() / toggle_play() / set_play_speed() / seek() / restart()。
+    play() / pause() / set_play_speed() / seek()。
     """
 
     # 录像一拍可能要喂 2000 帧（全速档 / 往回拖一大段），一两秒很正常 —— 而面板的
@@ -1240,10 +1237,6 @@ class VideoMonitor(LiveMonitor):
             self._play_base, self._play_t0 = max(0, self._fed), self._clock()
             self.playing = False
 
-    def toggle_play(self) -> bool:
-        self.pause() if self.playing else self.play()
-        return self.playing
-
     def set_play_speed(self, speed) -> float:
         """改播放倍速。只影响**看得多快**，不影响数出来的帧号（见模块开头第 2 条）。"""
         s = max(0.0, float(speed))
@@ -1265,12 +1258,6 @@ class VideoMonitor(LiveMonitor):
                     break
             self._play_base, self._play_t0 = max(0, self._fed), self._clock()
             return self._fed
-
-    def restart(self) -> None:
-        """回到第 0 帧，计数从 0 重新开始。"""
-        with self._lock:
-            self._restart_locked()
-            self._play_base, self._play_t0 = 0, self._clock()
 
     @property
     def position(self) -> int:

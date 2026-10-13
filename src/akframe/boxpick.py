@@ -6,7 +6,7 @@
 拖的：屏幕上 1 个像素 = 画面里 1.5~2 个像素，手一抖就是 3~4 个逻辑帧的相位误差。
 只靠眼睛拖框，做不到「一费 30 帧」。
 
-所以这里给三样参照物，把「凭手感」换成「对着东西对」：
+所以这里给两样参照物，把「凭手感」换成「对着东西对」：
 
 1. **刻度尺**（guide_image）：费用条的设计是「条槽宽 = 30 个逻辑帧」。把预测的条槽
    位置画成一个被 30 等分的尺子，用户框的时候是**对着刻度**对两端，而不是对着空气；
@@ -14,10 +14,7 @@
    四条边都画出来**（左 / 右 = 红 / 绿竖线，上 / 下 = 品红横线），read_bar 真正取样的
    行画成蓝线 —— 白块的左端压没压在红线上、白条在上下两条品红线之间居没居中，一眼就能
    看出来；放大镜还能**按住平移**（pan）把框周围一起拉进来对、**滚轮局部放大**（zoom）
-   只看框里的一小块（2026-10-11 追加）；
-3. **最满的一帧**（scan_fill_extents）：让用户直接拿到「白块右端 = 条槽右端」的那一帧，
-   右边缘不用猜；左边缘靠放大镜里的红线对。（原来还有一个「吸附左端」按钮，
-   用户 2026-10-11：「不要搞吸附功能了，实测下来一次没用过」—— 连函数一起删了）。
+   只看框里的一小块（2026-10-11 追加）。
 
 这个模块里全是纯函数 / 只依赖 numpy + PIL + 已有的 features / align，不碰 Tk：
 界面（ui.BoxPicker）只负责把这里画出来的图贴到画布上。
@@ -25,15 +22,11 @@
 
 from __future__ import annotations
 
-import subprocess
-
 import numpy as np
 from PIL import Image, ImageDraw
 
-from .align import extract_strip
 from .features import fill_run
-from .geometry import (BAR_BAND_BOTTOM, BAR_BAND_TOP, BAR_ROI_H, Layout,
-                       Rect)
+from .geometry import BAR_BAND_BOTTOM, BAR_BAND_TOP, BAR_ROI_H, Layout, Rect
 
 # 参照图的配色：条槽用橙色（和游戏 HUD 的蓝白都不撞），按钮用蓝色。
 GUIDE_BAR = (255, 150, 30)
@@ -68,24 +61,6 @@ ZOOM_MIN = 1.0
 ZOOM_MAX = 16.0
 ZOOM_FLOOR_CAP = 0.2            # 再小也不给（面板装不下，给了也是缩成一片糊）
 
-
-def grab_frame(path: str, ffmpeg: str, size, index: float, fps: float) -> np.ndarray:
-    """从录像里取第 index 帧（灰度，h x w）。
-
-    用 -ss 快速定位（放在 -i 前面）：拿静帧只要「大概这一帧」，而精确定位要把前面
-    所有帧都解一遍 —— 拖一次滑块等十几秒是不能接受的。ffmpeg 会从关键帧解到目标时间，
-    所以拿到的确实是那一帧（不是关键帧本身）。
-    """
-    vw, vh = int(size[0]), int(size[1])
-    t = max(0.0, float(index) / max(1e-6, float(fps)))
-    cmd = [ffmpeg, '-hide_banner', '-loglevel', 'error', '-ss', '%.3f' % t,
-           '-i', path, '-frames:v', '1', '-vf', 'format=gray',
-           '-f', 'rawvideo', '-pix_fmt', 'gray', '-']
-    out = subprocess.run(cmd, check=True, stdout=subprocess.PIPE).stdout
-    if len(out) < vw * vh:
-        raise RuntimeError('取第 %d 帧失败：ffmpeg 只给了 %d 字节（要 %d）'
-                           % (index, len(out), vw * vh))
-    return np.frombuffer(out[:vw * vh], dtype=np.uint8).reshape(vh, vw)
 
 
 def guide_image(frame: np.ndarray, layout: Layout) -> Image.Image:
@@ -473,14 +448,14 @@ def mirror_resize(was_all: dict, name: str, new_box: Rect, size, names=None,
 def band_rows_of(rect: Rect) -> tuple:
     """探针框里「条带」占哪几行（相对 rect 顶边的行号，左右都含）。
 
-    条是**画面里很细的一条**，而探针框上下各留了几行余量（probe_rect）。读条必须只看
+    条是**画面里很细的一条**，而探针框上下各留了几行余量。读条必须只看
     条带那几行 —— 对整块取中位数会把白块稀释掉：
 
         实测（Desktop 2026.10.07 那段录像）白块只占探针框中间 4~8 行，
         `median(整个 26 行)` 的结果是轨道灰（60），一个白块都扫不到 ——
         「跳到最满的一帧」于是永远返回 -1。
 
-    rect 里条的位置由 probe_rect 定死（竖直居中），条高恒为 BAR_ROI_H；量条带的行号
+    rect 里条的位置按「竖直居中」定死，条高恒为 BAR_ROI_H；量条带的行号
     用和 read_bar 同一套 BAR_BAND_TOP / BAR_BAND_BOTTOM（见 geometry）。
     传进来的 rect 本来就等于条 ROI 时（h = BAR_ROI_H）退化成 (5, 12)，还是对的。
     """
@@ -507,35 +482,3 @@ def fill_extents(strip: np.ndarray, rect: Rect) -> tuple:
             ends.append(int(run[1]) + rect.x)
     return np.array(ends, dtype=int), np.array(starts, dtype=int)
 
-
-def scan_fill_extents(path: str, ffmpeg: str, rect: Rect, stride: int = 12) -> tuple:
-    """按 stride 扫一遍录像的 rect 这一块，返回 (帧号数组, 白块右端数组, 白块左端数组)。
-
-    用途：**跳到费用条最满的那一帧** —— 那一帧的白块右端就是条槽右端。有了它，
-    框的右边缘也不用猜（用户自己等一整个费用周期太慢）。
-    只解 rect 这一小块、每隔 stride 帧取一帧，所以扫整段录像也就一两秒。
-    """
-    strip = extract_strip(ffmpeg, path, rect, stride)
-    ends, starts = fill_extents(strip, rect)
-    idx = np.arange(strip.shape[0]) * max(1, int(stride))
-    return idx, ends, starts
-
-
-def fullest_frame(path: str, ffmpeg: str, rect: Rect, stride: int = 12) -> int:
-    """「最满的那一帧」的帧号（扫不到白块就返回 -1）。"""
-    idx, ends, _starts = scan_fill_extents(path, ffmpeg, rect, stride)
-    if ends.size == 0:
-        return -1
-    k = int(np.argmax(ends))
-    return int(idx[k]) if ends[k] > 0 else -1
-
-
-def probe_rect(size, box: Rect, pad: int = 40) -> Rect:
-    """扫 / 取帧用的探针框：用户框出来的那条带，左右各留一点余量（找最满用）。"""
-    w, h = int(size[0]), int(size[1])
-    x0 = max(0, int(box.x) - pad)
-    x1 = min(w, int(box.x + box.w) + pad)
-    yc = int(box.y) + int(box.h) // 2
-    y0 = max(0, yc - BAR_ROI_H // 2 - 4)
-    y1 = min(h, yc + BAR_ROI_H // 2 + 5)
-    return Rect(x0, y0, max(8, x1 - x0), max(8, y1 - y0))

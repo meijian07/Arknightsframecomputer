@@ -46,8 +46,8 @@ sys.path.insert(0, os.path.join(
 from akframe.calib import (MAX_FRAMES, calibrate_video, format_report,  # noqa: E402
                           record_from)
 from akframe.capture import find_ffmpeg                                        # noqa: E402
-from akframe.geometry import (layout_for, measured_layouts, measured_path,     # noqa: E402
-                              reload_measured, save_measured)
+from akframe.geometry import (measured_layouts, measured_path,                # noqa: E402
+                              save_measured)
 from akframe.win32 import arknights_ui_scaler                                  # noqa: E402
 
 
