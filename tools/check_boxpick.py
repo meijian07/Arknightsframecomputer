@@ -17,9 +17,11 @@
     7. 参照图 / 放大镜画得出来（尺寸对、不越界）—— 含按钮 ROI 那一档；
     8. 「跳到最满的一帧」：扫的必须是**条带那几行**，不是整块探针框；
     9. move_boxes：两个按钮的框**一起**挪、一起夹边界（相对位置不能散）；
-    10. magnify 的 pan、局部放大（zoom）与四条边：尺寸只跟「框和 zoom」走（平移不会
-        越挪越小）、框的四条边都画在图上（pan=0 时压在画布四边）、越界的那条不画；
-        zoom > 1 时只看框里的一小块、倍数变大、超出 ZOOM_MAX 被夹住。
+    10. magnify 的 pan、局部放大（zoom）与四条边：视窗撑到面板的宽高比、两个轴同一个
+        倍数（画面不变形）、放大图铺满面板；pan = 视窗相对**框中心**的偏移（挪框时视窗
+        跟着走 = 彩线在图上的列不动，用户 2026-10-15：「应该和框同方向移动」）；
+        越界的边不画；zoom > 1 只看框里的一小块、zoom < 1 能看见框周围
+        （缩到底 = 整幅画面）、超出 ZOOM_MAX 被夹住。
     11. resize_box / mirror_resize（2026-10-12 第 48 轮：用户要的是「就像 Windows 的截图
         一样可以拖动框放大缩小移动」）：八个 kind 各只动该动的那条边 / 那个角；位移是
         相对**按下那一刻**算的（抖出去再抖回来就回到原框，不攒取整误差）；拉过头夹在画面
@@ -203,21 +205,37 @@ check('空字典 / 空 names 都不炸',
 # ---- 10. 放大图：平移（pan）、局部放大（zoom）、四条边 ----
 # 用户 2026-10-11 第 44 轮：「手动校准界面右边的放大图要可以自己移动，不然很难对准」；
 # 第 45 轮：「费用条难以准确框选，加一个可移动的局部放大功能，查看上下左右是否对齐」；
-# 第 46 轮：「做局部放大！类似 ctrl＋滚轮 的还是框选放大都行」。
-# 性质：(1) 平移**不改倍数**（挪一下不该越挪越小）；(2) 真的换了一块画面；
-# (3) 框的**四条边**都画出来（红 / 绿 = 左右，品红 = 上下）—— 只标左右的话，上下只能靠猜；
-# (4) 越界的那条不画（它确实不在视窗里，画在边上等于撒谎）；
-# (5) zoom > 1 = 局部放大：视窗 = 框 / zoom，倍数变大 —— 但「看哪儿」还是 pan 说了算。
+# 第 46 轮：「做局部放大！类似 ctrl＋滚轮 的还是框选放大都行」；
+# 2026-10-15 第 55 轮：「移动框时放大小窗反向移动，应该和框同方向移动；放大小窗缩放很奇怪，
+# 固定 4:3 的比例，包括框选的位置；ctrl 放大范围大一点」。这一节的口径跟着换成：
+#
+#   (1) pan = 视窗相对**框中心**的偏移 —— 挪框时视窗跟着一起走，彩线在图上的位置不动
+#       （这就是「同方向」；上一版把 pan 定义成相对框左上角再反向补，彩线才会乱跑）；
+#   (2) 视窗撑到**面板的宽高比**、两个轴**同一个倍数** —— 画面是原样的放大版，不拉扁，
+#       也不会被冻成「打开取景器那一刻的框」那个比例；
+#   (3) zoom 连续、可大可小：> 1 只看框里一小块，< 1 能看见框周围一圈（缩到底 = 整幅画面）。
 grad = (np.tile(np.arange(2560, dtype=np.uint16), (1600, 1)) % 190).astype(np.uint8)
-gbx = Rect(2301, 40, 199, 159)
-z0 = boxpick.magnify(grad, gbx, panel=(556, 186))
-z1 = boxpick.magnify(grad, gbx, panel=(556, 186), pan=(-60, 0))
-kx, ky = boxpick.zoom_scale(gbx, (556, 186))
-check('平移不改倍数（尺寸 = 框 x 倍数）',
-      z0.size == (199 * kx, 159 * ky) == z1.size,
+PANEL = (556, 186)
+SIZE10 = (2560, 1600)
+gbx = Rect(2301, 40, 199, 159)          # 右上角按钮那一档（真录像里的几何）
+z0 = boxpick.magnify(grad, gbx, panel=PANEL)
+z1 = boxpick.magnify(grad, gbx, panel=PANEL, pan=(-300, 0))
+kx, ky = boxpick.zoom_scale(gbx, PANEL)
+check('平移不改倍数（平移前后图一样大）', z0.size == z1.size,
       '%s / %s k=%s' % (z0.size, z1.size, (kx, ky)))
 a0, a1 = np.asarray(z0), np.asarray(z1)
 check('平移真的换了一块画面', bool((a0 != a1).any()), '一样？')
+check('两个轴同一个倍数（画面不变形 —— 第 55 轮：「固定 4:3 的比例」）', kx == ky,
+      '%s' % ((kx, ky),))
+# 放大图铺满面板：视窗得落在整数画面像素上，撑面板时天生差半个像素 —— 差一点点没关系，
+# 但不能剩一条大黑边（也不能把右边裁掉一大截）。16 倍以内实测差 ≤ 6px。
+for _z in (1.0, 2.0, 4.0, 8.0, 16.0):
+    _iw, _ih = boxpick.magnify(grad, gbx, panel=PANEL, zoom=_z).size
+    check('放大图铺满面板（zoom=%.2f）' % _z,
+          abs(_iw - PANEL[0]) <= 8 and abs(_ih - PANEL[1]) <= 8,
+          '%dx%d / 面板 %s' % (_iw, _ih, PANEL))
+
+
 def edge_pixels(im, col):
     """整幅图上颜色**精确等于** col 的像素的 (列集合, 行集合)。
 
@@ -232,49 +250,79 @@ def edge_pixels(im, col):
 
 
 iw0, ih0 = z0.size
+# 「框摆在正中」得挑画面**中间**的框量：gbx 贴着画面右边，视窗会被画面夹住，框自然不正中
+# （那是夹边界该有的样子，下面单独钉一条）。
+mbx = Rect(1200, 700, 199, 159)
+amid = np.asarray(boxpick.magnify(grad, mbx, panel=PANEL))
+lcm, _ = edge_pixels(amid, boxpick.EDGE_LEFT)
+rcm, _ = edge_pixels(amid, boxpick.EDGE_RIGHT)
+_, trm = edge_pixels(amid, boxpick.EDGE_TOP)
+_, brm = edge_pixels(amid, boxpick.EDGE_BOTTOM)
+check('pan=0：框摆在视窗正中（上下左右四条边都等距，差 ≤ 3px）',
+      abs(lcm[0] - (iw0 - 1 - rcm[-1])) <= 3 and abs(trm[0] - (ih0 - 1 - brm[-1])) <= 3,
+      '左 %s 右 %s 上 %s 下 %s / 图 %dx%d'
+      % (lcm[:2], rcm[-2:], trm[:2], brm[-2:], iw0, ih0))
+check('左右两条离得开（红在框左边、绿在框右边，不是同一条）', lcm[-1] < rcm[0],
+      '红 %s / 绿 %s' % (lcm, rcm))
 lc0, _ = edge_pixels(a0, boxpick.EDGE_LEFT)
 rc0, _ = edge_pixels(a0, boxpick.EDGE_RIGHT)
 _, tr0 = edge_pixels(a0, boxpick.EDGE_TOP)
-check('pan=0：四条边正好压在画布的四边上（左 0 / 右 iw-1 / 上 0 / 下 ih-1）',
-      lc0[0] == 0 and rc0[-1] == iw0 - 1 and tr0[0] == 0 and tr0[-1] == ih0 - 1,
-      '左 %s 右 %s 品红行 %s / iw=%d ih=%d'
-      % (lc0[:2], rc0[-2:], (tr0[0], tr0[-1]), iw0, ih0))
-check('pan=0 时右边那条也画得出来（真 bug：以前画在 sx(x+w) = 图宽，被越界判掉）',
-      len(rc0) > 0 and rc0[-1] == iw0 - 1, '右边界像素列 %s' % (rc0,))
-check('左右两条离得开（红在最左列、绿在最右列，不是同一条）',
-      lc0[-1] < rc0[0], '红 %s / 绿 %s' % (lc0, rc0))
-lc1, _ = edge_pixels(a1, boxpick.EDGE_LEFT)
-rc1, _ = edge_pixels(a1, boxpick.EDGE_RIGHT)
-_, tr1 = edge_pixels(a1, boxpick.EDGE_TOP)
-check('平移后四条边跟着框走：左边挪到 60*kx 列、右边跑出视窗就不画',
-      lc1[0] == 60 * kx and rc1 == [], '左 %s / 右 %s，期望左 %d' % (lc1, rc1, 60 * kx))
-check('只往左平移：上下两条还在第 0 / ih-1 行（没被水平平移带走）',
-      tr1[0] == 0 and tr1[-1] == ih0 - 1, '品红行 %s' % ((tr1[0], tr1[-1]),))
-# 往上平移 40px：上边（框的第 40 行）移出视窗 -> 不画；下边落到 rowtop(199)-1 = 118 行。
-_, tr2 = edge_pixels(np.asarray(boxpick.magnify(grad, gbx, panel=(556, 186), pan=(0, 40))),
-                     boxpick.EDGE_TOP)
-check('往上平移 40：上边出界不画，下边落在第 118 行（不是画在画布边上）',
-      tr2 == [118, 119], '品红行 %s' % (tr2,))
+_, br0 = edge_pixels(a0, boxpick.EDGE_BOTTOM)
+_vwr, _vhr = int(round(boxpick.zoom_window(gbx, PANEL, 1.0)[0])), int(
+    round(boxpick.zoom_window(gbx, PANEL, 1.0)[1]))
+check('视窗不许跑出画面：贴着右边的框 -> 视窗顶到画面右边（框就不再正中了，这是对的）',
+      boxpick.zoom_view(gbx, PANEL, (0, 0), 1.0, SIZE10)[0] == 2560 - _vwr,
+      'vx=%d 期望 %d' % (boxpick.zoom_view(gbx, PANEL, (0, 0), 1.0, SIZE10)[0],
+                         2560 - _vwr))
+el, er, et, eb = boxpick.edge_lines(gbx, PANEL, (0, 0), 1.0, SIZE10)
+check('edge_lines 和 magnify 画的是同一份（界面照着它判「抓住哪条边」）',
+      abs(lc0[0] - el) <= 1 and abs(rc0[-1] - er) <= 1
+      and abs(tr0[0] - et) <= 1 and abs(br0[-1] - eb) <= 1,
+      'edge_lines %s / 量到 左 %d 右 %d 上 %d 下 %d'
+      % ((el, er, et, eb), lc0[0], rc0[-1], tr0[0], br0[-1]))
+# 「同方向」：框往右挪，视窗跟着往右挪同样多 —— 彩线在图上的列**一动不动**，动的是画面。
+# 用画面中间的框，免得撞上「视窗顶到画面边」的夹取（夹住之后两条都钉死，测不出什么）。
+mid_a = mbx
+mid_b = Rect(1320, 700, 199, 159)
+am_a = np.asarray(boxpick.magnify(grad, mid_a, panel=PANEL))
+am_b = np.asarray(boxpick.magnify(grad, mid_b, panel=PANEL))
+lca, _ = edge_pixels(am_a, boxpick.EDGE_LEFT)
+lcb, _ = edge_pixels(am_b, boxpick.EDGE_LEFT)
+check('挪框 120px（同方向）：视窗跟着走，彩线在图上的列一动不动',
+      lca == lcb and bool(lca), '挪前 %s / 挪后 %s' % (lca, lcb))
+check('挪框 120px（同方向）：底下那块画面确实跟着换了',
+      bool((am_a != am_b).any()), '一样？')
+vxa = boxpick.zoom_view(mid_a, PANEL, (0, 0), 1.0, SIZE10)[0]
+vxb = boxpick.zoom_view(mid_b, PANEL, (0, 0), 1.0, SIZE10)[0]
+check('挪框 120px（同方向）：视窗左上角也正好跟着挪 120px', vxb - vxa == 120,
+      '%d -> %d' % (vxa, vxb))
+# 平移（pan）：视窗往下 40px 看 -> 框的两条边在图上往上走 40*k 行。
+et40 = boxpick.edge_lines(gbx, PANEL, (0, 40), 1.0, SIZE10)[2]
+check('pan 往下 40px：框的边在图上往上走 40*k 行（视窗挪了，彩线跟着挪）',
+      abs((et - et40) - 40 * kx) <= 1, '上边 %d -> %d（40*k=%.1f）' % (et, et40, 40 * kx))
+# 越界的那条不画：pan 拉到画面底下，框整个跑到视窗上面去 -> 品红一条都不该有。
+_, tr_far = edge_pixels(np.asarray(boxpick.magnify(grad, gbx, panel=PANEL,
+                                                   pan=(0, 10 ** 6))), boxpick.EDGE_TOP)
+check('越界的边不画（框跑到视窗外面去了 -> 品红一条都不画，不是画在画布边上）',
+      tr_far == [], '品红行 %s' % (tr_far,))
+# 夹边界：pan 再大也只是把视窗顶到画面边上 —— 量**画出来的那一格**是画面的哪一格。
+_vwf, _vhf = boxpick.zoom_window(gbx, PANEL, 1.0)
+vwr, vhr = int(round(_vwf)), int(round(_vhf))
+zr = np.asarray(boxpick.magnify(grad, gbx, panel=PANEL, pan=(10 ** 6, 10 ** 6)))
+zl = np.asarray(boxpick.magnify(grad, gbx, panel=PANEL, pan=(-10 ** 6, -10 ** 6)))
+check('pan 越界被夹在画面里（右下顶到边 = 画的就是画面右下角那一块）',
+      int(zr[0, 0, 0]) == int(grad[1600 - vhr, 2560 - vwr]) and zr.shape[:2] == (ih0, iw0),
+      '%d / %d' % (int(zr[0, 0, 0]), int(grad[1600 - vhr, 2560 - vwr])))
+check('pan 越界被夹在画面里（左上顶到边 = 画的就是画面左上角那一格）',
+      int(zl[0, 0, 0]) == int(grad[0, 0]), '%d / %d' % (int(zl[0, 0, 0]), int(grad[0, 0])))
 # 倍数只跟「框和 zoom」有关：同一个框平移前后 kx / ky 一样（顺带把「不由看哪儿决定」钉住）
 check('zoom_scale 只看框和 zoom、不看 pan（签名里只有 box / panel / zoom）',
-      boxpick.zoom_scale(gbx, (556, 186)) == (kx, ky), '%s' % ((kx, ky),))
-# 夹边界：pan 再大也只是把视窗顶到画面边上，vx/vy 落在 [0, w-bw]
-zr = boxpick.magnify(grad, gbx, panel=(556, 186), pan=(10 ** 6, 10 ** 6))
-zl = boxpick.magnify(grad, gbx, panel=(556, 186), pan=(-10 ** 6, -10 ** 6))
-check('pan 越界被夹在画面里（右 / 下顶到边）',
-      zr.size == z0.size and bool((np.asarray(zr) == np.asarray(
-          boxpick.magnify(grad, gbx, panel=(556, 186),
-                          pan=(2560 - 199 - 2301, 1600 - 159 - 40)))).all()),
-      str(zr.size))
-check('pan 越界被夹在画面里（左 / 上顶到边）',
-      bool((np.asarray(zl) == np.asarray(
-          boxpick.magnify(grad, gbx, panel=(556, 186), pan=(-2301, -40)))).all()),
-      'left')
+      boxpick.zoom_scale(gbx, PANEL) == (kx, ky), '%s' % ((kx, ky),))
 
-# ---- 局部放大（zoom）：视窗 = 框 / zoom，倍数 = 面板 / 视窗 ----
+# ---- 局部放大（zoom）：视窗 = 框 / zoom（再撑到面板比例），倍数 = 面板 / 视窗 ----
 # 用户 2026-10-11 第 46 轮：「做局部放大！类似 ctrl＋滚轮 的还是框选放大都行」。
 def col_step(im, row=5):
-    """这一行上像素值变化的**间隔** = 横向倍数 kx（一个画面像素占 kx 列）。
+    """这一行上像素值变化的**间隔** = 横向倍数 k（一个画面像素占 k 列）。
 
     背景是每列差 1 的渐变（见 grad），所以只有跳到下一个画面像素时才变。取中位数是为了
     躲开头一下（第 0 / 1 列被红线盖了，以及渐变 mod 190 绕一圈那一列）。
@@ -285,37 +333,55 @@ def col_step(im, row=5):
     return int(np.median(gaps)) if len(gaps) else 0
 
 
-zag = boxpick.magnify(grad, gbx, panel=(556, 186), zoom=2.0)
-kx2, ky2 = boxpick.zoom_scale(gbx, (556, 186), 2.0)
-check('zoom=2：窗口减半（199/2 -> 100 宽、159/2 -> 80 高）、倍数 2/1 -> 5/2',
-      (kx2, ky2) == (5, 2) and zag.size == (100 * kx2, 80 * ky2),
-      'k=%s 图=%s' % ((kx2, ky2), zag.size))
-check('放大图上 1 个画面像素 = kx 列（zoom=1 时 2 列、zoom=2 时 5 列）',
-      col_step(z0) == kx and col_step(zag) == kx2,
+zag = boxpick.magnify(grad, gbx, panel=PANEL, zoom=2.0)
+kx2, ky2 = boxpick.zoom_scale(gbx, PANEL, 2.0)
+vw2f, vh2f = boxpick.zoom_window(gbx, PANEL, 2.0)
+check('zoom=2：视窗（高那一侧）正好减半、倍数翻倍（宽那侧撑到面板比例）',
+      abs(vh2f - 159 / 2.0) < 0.51
+      and abs(vw2f - (159 / 2.0) * PANEL[0] / PANEL[1]) < 1.0
+      and abs(kx2 - 2 * kx) < 0.02 and abs(ky2 - 2 * ky) < 0.02,
+      '视窗 %.1fx%.1f k=%s' % (vw2f, vh2f, (kx2, ky2)))
+check('放大图上 1 个画面像素 = k 列（zoom=1 时 %d 列、zoom=2 时 %d 列）'
+      % (round(kx), round(kx2)),
+      col_step(z0) == int(round(kx)) and col_step(zag) == int(round(kx2)),
       '%d / %d' % (col_step(z0), col_step(zag)))
-la2, _ = edge_pixels(np.asarray(zag), boxpick.EDGE_LEFT)
-_, ta2 = edge_pixels(np.asarray(zag), boxpick.EDGE_TOP)
-ra2, _ = edge_pixels(np.asarray(zag), boxpick.EDGE_RIGHT)
-check('zoom=2 且 pan=0：左 / 上两条还压在画布边上，右 / 下两条跑出视窗就不画',
-      la2[0] == 0 and ta2[0] == 0 and ra2 == [],
-      '左 %s 上 %s 右 %s' % (la2[:2], ta2[:2], ra2))
-check('zoom 小于 1 当成 1（视窗还是整个框）',
-      np.asarray(boxpick.magnify(grad, gbx, panel=(556, 186), zoom=0.2)).shape == a0.shape,
-      'shape %s' % (np.asarray(boxpick.magnify(grad, gbx, panel=(556, 186),
-                                               zoom=0.2)).shape,))
+zag_mid = np.asarray(boxpick.magnify(grad, mbx, panel=PANEL, zoom=2.0))
+la2, _ = edge_pixels(zag_mid, boxpick.EDGE_LEFT)
+ra2, _ = edge_pixels(zag_mid, boxpick.EDGE_RIGHT)
+check('zoom=2 且 pan=0：框照样摆在视窗正中（差 ≤ 3px）',
+      abs(la2[0] - (zag_mid.shape[1] - 1 - ra2[-1])) <= 3,
+      '左 %s 右 %s / 图 %s' % (la2[:2], ra2[-2:], (zag_mid.shape[1], zag_mid.shape[0])))
 check('zoom 超过 ZOOM_MAX 被夹住（不会算出 1 像素的窗口）',
-      bool((np.asarray(boxpick.magnify(grad, gbx, panel=(556, 186), zoom=99)) ==
-            np.asarray(boxpick.magnify(grad, gbx, panel=(556, 186),
+      bool((np.asarray(boxpick.magnify(grad, gbx, panel=PANEL, zoom=99)) ==
+            np.asarray(boxpick.magnify(grad, gbx, panel=PANEL,
                                        zoom=boxpick.ZOOM_MAX))).all()),
       'ZOOM_MAX=%s' % boxpick.ZOOM_MAX)
-# 画出来的就是 zoom_view 说的那一块：画面 (2361, 60) 那一格就是图的 左上角
-zg = np.asarray(boxpick.magnify(grad, gbx, panel=(556, 186), pan=(60, 20), zoom=2.0))
+# zoom < 1 = 往外缩：视窗比框还大（能看见框周围一圈），图还是铺满面板。
+big = boxpick.magnify(grad, gbx, panel=PANEL, zoom=0.5)
+vbw, vbh = boxpick.zoom_window(gbx, PANEL, 0.5)
+v1w, v1h = boxpick.zoom_window(gbx, PANEL, 1.0)
+check('zoom=0.5：视窗比框大一倍（缩出去看框周围）',
+      abs(vbw - 2 * v1w) < 1e-6 and abs(vbh - 2 * v1h) < 1e-6 and vbw > gbx.w,
+      '视窗 %.1fx%.1f（框 %dx%d）' % (vbw, vbh, gbx.w, gbx.h))
+check('zoom=0.5：图还是铺满面板（缩出去也不会剩一条黑）',
+      abs(big.size[0] - PANEL[0]) <= 8 and abs(big.size[1] - PANEL[1]) <= 8, '%s' % (big.size,))
+lo = boxpick.zoom_floor(gbx, SIZE10, PANEL)
+lfw, lfh = boxpick.zoom_window(gbx, PANEL, lo)
+check('缩小的下限 = 整幅画面刚好装进面板（再小就没意义了）',
+      lo < 1.0 and lfw <= 2560 + 1e-6 and lfh <= 1600 + 1e-6,
+      '下限 %.4f 时视窗 %.1fx%.1f / 画面 %s' % (lo, lfw, lfh, SIZE10))
+check('下限本身 ≤ 1（「看整个框」这档永远给得出来）', lo <= 1.0, str(lo))
+# 画出来的就是 zoom_view 说的那一块：画面 (vx, vy) 那一格就是图的 左上角
+v = boxpick.zoom_view(gbx, PANEL, (60, 20), 2.0, SIZE10)
+zg = np.asarray(boxpick.magnify(grad, gbx, panel=PANEL, pan=(60, 20), zoom=2.0))
 check('画出来的就是 zoom_view 说的那一块（左上角像素 = 画面那一格）',
-      int(zg[0, 0, 0]) == int(grad[60, 2361]),
-      '%d / %d' % (int(zg[0, 0, 0]), int(grad[60, 2361])))
-v = boxpick.zoom_view(gbx, (556, 186), (10 ** 6, 10 ** 6), 2.0, (2560, 1600))
-check('zoom_view：视窗整块夹在画面里（右 / 下顶到边，窗口 100x80）',
-      v == (2560 - 100, 1600 - 80, 100, 80, 5, 2), str(v))
+      int(zg[0, 0, 0]) == int(grad[v[1], v[0]]),
+      '%d / %d' % (int(zg[0, 0, 0]), int(grad[v[1], v[0]])))
+vf = boxpick.zoom_view(gbx, PANEL, (10 ** 6, 10 ** 6), 2.0, SIZE10)
+check('zoom_view：视窗整块夹在画面里（右 / 下顶到边，尺寸 = 视窗）',
+      vf == (2560 - vf[2], 1600 - vf[3], vf[2], vf[3], vf[4], vf[4])
+      and vf[2] == int(round(boxpick.zoom_window(gbx, PANEL, 2.0)[0]))
+      and vf[4] == vf[5], str(vf))
 
 # ---- 11. resize_box / mirror_resize：左边那张图「Windows 截图」那套手势的几何 ----
 # 用户 2026-10-12：「放大做的什么鬼，先在左侧原画面创建一个框，就像 Windows 的截图一样

@@ -273,14 +273,27 @@ def main() -> int:
               '%s' % (lay3.pause,))
 
         # ---- 5. 保存校准 -> 落到 window_calib.json ----
+        # 存的是「最后**真正在用**的那份」（见 WindowSource.save_current），而不是刚才交上去
+        # 的那个框：面板一开跑，WindowMonitor.snap_bar_left 就会把 ROI 左端吸到白块起点
+        # （live.py；本机在这一段实测 x 1191 -> 1189、宽 109 -> 111）。那正是用户要的效果
+        # —— 手框只能对到 ±1~2px，而读数要的是白块起点那一列。所以这里比的是 monitor.layout，
+        # 再用 source 钉死「这一份确实是 save_calib 那次写进去的」。
+        # （这条原来比 x1，于是「吸过之后」必红：用例的假设过时了，不是存盘坏了。）
         app.save_calib()
         profs = load_window_profiles(prof)
         key = window_key(CW.EXE, CW.WIN_SIZE)
-        got = profs.get(key, {}).get('layout', {}).get('bar', {})
-        check('面板「保存校准」真的写进了窗口校准表', got.get('x') == x1,
-              '%s -> bar=%s' % (key, got))
+        rec = profs.get(key, {})
+        got = rec.get('layout', {}).get('bar', {})
+        live_bar = app.monitor.layout.bar
+        check('面板「保存校准」真的写进了窗口校准表（存的是当前在用的那份 ROI）',
+              got.get('x') == live_bar.x and got.get('w') == live_bar.w
+              and rec.get('source') == '面板校准',
+              '%s -> bar=%s（在用的 %s，交上去的框 x=%d，source=%r）'
+              % (key, got, live_bar, x1, rec.get('source')))
+        check('吸过之后 ROI 还贴着白块起点（只在几个像素里动）',
+              abs(live_bar.x - x1) <= 4, '交上去 x=%d -> 在用 x=%d' % (x1, live_bar.x))
         check('校准表里记了客户区原点（下次开窗口拿它当预测起点）',
-              bool(profs.get(key, {}).get('offset')))
+              bool(rec.get('offset')))
 
         # ---- 5b. 置顶：每 0.7s 重新钉一遍 ----
         # 为什么要重钉：这条链路抓的是**屏幕上那块像素**。(1) 播放器切全屏 / 换下一段

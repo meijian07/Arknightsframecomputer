@@ -1040,10 +1040,15 @@ def t_picker_pan(app):
         w0, h0 = pk._photo['zoom'].width(), pk._photo['zoom'].height()
         # 放大图现在**只**负责看（左键拖 = 挪视窗）。上一轮那套「拖身子挪框 / 拖边改边」
         # 整段搬回左边那张图了 —— 在放大图里随便一拖框就跑，那正是「放大做的什么鬼」。
+        # 先把框挪到画面正中再拖：右下角那个框的视窗本来就被画面夹住了（这是对的），
+        # 往右拖根本动不了 —— 那测不出「按倍数折算」。
+        r = pk.boxes['pause'] = Rect(1000, 600, 199, 159)
+        pk.pan = [0.0, 0.0]
+        pk.redraw()
         pk._zdown(_types.SimpleNamespace(x=100, y=60))
         pk._zdrag(_types.SimpleNamespace(x=100 + 4 * kx, y=60))
-        check('放大图里左键拖动 = 挪视窗：往右拖 4 个画面像素 pan = -4（除以放大倍数）',
-              abs(pk.pan[0] + 4.0) < 1e-6 and pk.pan[1] == 0.0, str(pk.pan))
+        check('放大图里左键拖动 = 挪视窗：往右拖 4 个画面像素 pan ≈ -4（除以放大倍数）',
+              abs(pk.pan[0] + 4.0) <= 0.5 and pk.pan[1] == 0.0, str(pk.pan))
         check('平移不改画布里的图尺寸（倍数只由框决定，越挪不会越小）',
               (pk._photo['zoom'].width(), pk._photo['zoom'].height()) == (w0, h0),
               '%dx%d' % (pk._photo['zoom'].width(), pk._photo['zoom'].height()))
@@ -1055,13 +1060,17 @@ def t_picker_pan(app):
         pk._zdown(_types.SimpleNamespace(x=0, y=0))
         pk._zdrag(_types.SimpleNamespace(x=-10 ** 6, y=-10 ** 6))
         pk._zup()
-        check('拖出画面 -> 夹在右下角（视窗一直还在画面里）',
-              pk.pan == [float(2560 - r.w - r.x), float(1600 - r.h - r.y)], str(pk.pan))
+        vwx, vhx = [int(round(v)) for v in bp.zoom_window(r, ui_mod.BoxPicker.ZOOM_PANEL,
+                                                          pk.zoom)]
+        check('拖出画面 -> 视窗夹在画面右下角（一直还在画面里）',
+              bp.zoom_view(r, ui_mod.BoxPicker.ZOOM_PANEL, pk.pan, pk.zoom,
+                           pk._frame_size())[:2] == (2560 - vwx, 1600 - vhx), str(pk.pan))
         pk._zdown(_types.SimpleNamespace(x=0, y=0))
         pk._zdrag(_types.SimpleNamespace(x=10 ** 6, y=10 ** 6))
         pk._zup()
         check('往反方向拖出去 -> 夹在左上角（不会越拖越远，回来时不用空拖）',
-              pk.pan == [float(-r.x), float(-r.y)], str(pk.pan))
+              bp.zoom_view(r, ui_mod.BoxPicker.ZOOM_PANEL, pk.pan, pk.zoom,
+                           pk._frame_size())[:2] == (0, 0), str(pk.pan))
         pk.set_target('bar')
         # 第 45 轮（用户：「查看上下左右是否对齐」）：费用条目标的放大图里**四条边**都画着。
         # 量的是取景器**真正贴上去的那张图**（tk photo 的 get 子命令），不是另调一次
@@ -1083,10 +1092,16 @@ def t_picker_pan(app):
         pk.redraw()
         iz, jz = zsize()
         jy = jz * 3 // 4            # 避开两条蓝线（取样条带）占的那两行
-        check('费用条目标的放大图：左红 / 右绿 / 上下品红四条边压在画布四边上',
+        el, er, et, eb = zm.edge_lines(pk.box, ui_mod.BoxPicker.ZOOM_PANEL, pk.pan,
+                                       pk.zoom, pk._frame_size())
+        check('费用条目标的放大图：左红 / 右绿压在画布左右两边（条槽宽正好铺满面板）',
               px(0, jy) == zm.EDGE_LEFT and px(iz - 1, jy) == zm.EDGE_RIGHT
-              and px(iz // 2, 0) == zm.EDGE_TOP and px(iz // 2, jz - 1) == zm.EDGE_BOTTOM,
-              '%s %s %s %s' % (px(0, jy), px(iz - 1, jy), px(iz // 2, 0), px(iz // 2, jz - 1)))
+              and el == 0 and er >= iz - 2,
+              '%s %s el=%d er=%d iz=%d' % (px(0, jy), px(iz - 1, jy), el, er, iz))
+        check('费用条目标的放大图：上下两条品红画在框的顶边 / 底边上（不在画布边上）',
+              px(iz // 2, et) == zm.EDGE_TOP and px(iz // 2, eb) == zm.EDGE_BOTTOM
+              and 0 < et < eb < jz - 1,
+              '%s %s et=%d eb=%d jz=%d' % (px(iz // 2, et), px(iz // 2, eb), et, eb, jz))
         b0, b1 = pk._band_rows(pk.box)          # 绝对行号（画面坐标，见 _band_rows）
         check('取样条带落在框内（上下都在框里，蓝线不会跑到框外去）',
               pk.box.y < b0 <= b1 < pk.box.y + pk.box.h,
@@ -1108,22 +1123,29 @@ def t_picker_pan(app):
               pk.box == Rect(rw.x - 1, rw.y, rw.w + 1, rw.h), '%s -> %s' % (rw, pk.box))
         rw = pk.box
         pk.pan = [0.0, 0.0]
+        pk.redraw()
+        vx0, vy0 = zm.zoom_view(rw, ui_mod.BoxPicker.ZOOM_PANEL, pk.pan, pk.zoom,
+                                pk._frame_size())[:2]
         pk.nudge_move(-2, 3)
         check('整框 ← ↑：整块平移（宽高一点不变）',
               pk.box == Rect(rw.x - 2, rw.y + 3, rw.w, rw.h), '%s -> %s' % (rw, pk.box))
-        check('微调挪块：pan 反向补同样多（放大图不跟着跳）',
-              abs(pk.pan[0] - 2.0) < 1e-6 and abs(pk.pan[1] + 3.0) < 1e-6, str(pk.pan))
+        vx1, vy1 = zm.zoom_view(pk.box, ui_mod.BoxPicker.ZOOM_PANEL, pk.pan, pk.zoom,
+                                pk._frame_size())[:2]
+        check('微调挪块：视窗跟着框**同方向**走同样多（pan 不再反向补 —— 第 55 轮）',
+              pk.pan == [0.0, 0.0] and (vx1 - vx0, vy1 - vy0) == (-2, 3),
+              'pan=%s 视窗 (%d,%d) -> (%d,%d)' % (pk.pan, vx0, vy0, vx1, vy1))
         kb, _ = zm.zoom_scale(pk.box, ui_mod.BoxPicker.ZOOM_PANEL)
         pk.pan = [9.0, 5.0]
         pk.redraw()
         # 平移（右移 9px）之后：绿线不再贴在画布最右列，而是跟着框挪到 (w-9)*kx-1 列。
         iz2, jz2 = zsize()
         jy2 = jz2 * 3 // 4
-        check('平移后四条边跟着框走（右边挪到 (w-9)*kx-1 列）',
-              px((pk.box.w - 9) * kb - 1, jy2) == zm.EDGE_RIGHT
-              and px(iz2 - 1, jy2) != zm.EDGE_RIGHT,
-              '最右列 %s，期望第 %d 列是绿色'
-              % (px(iz2 - 1, jy2), (pk.box.w - 9) * kb - 1))
+        er3 = zm.edge_lines(pk.box, ui_mod.BoxPicker.ZOOM_PANEL, pk.pan, pk.zoom,
+                            pk._frame_size())[1]
+        check('平移后四条边跟着框走（右边从画布最右列挪到第 %d 列）' % er3,
+              px(er3, jy2) == zm.EDGE_RIGHT and px(iz2 - 1, jy2) != zm.EDGE_RIGHT
+              and er3 < iz2 - 1,
+              'er=%d 最右列 %s kb=%.3f' % (er3, px(iz2 - 1, jy2), kb))
         pk._down(_types.SimpleNamespace(x=10, y=10))
         check('重新拖框 = 视窗回到「就是框里」', pk.pan == [0.0, 0.0], str(pk.pan))
         pk._up()
@@ -1347,23 +1369,29 @@ def t_picker_zoom(app):
               '%s / %s' % (pk.boxes['bar'], Rect(x0, y0, x1 - x0, y1 - y0)))
         # 滚轮向上 = 局部放大
         w0, h0 = pk._photo['zoom'].width(), pk._photo['zoom'].height()
+        el0, er0 = ui_mod.boxpick.edge_lines(pk.box, ui_mod.BoxPicker.ZOOM_PANEL, pk.pan,
+                                             1.0, pk._frame_size())[:2]
         pk._wheel(types.SimpleNamespace(delta=120, x=200, y=80))
         check('滚轮一格 = 放大 1.25 倍', abs(pk.zoom - 1.25) < 1e-9, str(pk.zoom))
-        check('放大之后那张图确实变大了（视窗小了一块、画得更大）',
-              (pk._photo['zoom'].width(), pk._photo['zoom'].height()) != (w0, h0),
-              '%dx%d -> %dx%d' % (w0, h0, pk._photo['zoom'].width(),
-                                  pk._photo['zoom'].height()))
+        el1, er1 = ui_mod.boxpick.edge_lines(pk.box, ui_mod.BoxPicker.ZOOM_PANEL, pk.pan,
+                                             pk.zoom, pk._frame_size())[:2]
+        # 放大图现在**永远铺满面板**（第 55 轮同一句：「固定 4:3 的比例」），所以「变大了」
+        # 不能再看图尺寸 —— 看图里那一小块占了多少列（同一个框，倍数大了就更宽）。
+        check('放大之后框在图里确实变大了（视窗小了一块、画得更大）',
+              er1 - el1 > er0 - el0,
+              '框宽 %d -> %d 列（图 %dx%d -> %dx%d）'
+              % (er0 - el0, er1 - el1, w0, h0,
+                 pk._photo['zoom'].width(), pk._photo['zoom'].height()))
 
         def frame_at(x, y, clamp=True):
             """放大图上 (x, y) 那一列 / 行对应的画面点（clamp = 和 _zoom_at 同一口径：
             光标在图上空处时先夹进图里）。"""
             r = pk.box
             vx, vy, vw, vh, kx, ky = ui_mod.boxpick.zoom_view(
-                r, ui_mod.BoxPicker.ZOOM_PANEL, pk.pan, pk.zoom, pk._frame_size(),
-                pk._zwin_base())
+                r, ui_mod.BoxPicker.ZOOM_PANEL, pk.pan, pk.zoom, pk._frame_size())
             if clamp:
-                x = min(max(x, 0), max(0, int(vw * kx) - 1))
-                y = min(max(y, 0), max(0, int(vh * ky) - 1))
+                x = min(max(x, 0), max(0, int(round(vw * kx)) - 1))
+                y = min(max(y, 0), max(0, int(round(vh * ky)) - 1))
             return vx + x / float(kx), vy + y / float(ky)
 
         pk.zoom, pk.pan = 1.0, [0.0, 0.0]
@@ -1377,7 +1405,7 @@ def t_picker_zoom(app):
               '(%s, %s) -> (%s, %s) zoom=%.3f' % (bx, by, ax, ay, pk.zoom))
         for _ in range(30):
             pk._wheel(types.SimpleNamespace(delta=-120, x=200, y=80))
-        check('一直往小了滚 = 停在缩小下限（面板装得下 = 1:1），不会再小',
+        check('一直往小了滚 = 停在缩小下限（缩到底 = 整幅画面），不会再小',
               abs(pk.zoom - pk._zoom_lo()) < 1e-9 and pk.zoom <= 1.0,
               'zoom=%s 下限=%s' % (pk.zoom, pk._zoom_lo()))
         for _ in range(30):
@@ -1394,8 +1422,8 @@ def t_picker_zoom(app):
         pk._zdown(types.SimpleNamespace(x=100, y=60))
         pk._zdrag(types.SimpleNamespace(x=100 + 2 * kx2, y=60))
         pk._zup()
-        check('放大之后拖动：位移仍按当前倍数折算（拖 2*kx 像素 = pan 减 2）',
-              abs(pk.pan[0] - (before[0] - 2)) < 1e-6, '%s -> %s' % (before, pk.pan))
+        check('放大之后拖动：位移仍按当前倍数折算（拖 2*kx 像素 ≈ pan 减 2）',
+              abs(pk.pan[0] - (before[0] - 2)) <= 0.6, '%s -> %s' % (before, pk.pan))
         pk._zoom_at(2.0, 200, 80)
         pk.set_target('pause')
         check('换目标把缩放也复位（别带着上一个目标的倍数）',
@@ -1412,63 +1440,58 @@ def t_picker_zoom(app):
         # 不要跟随框会很乱」）----
         check('ctrl+滚轮 也接在放大图上（和滚轮同一条路）',
               bool(pk.cv_zoom.bind('<Control-MouseWheel>')), '')
-        # (a) 基准窗口：改框不改倍数
+        # (a) 改框：视窗 / 倍数跟着框走（第 55 轮的口径；上一轮是「冻在旧框上」）
         pk.set_target('bar')
         pk.boxes['bar'] = Rect(2300, 1229, 239, 25)      # 真录像里费用条的几何
-        pk.pan, pk.zoom, pk._zbase = [0.0, 0.0], 1.0, None
+        pk.pan, pk.zoom = [0.0, 0.0], 1.0
         pk.redraw()
-        base0 = list(pk._zwin_base())
-        check('基准 = 打开取景器那一刻的框', base0 == [239.0, 25.0], str(base0))
-        k0 = ui_mod.boxpick.zoom_scale(pk.box, ui_mod.BoxPicker.ZOOM_PANEL, pk.zoom,
-                                       pk._zwin_base())
+        k0 = ui_mod.boxpick.zoom_scale(pk.box, ui_mod.BoxPicker.ZOOM_PANEL, pk.zoom)[0]
         pk.nudge_edge('r', 6)                            # 改框：框本身 +6px
         pk.nudge_edge('b', 3)
-        k1 = ui_mod.boxpick.zoom_scale(pk.box, ui_mod.BoxPicker.ZOOM_PANEL, pk.zoom,
-                                       pk._zwin_base())
-        check('改框不改倍数（「不要跟随框」）：倍数只认基准，框变了它不动',
-              k0 == k1 and [pk.box.w, pk.box.h] != base0,
-              'k %s -> %s，框 %s / 基准 %s' % (k0, k1, (pk.box.w, pk.box.h), base0))
+        k1 = ui_mod.boxpick.zoom_scale(pk.box, ui_mod.BoxPicker.ZOOM_PANEL, pk.zoom)[0]
+        check('改框 -> 倍数跟着框走（视窗的形状跟着框，不再冻在打开取景器那一刻的框上）',
+              k1 < k0 and (pk.box.w, pk.box.h) == (245, 28),
+              'k %.4f -> %.4f，框 %s' % (k0, k1, (pk.box.w, pk.box.h)))
         pk.boxes['bar'] = Rect(2300, 1229, 239, 25)
-        pk.pan, pk.zoom, pk._zbase = [0.0, 0.0], 1.0, None
+        pk.pan, pk.zoom = [0.0, 0.0], 1.0
         pk.redraw()
-        pk._zbase = [999.0, 999.0]                       # 故意搞坏，看复位有没有重取
         pk._zfit()
-        check('双击复位 = 缩放 / 平移归零，基准跟着当前的框重取',
-              pk.zoom == 1.0 and pk.pan == [0.0, 0.0]
-              and pk._zbase == [float(pk.box.w), float(pk.box.h)],
-              'zoom=%s pan=%s base=%s 框=%s' % (pk.zoom, pk.pan, pk._zbase, pk.box))
+        check('双击复位 = 缩放 / 平移一起归零',
+              pk.zoom == 1.0 and pk.pan == [0.0, 0.0],
+              'zoom=%s pan=%s 框=%s' % (pk.zoom, pk.pan, pk.box))
         # (b) 缩到下限：视窗 = 面板装得下（1 画面像素 = 1 屏像素）
         pk.set_target('bar')
         pk.boxes['bar'] = Rect(2300, 1229, 239, 25)
-        pk.pan, pk.zoom, pk._zbase = [0.0, 0.0], 1.0, None
+        pk.pan, pk.zoom = [0.0, 0.0], 1.0
         pk.redraw()
         lo = pk._zoom_lo()
         for _ in range(40):
             pk._wheel(types.SimpleNamespace(delta=-120, x=200, y=80))
         vw, vh, kx, ky = ui_mod.boxpick.zoom_view(
-            pk.box, ui_mod.BoxPicker.ZOOM_PANEL, pk.pan, pk.zoom, pk._frame_size(),
-            pk._zwin_base())[2:]
-        check('往下滚能缩过「整框」，停在面板装得下（视窗 = 面板宽、k = 1）',
-              abs(pk.zoom - lo) < 1e-9 and vw == ui_mod.BoxPicker.ZOOM_PANEL[0] and kx == 1,
-              'zoom=%.3f 下限=%.3f 视窗=%dx%d k=%dx%d' % (pk.zoom, lo, vw, vh, kx, ky))
-        check('下限本身 ≤ 1（1:1 就是最远的视野，再远要缩像素，不做）', lo <= 1.0, str(lo))
+            pk.box, ui_mod.BoxPicker.ZOOM_PANEL, pk.pan, pk.zoom,
+            pk._frame_size())[2:]
+        check('往下滚能缩过「整框」，停在缩小下限（视窗 = 整幅画面那么宽）',
+              abs(pk.zoom - lo) < 1e-9 and abs(vw - 2560) <= 1 and kx < 1,
+              'zoom=%.4f 下限=%.4f 视窗=%dx%d k=%.4f' % (pk.zoom, lo, vw, vh, kx))
+        check('下限本身 ≤ 1（「看整个框」这一档永远给得出来）', lo <= 1.0, str(lo))
         # (c) 光标落在放大图**外面**（右边 / 下面空着的那截）滚轮：锚点夹进图里，
         #     不能像以前那样把视窗整个拽到框的左上角去。
         pk._zfit()
         pk.redraw()
         iw, ih = pk._photo['zoom'].width(), pk._photo['zoom'].height()
-        gx, gy = ui_mod.BoxPicker.ZOOM_PANEL[0] - 4, ui_mod.BoxPicker.ZOOM_PANEL[1] - 4
+        # 放大图铺满面板之后，图外只剩画布那 4px 边（560x190 vs 556x186）—— 拿这个角量。
+        gx, gy = ui_mod.BoxPicker.ZOOM_PANEL[0] + 2, ui_mod.BoxPicker.ZOOM_PANEL[1] + 2
         check('这一格光标确实在图外（画布比图大，右边 / 下面空着一截）',
               gx >= iw and gy >= ih, '图=%dx%d 画布=%s' % (iw, ih, ui_mod.BoxPicker.ZOOM_PANEL))
         cx0, cy0 = min(gx, iw - 1), min(gy, ih - 1)      # 夹进图里 = 锚点
         fx0, fy0 = frame_at(gx, gy)                      # 那个锚点对应的画面点
         pk._wheel(types.SimpleNamespace(delta=120, x=gx, y=gy))
         vx, vy, vw, vh, kx, ky = ui_mod.boxpick.zoom_view(
-            pk.box, ui_mod.BoxPicker.ZOOM_PANEL, pk.pan, pk.zoom, pk._frame_size(),
-            pk._zwin_base())
+            pk.box, ui_mod.BoxPicker.ZOOM_PANEL, pk.pan, pk.zoom, pk._frame_size())
         col = (fx0 - vx) * kx                            # 同一个画面点现在落在哪一列 / 行
         row = (fy0 - vy) * ky
-        want_c, want_r = min(cx0, int(vw * kx) - 1), min(cy0, int(vh * ky) - 1)
+        want_c = min(cx0, int(round(vw * kx)) - 1)
+        want_r = min(cy0, int(round(vh * ky)) - 1)
         # 容差 = 半个画面像素（视窗要落在整数画面行列上，见 zoom_view 的四舍五入）：
         # 1 个画面像素 = k 列，所以落点天生能差到 k/2 列。
         check('在图外的空处滚轮：锚点还是「离光标最近的那个画面点」（不跟着框跑）',

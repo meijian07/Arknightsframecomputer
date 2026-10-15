@@ -493,10 +493,9 @@ class BoxPicker:
         self._bg = None
         self._photo = {}
         self.scale = 1.0
-        self.pan = [0.0, 0.0]               # 放大图相对框的偏移（见 boxpick.magnify）
+        self.pan = [0.0, 0.0]               # 视窗相对**框中心**的偏移（见 boxpick.zoom_view）
         self.zoom = 1.0                     # 局部放大倍数（1 = 窗口就是整个框）
         self._zpan_from = None              # 按住放大图：挪视窗的起点
-        self._zbase = None                  # 放大倍数的基准窗口（见 _zwin_base）
 
         top = tk.Toplevel(parent)
         self.top = top
@@ -633,7 +632,6 @@ class BoxPicker:
         self.lb_hint.configure(text=PICKER_HINTS.get(name, ''))
         self.pan = [0.0, 0.0]               # 换目标 = 换一个视窗（别带着上一个的平移）
         self.zoom = 1.0
-        self._zbase = None                  # 换目标 = 重新取基准（这个目标的框）
         self._sync_target_btns()
         self.redraw()
 
@@ -689,7 +687,6 @@ class BoxPicker:
 
             self.pan = [0.0, 0.0]
             self.zoom = 1.0
-            self._zbase = None              # 第一次铺框 = 基准就是这几个预测框
         if self.target not in self.boxes:
             self.target = 'bar'
         if hasattr(self, 'lb_pos'):
@@ -795,33 +792,26 @@ class BoxPicker:
                               layout=self.guide if self.target == 'bar' else None,
                               band=self._band_rows(r), pan=self.pan, zoom=self.zoom,
                               ghost=boxpick.pause_ghost(r) if pause else (),
-                              band_fill=pause, base=self._zwin_base())
+                              band_fill=pause)
         self._photo['zoom'] = ImageTk.PhotoImage(img)
         self.cv_zoom.delete('all')
         self.cv_zoom.create_image(0, 0, anchor='nw', image=self._photo['zoom'])
 
-    # ---- 放大图的倍数基准（用户 2026-10-13：「不要跟随框会很乱」）----
-    def _zwin_base(self):
-        """放大倍数的**基准窗口**（画面像素）：打开取景器 / 重画框那一刻的框大小。
-
-        为什么不用「当前的框」：框是拿来对准的，拖手柄 / 微调 / 挪块都在改它。倍数要是
-        跟着框算（`窗口 = 框 / zoom`），改框的同时整张放大图跟着缩放 —— 眼睛刚对上的那条
-        线又跑了，手感就是「很乱」。基准定死之后，改框只动四条彩线的位置，倍数不动。
-
-        什么时候重取（`self._zbase = None`）：换目标、第一次铺框、拉新框、双击复位 ——
-        都正是「按这个框重新对准」的那几刻。
-        """
-        if self._zbase is None:
-            r = self.box
-            if r is None:
-                return None
-            self._zbase = [float(r.w), float(r.h)]
-        return self._zbase
-
+    # ---- 放大图看哪儿：视窗一直跟着框（用户 2026-10-15：「移动框时放大小窗反向
+    # 移动，应该和框同方向移动」）----
+    #
+    # pan 是「视窗相对**框中心**的偏移」（画面像素，见 boxpick.zoom_view / pan_of_view）：
+    # 挪框的时候视窗跟着一起走，放大图里那四条彩线**待在原地**，动的是底下的画面 ——
+    # 这就是「同方向」。上一版把 pan 定义成「视窗相对框左上角」，又在挪框时反向补同样多
+    # （`_pan_carry`），于是视窗钉死在**同一块画面**上、彩线在框底下乱跑，用户看到的就是
+    # 「反向移动」。同一轮里「放大图固定成某个比例」（那会儿视窗尺寸被冻在打开取景器那一刻
+    # 的框上）也一起没了：现在视窗的形状跟着框走，见 boxpick.fit_panel。
     def _zoom_lo(self):
-        """现在能缩到多小：面板装得下为止（1 画面像素 = 1 屏像素，见 boxpick.zoom_floor）。"""
-        base = self._zwin_base()
-        return boxpick.zoom_floor(base, self.ZOOM_PANEL) if base else self.ZOOM_MIN
+        """现在能缩到多小：缩到底 = 整幅画面装进面板（见 boxpick.zoom_floor）。"""
+        r = self.box
+        if r is None or self.frame is None:
+            return self.ZOOM_MIN
+        return boxpick.zoom_floor(r, self._frame_size(), self.ZOOM_PANEL)
 
     # ---- 放大图：只看 + 挪视窗 / 滚轮局部放大 / 双击复位 ----
     #
@@ -847,21 +837,24 @@ class BoxPicker:
         if self._zpan_from is None or r is None:
             return
         ox, oy, px, py = self._zpan_from
-        kx, ky = boxpick.zoom_scale(r, self.ZOOM_PANEL, self.zoom, self._zwin_base())
-        self.pan = [px - (event.x - ox) / float(kx), py - (event.y - oy) / float(ky)]
+        # 除数必须是放大镜**真正在用**的那个倍数：缩到底时视窗比画面还大，会被裁掉一截，
+        # 而 zoom_scale 算的是没裁的那份（见 boxpick.zoom_view）。
+        _vx, _vy, _vw, _vh, k, _ky = boxpick.zoom_view(r, self.ZOOM_PANEL, self.pan,
+                                                       self.zoom, self._frame_size())
+        self.pan = [px - (event.x - ox) / k, py - (event.y - oy) / k]
         self._pan_clamp()
         self._draw_zoom()
 
 
     # ---- 放大图：滚轮 = 局部放大（用户：「做局部放大！类似 ctrl+滚轮 的还是框选放大都行」）----
     ZOOM_STEP = 1.25                        # 一格滚轮的倍数
-    ZOOM_MIN = boxpick.ZOOM_MIN             # 老口径的下限；实际下限看 _zoom_lo
+    ZOOM_MIN = boxpick.ZOOM_MIN             # 绝对下限（实际下限看 _zoom_lo）
     ZOOM_MAX = boxpick.ZOOM_MAX
 
     def _wheel(self, event):
         """滚轮一格 = 放大 / 缩小一档（ctrl+滚轮 / shift+滚轮 走同一条路，见上面的 bind）。
 
-        往上滚 = 放大、往下滚 = 缩小，缩到 `_zoom_lo()` 为止（面板装得下 = 1:1，见
+        往上滚 = 放大、往下滚 = 缩小，缩到 `_zoom_lo()` 为止（缩到底 = 整幅画面，见
         boxpick.zoom_floor）；缩放中心 = 鼠标底下那一点（见 _zoom_at）。
         """
         if getattr(event, 'delta', 0) == 0:
@@ -884,28 +877,28 @@ class BoxPicker:
         if r is None or self.frame is None:
             return
         size = self._frame_size()
-        base = self._zwin_base()
-        vx, vy, vw, vh, kx, ky = boxpick.zoom_view(r, self.ZOOM_PANEL, self.pan,
-                                                   self.zoom, size, base)
-        cx = min(max(int(round(cx)), 0), max(0, int(vw * kx) - 1))    # 夹进图里
-        cy = min(max(int(round(cy)), 0), max(0, int(vh * ky) - 1))
-        fx, fy = vx + cx / float(kx), vy + cy / float(ky)    # 光标底下那个画面点
-        self.zoom = boxpick.clamp_zoom(self.zoom * factor, base, self.ZOOM_PANEL)
-        _vx, _vy, vw2, vh2, kx2, ky2 = boxpick.zoom_view(r, self.ZOOM_PANEL, self.pan,
-                                                        self.zoom, size, base)
+        vx, vy, vw, vh, k, _ky = boxpick.zoom_view(r, self.ZOOM_PANEL, self.pan,
+                                                   self.zoom, size)
+        cx = min(max(int(round(cx)), 0), max(0, int(round(vw * k)) - 1))    # 夹进图里
+        cy = min(max(int(round(cy)), 0), max(0, int(round(vh * k)) - 1))
+        fx, fy = vx + cx / k, vy + cy / k                    # 光标底下那个画面点
+        self.zoom = boxpick.clamp_zoom(self.zoom * factor, self._zoom_lo(), self.ZOOM_MAX)
+        _vx, _vy, vw2, vh2, k2, _k2 = boxpick.zoom_view(r, self.ZOOM_PANEL, self.pan,
+                                                        self.zoom, size)
         # 缩完图可能变窄（视窗小了），那一列放不下就退到图里最近的一列 —— 锚点照样在
         # 图上，只是不再正好压在光标底下（差得最多就是空出来的那几列）。
-        ax = min(cx, max(0, int(vw2 * kx2) - 1))
-        ay = min(cy, max(0, int(vh2 * ky2) - 1))
-        self.pan = [fx - ax / float(kx2) - int(r.x), fy - ay / float(ky2) - int(r.y)]
+        ax = min(cx, max(0, int(round(vw2 * k2)) - 1))
+        ay = min(cy, max(0, int(round(vh2 * k2)) - 1))
+        # 反推 pan（口径见 boxpick.pan_of_view）：让锚点 (fx, fy) 正好落在放大图的 (ax, ay)。
+        self.pan = boxpick.pan_of_view(r, self.ZOOM_PANEL, self.zoom,
+                                       fx - ax / k2, fy - ay / k2)
         self._pan_clamp()
         self.redraw()
 
     def _zfit(self, _event=None):
-        """双击 = 回到「就是框里」（缩放和平移一起复位，倍数基准也跟着当前的框重取）。"""
+        """双击 = 回到「就是框里」（缩放和平移一起复位）。"""
         self.zoom = 1.0
         self.pan = [0.0, 0.0]
-        self._zbase = None
         self.redraw()
 
     def _pan_clamp(self):
@@ -923,21 +916,10 @@ class BoxPicker:
             self.pan = [0.0, 0.0]
             return
         vx, vy = boxpick.zoom_view(r, self.ZOOM_PANEL, self.pan, self.zoom,
-                                   self._frame_size(), self._zwin_base())[:2]
-        self.pan = [vx - int(r.x), vy - int(r.y)]
-
-    def _pan_carry(self, was):
-        """框自己挪了：pan 反向补同样多，让放大图**看的是同一块画面**。
-
-        不加这一下，边看放大图边按「← 1px」微调，画面会跟着跳（1 画面 px = k 像素的
-        放大图）—— 那正是「很难对准」的来源。
-        """
-        r = self.box
-        if was is None or r is None:
-            return
-        self.pan[0] -= r.x - was.x
-        self.pan[1] -= r.y - was.y
-        self._pan_clamp()
+                                   self._frame_size())[:2]
+        # 夹完的视窗得用 pan_of_view 反读回 pan（口径是「相对框中心」，不是相对框左上角）：
+        # 各算一份最容易在缩放之后对不上，差 1 像素就是「越拖越偏」。
+        self.pan = boxpick.pan_of_view(r, self.ZOOM_PANEL, self.zoom, vx, vy)
 
     # ---- 左边那张图：建框 / 挪框 / 拉边（Windows 截图那套） ----
     #
@@ -1021,7 +1003,6 @@ class BoxPicker:
         if what == 'new':
             self.pan = [0.0, 0.0]           # 拉新框 = 重新对准，视窗回到「就是框里」
             self.zoom = 1.0
-            self._zbase = None              # 框换了，倍数基准跟着新框重取
 
     def _drag(self, event):
         if self._grab is None:
@@ -1043,7 +1024,8 @@ class BoxPicker:
         if new == was:
             return
         self._set_boxes(was_all, new)
-        self._pan_carry(was)
+        # 不补 pan：视窗是「相对框中心」定的，框挪到哪儿放大图就跟到哪儿（第 55 轮用户：
+        # 「移动框时放大小窗反向移动，应该和框同方向移动」）。
         self.redraw()
 
     def _up(self, _event=None):
@@ -1078,7 +1060,6 @@ class BoxPicker:
         if new == was:
             return
         self._set_boxes(dict(self.boxes), new)
-        self._pan_carry(was)        # 视窗反向补同样多 —— 放大图不跟着跳（第 44 轮的规矩）
         self.redraw()
 
     def _frame_size(self):

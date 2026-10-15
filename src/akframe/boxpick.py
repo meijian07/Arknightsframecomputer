@@ -47,19 +47,28 @@ GHOST_ALPHA = 105              # 0..255：**要能看见底下那层真字形**�
 MIN_RUN = 6
 # 刻度尺画多少格：一个费用周期 = 30 逻辑帧，这是游戏的机制常数（见 docs）。
 TICKS = 30
-# 局部放大（用户 2026-10-11：「做局部放大！类似 ctrl+滚轮 的还是框选放大都行」）的
-# 范围：1 = 窗口正好是框（原来的行为），越大看得越少、放得越大。
+# 局部放大（用户 2026-10-11：「做局部放大！类似 ctrl+滚轮 的还是框选放大都行」）：
+# zoom = 1 看不大于整个框的一块画面，越大看得越少、放得越大，小于 1 是往外缩（看框周围）。
 #
-# 2026-10-13 第七轮（用户：「放大图也能用 ctrl 滚轮缩放，放大鼠标单击的地方，不要
-# 跟随框会很乱」）两条：
-#   * ZOOM_MIN 现在只管「不传 base」的老口径。取景器传了 base 之后，下限由 zoom_floor
-#     按**面板装得下**算 —— 最多缩到 1 画面像素 = 1 屏像素（1:1）。再缩就得把画面
-#     缩小（k < 1），「1 个画面像素 = k 列」这条对齐判据就没了，不做。
-#   * base = 倍数的**基准窗口**（画面像素），默认 None = 用当前的框。取景器把它定在
-#     「打开取景器 / 重画框」那一刻的框上：改框只动四条彩线，倍数不动（见 _zoom_window）。
-ZOOM_MIN = 1.0
+# 2026-10-15 第八轮（用户：「移动框时放大小窗反向移动，应该和框同方向移动；放大小窗缩放
+# 很奇怪，固定 4:3 的比例，包括框选的位置；ctrl 放大范围大一点」）三条：
+#
+#   * **视窗跟着框走、形状也跟着框走**：视窗以**当前的框**为中心（不再冻在「打开取景器
+#     那一刻的框」上）。原来那份冻住的基准让放大图固定成某个比例，挪框 / 拉框时画面跟框
+#     对不上 —— 用户看到的「固定 4:3 的比例，包括框选的位置」就是它；
+#   * **不变形（两个轴一个倍数）**：原来 kx = 面板宽 / 视窗宽、ky = 面板高 / 视窗高，
+#     框是扁的（费用条框 239x25）时纵向被拉 3 倍多，画面越看越不像原样。现在视窗撑到
+#     面板的宽高比、两个轴同一个倍数 —— 画面就是原样的放大版，四条彩线照旧画在框上；
+#   * **倍数连续 + 范围更大**：原来 kx / ky 是整数除法（滚一格可能反而变小一截），
+#     下限还是「1 画面像素 = 1 屏像素」；现在倍数是浮点、连续，缩到底就是整幅画面
+#     （见 zoom_floor）—— 可缩的范围从 1 倍放宽到 0.1 倍上下，这就是用户要的「范围大一点」。
+#
+# ZOOM_MAX 保守地留在 16（用户 2026-10-15 只说「范围大一点」，没说「放大到看不清」）：
+# 视窗得落在整数画面像素上，撑面板时天生差半像素 -> 放大图比面板差 ≤ 3px（见 fit_panel
+# 下面那段推导），到这个倍数为止；再往上（25 / 32）宽度会忽大忽小几十像素，面板上会
+# 出现肉眼可见的空白条。
+ZOOM_MIN = 0.05                 # 绝对下限：再小整幅画面就只有几十列了，看也白看
 ZOOM_MAX = 16.0
-ZOOM_FLOOR_CAP = 0.2            # 再小也不给（面板装不下，给了也是缩成一片糊）
 
 
 
@@ -96,98 +105,124 @@ def guide_image(frame: np.ndarray, layout: Layout) -> Image.Image:
     return img
 
 
-def zoom_floor(base, panel=(556, 186)) -> float:
-    """缩小的下限（zoom 最小能到多少）。
+def clamp_zoom(zoom, lo=ZOOM_MIN, hi=ZOOM_MAX) -> float:
+    """把 zoom 夹进 [lo, hi]。读不出来（nan / 不是数）一律当 1（看不大于整个框）。"""
+    try:
+        z = float(zoom)
+    except (TypeError, ValueError):
+        return 1.0
+    if z != z:
+        return 1.0
+    return max(float(lo), min(float(hi), z))
 
-    口径：视窗放到**面板装得下**为止，也就是 1 画面像素 = 1 屏像素（1:1）—— 再往下
-    就要把画面缩小（k < 1），「1 个画面像素 = k 列」这条对齐判据就没了。视窗 =
-    base / zoom，所以 zoom >= base / 面板尺寸，两个轴取紧的那个。
 
-    base 比面板还大时（框拉得比放大图还宽）保住 1.0：那种框本来就画不下，老口径
-    是拿 1.0 兜的，不在这轮改。
+def fit_panel(vw, vh, panel=(556, 186)) -> tuple:
+    """把视窗**只放大**到面板的宽高比，返回 (视窗宽, 视窗高)（画面像素）。
+
+    为什么非撑不可：撑完 k = 面板宽 / 视窗宽 = 面板高 / 视窗高，两个轴同一个倍数 ——
+    画面不变形；同时放大图正好铺满面板，不会在右边 / 下边剩一条黑。只放大不缩小，
+    所以框本身永远整个落在视窗里。
+
+    撑到面板的比例之后，视窗尺寸是**浮点**；真正裁画面时才取整（见 zoom_view），所以
+    画出来的图会比面板差半个画面像素以内（乘上倍数 = 放大图差 ≤ 3px，16 倍以内）。
     """
-    bw = max(1, int(base[0]))
-    bh = max(1, int(base[1]))
-    return max(ZOOM_FLOOR_CAP, min(1.0, max(float(bw) / panel[0], float(bh) / panel[1])))
+    pw, ph = float(panel[0]), float(panel[1])
+    vw, vh = max(1.0, float(vw)), max(1.0, float(vh))
+    if vw / vh >= pw / ph:
+        return (vw, vw * ph / pw)
+    return (vh * pw / ph, vh)
 
 
-def clamp_zoom(zoom, base=None, panel=None) -> float:
-    """把 zoom 夹进 [下限, ZOOM_MAX]。不传 base / panel = 老口径（下限 1）。"""
-    lo = ZOOM_MIN if (base is None or panel is None) else zoom_floor(base, panel)
-    return max(lo, min(ZOOM_MAX, float(zoom)))
+def zoom_window(box, panel=(556, 186), zoom=1.0) -> tuple:
+    """放大镜的视窗尺寸 (宽, 高)（画面像素）= 框 / zoom，再撑到面板的比例（见 fit_panel）。
 
-
-def _zoom_window(box: Rect, zoom=1.0, base=None, panel=None) -> tuple:
-    """放大镜的窗口尺寸 (宽, 高)（画面像素）= base / zoom，至少 1 像素。
-
-    zoom = 1 就是原来的行为（窗口正好是整个框）；zoom > 1 是局部放大：看框里的
-    一小块，因此倍数 = 面板 / 窗口 也跟着变大。
-
-    base = 基准窗口（画面像素），默认 = 当前的框。取景器传的是**打开取景器那一刻**
-    的框（见 ZOOM_MIN 那段）：否则拖手柄 / 微调改框时会顺手把整张放大图缩放掉，
-    刚对准的地方又跑了。
+    zoom = 1 -> 视窗刚好装下整个框；zoom > 1 -> 只看框里的一小块（放得更大）；
+    zoom < 1 -> 视窗比框大，能看见框周围一圈。
     """
-    bw, bh = (int(box.w), int(box.h)) if base is None else (int(base[0]), int(base[1]))
-    z = clamp_zoom(zoom, base, panel)
-    return (max(1, int(round(bw / z))), max(1, int(round(bh / z))))
+    z = clamp_zoom(zoom)
+    return fit_panel(box.w / z, box.h / z, panel)
 
 
-def zoom_scale(box: Rect, panel=(556, 186), zoom=1.0, base=None) -> tuple:
-    """放大镜的倍数 (kx, ky)：横纵分开，横向 1..16 倍、纵向 1..32 倍。
+def zoom_scale(box, panel=(556, 186), zoom=1.0) -> tuple:
+    """放大镜的倍数 (k, k)：两个轴**一样**，所以画面不会被拉扁。
 
-    纵向拉得更狠是有原因的：条只有 17 行高，等比放大会得到一条扁带子，看不出「白块左端
-    有没有压在红线上」。倍数只由**base 和 zoom** 决定（不由看哪儿决定）—— 拖动放大图是
-    平移，不该顺手把画面缩掉，否则「挪一下看清楚点」会变成「越挪越小」；base 默认是
-    当前的框，传了冻结的 base 就与框无关（见 _zoom_window）。
+    倍数只由**框和 zoom** 决定、不由「看哪儿」决定 —— 拖动是平移，不该顺手把画面缩掉，
+    否则「挪一下看清楚点」会变成「越挪越小」。
+
+    倍数按**没取整的视窗**算（zoom_window 给的就是浮点），取整只发生在视窗本身 —— 这样
+    放大图正好铺满面板（差不到 1 像素），右边不会莫名其妙空出一条黑边。
     """
-    vw, vh = _zoom_window(box, zoom, base, panel)
-    kx = max(1, min(16, int(panel[0]) // vw))
-    ky = max(1, min(32, int(panel[1]) // vh))
-    return kx, ky
+    vw, vh = zoom_window(box, panel, zoom)
+    k = min(float(panel[0]) / vw, float(panel[1]) / vh)
+    return (k, k)
 
 
-def zoom_view(box: Rect, panel=(556, 186), pan=(0, 0), zoom=1.0, size=None,
-              base=None) -> tuple:
-    """放大镜「看哪儿、多大倍数」的唯一出口：(vx, vy, vw, vh, kx, ky)。
+def zoom_floor(box, size, panel=(556, 186)) -> float:
+    """缩小的下限：视窗正好装下**整幅画面**时的 zoom（再小就看不见框周围还有什么了）。
 
-    vx / vy = 视窗左上角在画面里的坐标；给了 size = (宽, 高) 就**已经夹好**
-    （视窗一定整块在画面里）；pan = 视窗左上角**相对框左上角**的偏移（画面像素）。
+    口径：视窗 = 框 / zoom（撑到面板比例），要求它整块落在画面里。zoom = 1 时视窗
+    只比框大一圈，所以 1.0 永远给得出来 —— 下限不会挡住「看整个框」。
+    """
+    vw, vh = fit_panel(box.w, box.h, panel)
+    w = float(max(1, int(size[0])))
+    h = float(max(1, int(size[1])))
+    z = max(vw / w, vh / h)
+    return max(ZOOM_MIN, min(1.0, z))
+
+
+def zoom_view(box, panel=(556, 186), pan=(0, 0), zoom=1.0, size=None) -> tuple:
+    """放大镜「看哪儿、多大倍数」的唯一出口：(vx, vy, vw, vh, k, k)。
+
+    vx / vy = 视窗左上角在画面里的坐标；vx / vy 给了 size = (宽, 高) 就**已经夹好**
+    （视窗一定整块在画面里）。pan = 视窗相对「**以框为中心**」的偏移（画面像素）——
+    所以 pan = (0, 0) 就是框摆在正中间，挪框时视窗跟着框一起走（用户 2026-10-15：
+    「移动框时放大小窗反向移动，应该和框同方向移动」）。
 
     为什么要有这个函数：界面算「光标底下是哪个画面点」和 magnify 画图必须是**同一份
     几何**，否则滚轮缩放时盯着鼠标的那一点会慢慢漂走（各算一遍最容易差在取整上）。
+    倍数一律问 zoom_scale（同一份口径），视窗尺寸才是这里取整的那一份。
     """
-    kx, ky = zoom_scale(box, panel, zoom, base)
-    vw, vh = _zoom_window(box, zoom, base, panel)
+    k, _ky = zoom_scale(box, panel, zoom)
+    vw, vh = zoom_window(box, panel, zoom)
+    vw, vh = max(1, int(round(vw))), max(1, int(round(vh)))
+    cx = int(box.x) + (int(box.w) - vw) / 2.0 + pan[0]
+    cy = int(box.y) + (int(box.h) - vh) / 2.0 + pan[1]
     if size is None:
-        vx = max(0, int(box.x) + int(pan[0]))
-        vy = max(0, int(box.y) + int(pan[1]))
-        return vx, vy, vw, vh, kx, ky
+        return max(0, int(round(cx))), max(0, int(round(cy))), vw, vh, k, k
     w, h = int(size[0]), int(size[1])
     vw, vh = min(vw, w), min(vh, h)
-    # pan 是浮点（滚轮缩放时按「光标底下那一点不动」算出来的），这里四舍五入而不是截断 ——
-    # 截断在负数上会向 0 靠，每一格滚轮都向同一侧漂 半个像素。
-    vx = max(0, min(int(round(int(box.x) + pan[0])), w - vw))
-    vy = max(0, min(int(round(int(box.y) + pan[1])), h - vh))
-    return vx, vy, vw, vh, kx, ky
+    vx = max(0, min(int(round(cx)), w - vw))
+    vy = max(0, min(int(round(cy)), h - vh))
+    return vx, vy, vw, vh, k, k
 
 
-def edge_lines(box: Rect, panel=(556, 186), pan=(0, 0), zoom=1.0, size=None,
-               base=None) -> tuple:
+def pan_of_view(box, panel=(556, 186), zoom=1.0, vx=0.0, vy=0.0) -> list:
+    """反过来：视窗左上角落在 (vx, vy) 时 pan 该是多少（界面对齐 / 夹边界都用它）。
+
+    「pan 是相对框居中的偏移」这条约定只在这个函数和 zoom_view 里各写一次，
+    界面那边不再自己推导 —— 各算一份最容易差在取整上（差 1 像素就是 1/8 个逻辑帧）。
+    """
+    vw, vh = zoom_window(box, panel, zoom)
+    vw, vh = max(1, int(round(vw))), max(1, int(round(vh)))
+    return [float(vx) - int(box.x) - (int(box.w) - vw) / 2.0,
+            float(vy) - int(box.y) - (int(box.h) - vh) / 2.0]
+
+
+def edge_lines(box, panel=(556, 186), pan=(0, 0), zoom=1.0, size=None) -> tuple:
     """框的四条边**画在放大图的哪一列 / 行**：(左列, 右列, 上行, 下行)，左闭。
 
     抽成一个函数是给界面用的：放大图里「鼠标是不是抓住了某条边」必须和 magnify
     画那条线用的是**同一套取整**，否则手感是「明明压在线上却没抓住」（差 1 像素就够）。
-
-    口径（和 magnify 里画线时完全一致）：第 x 列的左边界是 int((x - vx) * kx)，
-    所以框占了 x..x+w-1 这些列，右那条线画在 int((x + w - vx) * kx) - 1 上。
+    口径（和 magnify 里画线时完全一致）：第 x 列的左边界是 int((x - vx) * k)，
+    所以框占了 x..x+w-1 这些列，右那条线画在 int((x + w - vx) * k) - 1 上。
     """
-    vx, vy, _vw, _vh, kx, ky = zoom_view(box, panel, pan, zoom, size, base)
+    vx, vy, _vw, _vh, k, _ky = zoom_view(box, panel, pan, zoom, size)
 
     def sx(x):
-        return int((x - vx) * kx)
+        return int((x - vx) * k)
 
     def rt(y):
-        return int((y - vy) * ky)
+        return int((y - vy) * k)
 
     return (sx(int(box.x)), sx(int(box.x) + int(box.w)) - 1,
             rt(int(box.y)), rt(int(box.y) + int(box.h)) - 1)
@@ -264,28 +299,27 @@ def _translucent(img: Image.Image, polys, color, alpha: int) -> Image.Image:
 
 
 def magnify(frame: np.ndarray, box: Rect, panel=(520, 170), layout: Layout = None,
-            band=(0, 0), pan=(0, 0), zoom=1.0, ghost=(), band_fill=False,
-            base=None) -> Image.Image:
+            band=(0, 0), pan=(0, 0), zoom=1.0, ghost=(), band_fill=False) -> Image.Image:
     """把框那一块放大，并把**框的四条边**画在上面：红 / 绿 = 左右，品红 = 上下。
 
-    pan = 放大镜**相对框**的偏移（画面像素，正 = 往右下看），(0,0) 就是「只看框里」。
+    pan = 视窗相对**框的中心**的偏移（画面像素，正 = 往右下看），(0,0) = 框摆在正中。
     为什么要有它（用户 2026-10-11：「手动校准界面右边的放大图要可以自己移动，不然很难
     对准」）：框只框住按钮那一小块时，放大镜里除了按钮什么都没有 —— 按钮偏出去多少、
     往哪边偏，全看不见。能挪之后就能把周围一起拉进来对着看。
 
     四条边为什么一直画（用户紧接着的下一条：「费用条难以准确框选，加一个可移动的局部
-    放大功能，查看上下左右是否对齐」）：只标左右的话，上下对没对上只能猜。默认视图
-    （pan=0）下这四条正好压在画布的四边上 —— 它们同时也是「图到这儿就没了」的界线
-    （画布比图大，右边 / 下面会空出一截）；平移之后它们跟着框走，于是「框相对条偏了
-    多少」四条边一起看得见。越界的那条不画：它确实不在视窗里，画在边上等于撒谎。
+    放大功能，查看上下左右是否对齐」）：只标左右的话，上下对没对上只能猜。平移之后它们
+    跟着框走，于是「框相对条偏了多少」四条边一起看得见。越界的那条不画：它确实不在
+    视窗里，画在边上等于撒谎。
 
-    zoom = **局部放大**倍数：窗口 = base / zoom，所以 zoom > 1 就是「只看框里的一小块，
-    放得更大」（用户 2026-10-11：「做局部放大！类似 ctrl＋滚轮 的还是框选放大都行」），
-    zoom < 1 就是往外缩（最多缩到面板装得下，见 zoom_floor）。它和 pan 一样，只改
-    「看哪儿 / 多大」，不改取样的行。base = 基准窗口，默认是当前的框（见 _zoom_window）。
+    zoom = **局部放大**倍数（见 zoom_window）：zoom = 1 是「框（加一圈周围）铺满面板」，
+    zoom > 1 就是「只看框里的一小块，放得更大」（用户 2026-10-11：「做局部放大！类似
+    ctrl＋滚轮 的还是框选放大都行」），zoom < 1 是往外缩（缩到底 = 整幅画面，见
+    zoom_floor）。它和 pan 一样，只改「看哪儿 / 多大」，不改取样的行。
 
-    倍数（zoom_scale）只由**框和 zoom** 决定、不由看哪儿决定 —— 拖动是平移，不该顺手把画面缩掉，
-    否则「挪一下看清楚点」会变成「越挪越小」。
+    倍数（zoom_scale）只由**框和 zoom** 决定、不由看哪儿决定 —— 拖动是平移，不该顺手把
+    画面缩掉，否则「挪一下看清楚点」会变成「越挪越小」。两个轴同一个倍数（用户 2026-10-15
+    「放大小窗缩放很奇怪，固定 4:3 的比例」）：画面就是原样的放大版，不会被拉扁。
 
     band_fill：把两条蓝线**中间整条填一层淡色**（用户 2026-10-12：「暂停键参考不
     明确」）。两条 1px 的线要回答「字的顶边压在线的哪一侧」，本来就容易看错；一条带
@@ -296,12 +330,12 @@ def magnify(frame: np.ndarray, box: Rect, panel=(520, 170), layout: Layout = Non
     （平行四边形），所以能叠着对得上；和 pan / zoom 一样只是**画上去**的参考，不参与读数。
     """
     h, w = frame.shape[:2]
-    vx, vy, vw, vh, kx, ky = zoom_view(box, panel, pan, zoom, (w, h), base)
+    vx, vy, vw, vh, kx, ky = zoom_view(box, panel, pan, zoom, (w, h))
     crop = frame[vy:vy + vh, vx:vx + vw]
     ch, cw = crop.shape[:2]
     if ch < 1 or cw < 1:
         return Image.new('RGB', (1, 1))
-    iw, ih = cw * kx, ch * ky
+    iw, ih = max(1, int(round(cw * kx))), max(1, int(round(ch * ky)))
     img = Image.fromarray(crop, mode='L').convert('RGB').resize((iw, ih), Image.NEAREST)
     d = ImageDraw.Draw(img)
 
@@ -338,7 +372,7 @@ def magnify(frame: np.ndarray, box: Rect, panel=(520, 170), layout: Layout = Non
                 d.polygon(pts, outline=GHOST_EDGE)
     # 框的四条边（左 / 右画在框的**第一列 / 最后一列**，上 / 下画在第一行 / 最后一行）。
     # 口径统一成「左闭」，和 boxpick.edge_lines 用的是同一份（界面照着它判「抓住哪条边」）。
-    el, er, et, eb = edge_lines(box, panel, pan, zoom, (w, h), base)
+    el, er, et, eb = edge_lines(box, panel, pan, zoom, (w, h))
     for xx, col in ((el, EDGE_LEFT), (er, EDGE_RIGHT)):
         if 0 <= xx < iw:
             d.line([(xx, 0), (xx, ih - 1)], fill=col, width=2)
