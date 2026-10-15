@@ -172,8 +172,11 @@ check('一费 30 帧（实测周期中位）', n_cyc >= 10 and med == 30,
       '周期 %d 个，中位 %g，范围 %g..%g' % (n_cyc, med, lo, hi))
 check('10 秒 60fps 的录像喂到第 600 帧（0 起）', mon.position == 599,
       '实得 %d' % mon.position)
-check('像素通道数出来 599 帧（起锚那一帧是「本费第 1 帧」，不额外记）',
-      mon.counter.elapsed == 599, '实得 %d' % mon.counter.elapsed)
+# 画面是 synthesized_width(phase = ((i % per) + 1) / per) 喂进来的：第 i 帧就是
+# 本费的**第 (i % 30) + 1 帧**，所以第 599 帧（相位 30/30）时本费已经走过 600 帧。
+# 起锚落在第 2 帧上、补 2 帧，之后每拍 +1，累计正好 600 —— 帧号 = 游戏里本费的帧号。
+check('像素通道数出来 600 帧（帧号 = 本费已经走的帧数）',
+      mon.counter.elapsed == 600, '实得 %d' % mon.counter.elapsed)
 e0 = mon.counter.elapsed
 advance(mon, clock, 1.0)
 check('再跑 1 秒不多不少 +60 帧', mon.counter.elapsed - e0 == 60,

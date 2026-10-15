@@ -14,6 +14,7 @@ from .geometry import (ARROW_MIN_CONTRAST, ARROW_REL, ARROW_SOLID_MIN,
                        CORR_2X_MIN, DIGIT_RATIO_MIN, PAUSE_GLYPH_MIN, PAUSE_SHAPE_BAND,
                        RUN_PAUSE_RATIO_MIN, SPEED_ARROW_BAND, SPEED_DIGIT_BAND,
                        SPEED_DIGIT_COLS, Layout)
+from .synthesis import MIN_DETECTABLE_WIDTH
 
 # ---- 阈值 ----
 # 纯白下限：实测填充恒为 255，用 250 而不是 240（240 会把接近白的场景像素也算进去）
@@ -25,6 +26,14 @@ MASKED_WHITE_MAX = 165
 GREY_MAX = 146       # 满费底色（不透明，实测精确等于 146）
 GREY_FADE = 88       # 满费退出过渡底色，持续约 14 帧
 GREY_TOL = 10
+# 条宽不超过这么多像素就一律算空条（EMPTY）。**必须和 synthesis.MIN_DETECTABLE_WIDTH
+# 对齐**：synthesis 那条相位-宽度曲线说「宽度小于 2px 就等于没画出来」，所以只有 0/1
+# 才算空条。把这条线抬到 4 就等于人为丢掉 2~4px 的那几帧 —— 而一费开头本来就只有这么
+# 几帧。前人 25% 回费（一费 120 帧）的实测宽度序列是 0 2 3 4 5…，2px 是真实可读的
+# （见前人 cost_data 里 720p25% 的 cycles.csv）。抬到 4 的后果：回费越慢开头丢得越多
+# （30 / 60 / 120 帧/费 -> 0 / 1 / 3 帧读不出来，详见 state.Counter.
+# _unreadable_head_frames），用户报的「减费下开头几帧识别不到」就是它。
+EMPTY_MAX_FILL = MIN_DETECTABLE_WIDTH - 1
 # 判 MAX / MAX_FADE 时，落在目标灰度 ±10 的像素数下限。
 # **必须是占条宽的比例，不能是绝对像素数**：离线验证时条宽 240，150 = 62.5%；
 # 换到 120 宽的窗口上，如果还用 150 就永远判不出满费（实时链路实测踩到了这个坑）。
@@ -57,7 +66,8 @@ GRAY_TOL = 20        # 灰度校验：R/G/B 两两之差超过它就不算灰度
 
 # ---- 局内负费：费用数字左边那个「减号」 ----
 # 判据照抄前人（cost_bar.rs 的 is_cost_negative），只有三条：
-#   ① 纯白：> WHITE_MIN(250)。数字的抗锯齿边只有「亮」，凑不出一条长纯白横杠；
+#   ① 纯白：> WHITE_MIN(250)，或（画面被采集磨暗时）> 框内白电平 x SIGN_WHITE_FRAC。
+#      数字的抗锯齿边只有「亮」，凑不出一条长纯白横杠；
 #   ② 这条纯白横杠要**连续**够长（SIGN_MIN_RUN_UNIT）—— 数字的竖笔画只有 5~8px，
 #      而减号本身就是一条横杠，整条都是纯白；
 #   ③ 有一行满足就够（720p 下减号的纯白芯只有一行高，分辨率越高越厚）。
@@ -67,6 +77,17 @@ GRAY_TOL = 20        # 灰度校验：R/G/B 两两之差超过它就不算灰度
 # 正常画面下留了 3px 余量，见 docs 第 31 节。
 SIGN_MIN_RUN_UNIT = 21.0
 SIGN_MIN_ROWS = 1
+# 减号「纯白芯」的**亮度**门限。正常画面直接用 WHITE_MIN(250)，但有损采集会把峰值磨下去：
+# 减号是个细横杠（2560x1600 上只有 4~5px 高），h264 的去块/变换把它的峰值从 255 压到
+# 240~243，而同一帧里费用数字的笔画还有 250~251。按 250 判的后果不是「少一帧」，是
+# **整段负费一帧都认不出来** —— 相位模型按 1/30 往前推，一费 240 帧被数成 120 帧
+# （用户 2026-10-15 报的「25% 的负费情况完全没做还是 120 帧，应该是 240 帧」）。
+# 所以门限改成「这一小块自己的白电平 x SIGN_WHITE_FRAC」：白电平就是减号芯的峰值时，
+# 门限正好落在峰值下方一点；画面本来就是 255 时退回 WHITE_MIN，逐像素与原来一致。
+SIGN_WHITE_FRAC = 0.95
+# 框里连这个亮度都没有，说明这一小块根本没有白（不在关卡里 / 被挡住）：不还原
+# （还原等于把噪声放大），一律不判负费。
+SIGN_WHITE_FLOOR = 220
 VALIDITY_LEFT_INSET = 1   # 判「条还在不在」时跳过最左 1px（HUD 高光高发区）
 
 
@@ -399,7 +420,8 @@ def read_bar(roi: np.ndarray, layout: Layout) -> BarReading:
         # 实测 HDR 下满费灰底是 94，正好落进「满费退出过渡 88±10」区间，
         # 真正的满费会被读成过渡态。先清零，交给下面的还原通道重读。
         grey146 = grey88 = 0
-    if fill <= 4 and grey146 < min_count and grey88 < min_count and not masked:
+    if fill <= EMPTY_MAX_FILL and grey146 < min_count and grey88 < min_count \
+            and not masked:
         # 主路径一点东西都没读到：可能整幅画面被压暗（HDR / PQ 采集）。
         # 填充按白电平等比抬亮再扫一遍；灰底按 PQ 曲线还原再数一遍；
         # 两边都读不到就维持原判（EMPTY）。
@@ -419,7 +441,7 @@ def read_bar(roi: np.ndarray, layout: Layout) -> BarReading:
             else:
                 g146 = int((np.abs(fixed - GREY_MAX) <= GREY_TOL).sum())
                 g88 = int((np.abs(fixed - GREY_FADE) <= GREY_TOL).sum())
-            if f2 > 4 or g146 >= min_count or g88 >= min_count:
+            if f2 > EMPTY_MAX_FILL or g146 >= min_count or g88 >= min_count:
                 fill, masked = f2, m2
                 grey146, grey88 = g146, g88
                 dim = True
@@ -432,12 +454,27 @@ def read_bar(roi: np.ndarray, layout: Layout) -> BarReading:
         state, fill = 'MAX', 0
     elif grey88 >= min_count:
         state, fill = 'MAX_FADE', 0
-    elif fill <= 4:
+    elif fill <= EMPTY_MAX_FILL:
         state = 'EMPTY'
     else:
         state = 'TRACK'
     return BarReading(fill=fill, grey146=grey146, grey88=grey88, state=state, row=row,
                       masked=masked, gray_ok=gray_ok, dim=dim)
+
+
+def _sign_white_level(band: np.ndarray):
+    """这一小块自己的「纯白芯」亮度门限；框里根本没有白时返回 None（不判负费）。
+
+    白电平取 99 分位：减号在框里占两成多的像素，99 分位稳稳落在它自己的芯上；
+    框里没有减号时落在数字笔画上，同样是纯白。SDR 的 255 和「被压缩磨到 240 的白」
+    因此走同一套判据，不用再维护两套常数。
+    """
+    hi = float(np.percentile(band, 99))
+    if hi >= WHITE_MIN:
+        return float(WHITE_MIN)
+    if hi < SIGN_WHITE_FLOOR:
+        return None
+    return hi * SIGN_WHITE_FRAC
 
 
 def read_sign(roi: np.ndarray, layout: Layout) -> SignReading:
@@ -447,13 +484,21 @@ def read_sign(roi: np.ndarray, layout: Layout) -> SignReading:
     相位模型会按 1/30 往前推，`_resync` 只能挑到真值一半的 k —— 计数器直接把那一段
     数成一半（不是「多记」也不是「少记一帧」，是整段 2 倍偏差）。见 docs 第 31 节。
 
+    亮度门限不写死 255（见 SIGN_WHITE_FRAC）：减号是细横杠，有损采集会把它的峰值
+    从 255 磨到 240 上下，而**同一条录像里**费用数字的笔画还有 250 —— 用绝对纯白判，
+    负费段会整段认不出来（一费 240 帧被数成 120 帧，用户 2026-10-15 报的就是这个）。
+    改成按框内白电平取 95% 之后，抗压缩，亮画面下逐像素与原来一致。
+
     roi 是 geometry.sign_rect 那个框的灰度图（一行一行扫，够小，不用向量化）。
     """
     thr = max(6, int(round(SIGN_MIN_RUN_UNIT * float(getattr(layout, 'scale', 1.0) or 1.0))))
     if roi is None or getattr(roi, 'size', 0) == 0:
         return SignReading(negative=False, run=0, rows=0, thr=thr)
     band = roi.mean(axis=2) if roi.ndim == 3 else roi
-    lit = band > WHITE_MIN
+    level = _sign_white_level(band)
+    if level is None:
+        return SignReading(negative=False, run=0, rows=0, thr=thr)
+    lit = band > level
     best_run, rows = 0, 0
     for y in range(lit.shape[0]):
         run = 0

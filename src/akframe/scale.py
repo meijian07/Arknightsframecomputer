@@ -41,8 +41,9 @@ class Theme:
     （白底深字）—— 就是游戏里到帧那一下 flash 的做法，靠反色而不是靠颜色抓眼睛。
     """
 
-    bg: str = '#141416'
+    bg: str = '#0b0b0e'
     ruler_bg: str = '#0d0d0f'
+    stroke: str = '#2a2a2e'        # 刻度区四边那 1px 描边（2026-10-13，见 53 节）
     rail: str = '#3a3a3e'          # 刻度条右边缘那条竖线（2026-10-11 起不画了，留着不删）
     tick: str = '#4a4a4f'
     tick_major: str = '#8f8f95'
@@ -50,10 +51,10 @@ class Theme:
     accent: str = '#ffffff'        # 「现在」线 / 青柱 / 下一条
     text: str = '#ffffff'
     dim: str = '#b9b9c0'
-    faint: str = '#616167'         # 已经过去的轴
+    faint: str = '#8f8f95'         # 已经过去的轴
     mark_next: str = '#ffffff'
     mark_future: str = '#b9b9c0'
-    mark_past: str = '#616167'
+    mark_past: str = '#8f8f95'
     next_fill: str = '#2a2a2d'     # 「下一条」那行的底色（还没走到时）
     connector: str = '#6a6a70'     # 标签被推开时连回真实刻度的细线
 
@@ -66,6 +67,11 @@ class ScaleGeom:
     height: int = 250
     ruler_w: int = 46              # 左边刻度条的宽度
     pad_right: int = 6
+    # 「现在 N」那个读数的右边距（2026-10-13 用户：「把打轴器现在的帧数往左移」）。
+    # 单开一个字段而不是直接加大 pad_right：pad_right 还管着**轴帧号**那一列（右边那串
+    # 「570」），动它会连帧号一起挪。帧号最多四位数（≈30px 宽）右对齐在 W-6，44 让读数
+    # 右边缘落在它左边约 10px 处 —— 原来读数和帧号都贴 W-6，读数正好压在帧号上。
+    now_pad_right: int = 44
     pointer_ratio: float = 0.50    # 「现在」线在刻度区的相对高度（0.5 = 正中）
     px_per_frame: float = 1.5      # 1 帧画多少像素（缩放档）
     # 2026-10-11 字号放大一档（见 scale_render.font_sizes），行高和最小间距跟着长：
@@ -81,7 +87,7 @@ class ScaleGeom:
         return self.pointer_y + (f - frame) * self.px_per_frame
 
     def frames_up(self) -> float:
-        """「现在」线**上方**能显示多少帧 —— 也就是还能往回看多少帧（过去方向）。"""
+        """「现在」线**上方**能显示多少帧（过去那一半，帧号更小的方向）。"""
         return self.pointer_y / self.px_per_frame
 
     def frames_down(self) -> float:
@@ -116,10 +122,8 @@ class Layout:
     ticks: list = field(default_factory=list)    # [(帧号, y, 是不是大刻度)]
     marks: list = field(default_factory=list)    # [Mark]
     # （mercury「青柱」字段 2026-10-11 删了：用户要求去掉那根竖柱，见 scale_render）
-    # 指针固定指着的那一帧 = **真实**当前帧，默认 None 就是 frame。
-    # 只有「打轴器 ↑ 回看」时两者才不一样：刻度按 frame 摆（那是视图帧），
-    # 指针那行按 frame 标「回看」，真正的「现在」另外画一条灰线（见 scale_render）。
-    now: float = None
+    # （now 字段 2026-10-13 跟着「回看」那颗键一起删了 —— 那时 frame 是「视图帧」、
+    #   now 才是真实帧，两者能不一样。现在指针永远指着 frame，不需要第二个帧号。）
 
 
 def one_line(text: str) -> str:
@@ -176,18 +180,15 @@ def spread_labels(marks, geom: ScaleGeom) -> None:
 
 
 def build(frame, cues, done, geom: ScaleGeom = None,
-          recent_pad: float = 0.0, future_pad: float = 0.0, now: float = None) -> Layout:
+          recent_pad: float = 0.0, future_pad: float = 0.0) -> Layout:
     """把「当前帧 + 轴 + 已经触发了几条」摆成一张刻度表。
 
-    frame : 视图帧号（刻度按它摆）。可以是小数 —— 满费时计数器给的就是小数
+    frame : 当前帧号（刻度按它摆）。可以是小数 —— 满费时计数器给的就是小数
     cues  : 全部轴，按帧号升序（就是 Timeline.cues）
     done  : 已经触发了多少条（就是 Prompt.done）。cues[done] 就是「下一条」。
-    now   : 真实当前帧。回看历史轴时传进来（frame 会比它小），默认跟 frame 一样。
     """
     g = geom or ScaleGeom()
-    out = Layout(geom=g, frame=frame, pointer_y=g.pointer_y, now=now)
-    if out.now is None:
-        out.now = frame
+    out = Layout(geom=g, frame=frame, pointer_y=g.pointer_y)
     if not cues:
         return out
 

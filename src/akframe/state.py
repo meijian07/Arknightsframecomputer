@@ -32,9 +32,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .fp24 import (SCALE, SPEED_NEGATIVE, SPEED_NORMAL, CostTiming,
+from .fp24 import (EPSILON_RAW, SCALE, SPEED_NEGATIVE, SPEED_NORMAL, CostTiming,
                     frames_from_required, required_from_frames)
-from .features import BarReading, PauseReading, SignReading, SpeedReading
+from .features import (EMPTY_MAX_FILL, BarReading, PauseReading, SignReading,
+                       SpeedReading)
 from .geometry import PAUSE_RUN_RATIO, PAUSE_STOP_RATIO
 from .synthesis import synthesized_width
 
@@ -84,11 +85,26 @@ BULLET_ASSUMED_WARN = 'bullet-assumed'
 # 万一以后哪一版游戏又开始闪：表现是「暂停着数字还在一格一格挪」，面板上直接看得到，
 # 那时再上更硬的判据（暂停遮罩的整屏变暗比图标形状可靠得多），别再用拍数门限。
 DFILL_SLACK = 3.0     # 像素通道允许「比期望多」多少逻辑帧，超出只记告警
+# 物理上限那个比较是浮点的：bound = 30 * 2 * (1/60) 算出来是 0.9999999999999999，
+# 加上 DFILL_SLACK 之后「正好顶到上限」的 k=4 会变成 3.9999999999999996 —— k=4
+# 被判成超限、整帧扔掉。实测 25% + 局内负费那一档（一费 240 帧）里，累加器的
+# 边界周期让第 3 个周期多出 1 帧，k 正好顶到上限，于是每个周期少记 1 帧
+# （用户 2026-10-15 报的「25% 到 119 帧的时候只有 117 帧」）。比较留 1e-6。
+BOUND_EPS = 1e-6
+# 挂钟取整用的极小量：60 * (1/60) 在浮点下等于 0.9999999999999999，直接 int() 会少算
+# 一帧、把这一帧推到下一拍（满费挂钟通道踩得到）。加一个比任何真实帧长（33.3ms）
+# 小 7 个数量级的量再取整，只在「本来就正好是整数」时起作用。
+CLOCK_ROUND_EPS = 1e-9
 MATCH_TOLERANCE_PX = 5   # 相位重同步的匹配容差：误差超过它就判这帧读数不可信
 WRAP_MIN_PREV_PHASE = 0.75   # 上一拍相位不到这个值，就不许跨过回费边界（防误判绕圈）
-ANCHOR_MAX_CATCHUP = 2   # 起锚那一拍最多补回几帧「费用周期开头还没长出像素的帧」。
-                         # 实测开战起锚都落在周期第 2 / 第 3 帧（fill=6..15）-> 补 1~2 帧；
-                         # 条在别处半路重新出现（fill=129 那类）补不了，标 anchor-late
+# 起锚那一拍最多补回几帧「费用周期开头读不出来的帧」——这是**下限**，
+# 真正的上限跟着回费速率走，见 Counter._unreadable_head_frames：
+#     30 帧/费 -> 开头 1 帧读不出来，条最早在第 2 帧读到，上限 3
+#     60 帧/费 -> 2 帧，最早第 3 帧读到，上限 4
+#     120 帧/费 -> 4 帧，最早第 5 帧读到，上限 6
+# 实测开战起锚落在周期第 2 / 第 3 帧（fill=6..15）-> 补 2~3 帧；条在别处半路重新
+# 出现（fill=129 那类，周期第 16 帧）补不了，标 anchor-late。
+ANCHOR_MAX_CATCHUP = 2
 
 # 「条读到了，但相位模型匹配不上」连续累积了这么久，就认定模型本身已经不可信，
 # 按当前画面重新起锚（delta = 0）：这段时间的帧丢掉，绝不猜。
@@ -246,6 +262,13 @@ class Counter:
         self._crossed = False      # 这一拍的 k 帧里是不是跨过了回费边界
         self._run_prev = None      # 上一拍的运行/暂停判定（滞回用）
         self._clock_frac = 0.0     # 满费挂钟通道余量（单位：逻辑帧，跨暂停接着攒）
+        # 上一拍是不是「满费」（MAX / MAX_FADE）那一档。满费那段条被游戏钉住、
+        # 像素里没有任何位置信息，帧数只能靠挂钟通道数；条重新画出来时必须
+        # **只把相位对上去、一帧都不再补**，否则那段帧会被数两遍 —— 见 _max_reanchor。
+        self._after_max = False
+        # 满费段用的挂钟速率（_clock_rate 的最后一次结果）。条重新长出来的那一拍也归
+        # 挂钟（见 _max_reanchor），要用它接着算这一拍自己走了几帧。
+        self._max_rate = 0.0
         self._battle_hold = 0      # 还要多少拍之内算「在关卡里」（见 BAR_PRESENT_STATES）
         self._move_hold = 0        # 「条在动」还剩多少拍（见 BAR_MOVE_HOLD）
         self._last_fill = None     # 上一拍的条宽 / 状态：用来判「条这一拍动没动」
@@ -406,49 +429,42 @@ class Counter:
                 # 单独标一下：面板能直接说「不在关卡里」，而不是让人以为条真读到了。
                 warn = 'not-battle'
         elif not self._started:
-            k = self._start(bar.fill, speed=speed_for_cost_state(neg))
-            mode, delta, warn = self._anchor_result(k)
+            px_speed = speed_for_cost_state(neg)
+            k = self._start(bar.fill, speed=px_speed)
+            visible = bar.fill > EMPTY_MAX_FILL      # 条真画出来了（TRACK 读数）
+            mode, delta, warn = self._anchor_result(k, px_speed, visible)
             self._started = True
         elif bar.state in ('MAX', 'MAX_FADE'):
             # 满费：整条换成灰底，相位被游戏钉在 0 —— 像素里一点时间信息都没有。
             # 但「条被画出来」本身就是在关卡里的硬证据，所以这段时间按挂钟补。
-            # 速率优先取「确定的那一个」，顺序不能换（子弹时间下倍速键上是没有数字的）：
-            #   1) 子弹时间：>>> 是**确定**的读数 —— 恒为 6 逻辑帧/秒（= 30/5），
-            #      与倍速设置无关（实测见 BULLET_FPS 上面那段）。
-            #   2) 倍速键上画着数字、模板也认得出：30 x 数字。
-            #   3) 数字**画着**、模板认不出（corr 低）：沿用上次的倍速（见下面 else-if 的说明）。
-            #   4) 什么都没画（按钮淡出 / 被部署遮罩糊掉）：不知道速率，**冻结**绝不猜。
-            #
-            # 速率读得到就**一拍都不放过**：满费期间的帧操很短（17~67ms），不足 1 个
+            # 速率怎么取（优先级、以及每一步为什么不能换）都在 _clock_rate 里；
+            # 读得到就**一拍都不放过**：满费期间的帧操很短（17~67ms），不足 1 个
             # 逻辑帧，靠 _clock() 里的余量接着攒（见 _clock 的说明）。
             if paused:
                 mode, delta = 'pause', 0
-            elif self._bullet:
-                mode, delta = self._clock(BULLET_FPS, dt)
-            elif m_now is not None or speed.has_digit:
-                # 数字**画着**但模板对不上（corr 低、m 读成 nan）时沿用上次的倍速：
-                # 按钮确实画着、画的又不是子弹时间的箭头，只是这一拍字形糊了 ——
-                # 沿用比冻结少丢帧。实测这种读数占真实会话 2898/20436 拍（docs 第 23 节）。
-                # last_m 的初值是 1X（最常见的档），所以「从没读到过倍速」也不会瞎猜 2X。
-                mode, delta = self._clock(LOGICAL_FPS * m, dt)
-                if m_now is None:
-                    warn = 'speed-memory'
-            elif self._digit_seen:
-                # 倍速键上数字没画、箭头也不实心，但**这一局里刚刚还读到过数字**：
-                # 关卡内、运行中还能让那颗键整块空白的只有「拖干员」—— 那是子弹时间
-                # （1/5，恒 6 帧/秒），不是「不知道」。用户 2026-10-10：「识别到 1X 之后
-                # 识别不到就按子弹时间算」。绝不拿 last_m / 5 去算：2X 下那样会多记一倍。
-                mode, delta = self._clock(BULLET_FPS, dt)
-                warn = BULLET_ASSUMED_WARN
             else:
-                # 从没读到过倍速数字（刚进关卡、或一直在别的界面）：真不知道速率，冻结不猜。
-                mode, delta = 'bar-reject', 0
-                warn = 'speed-unknown'
+                rate, rw = self._clock_rate(m_now, speed.has_digit)
+                if rate > 0:
+                    mode, delta = self._clock(rate, dt)
+                    self._max_rate = rate
+                else:
+                    # 从没读到过倍速数字（刚进关卡、或一直在别的界面）：不知道速率，冻结不猜。
+                    mode, delta = 'bar-reject', 0
+                warn = rw
+            # 满费这一档的帧数是**挂钟**数出来的（条上没有任何位置信息）。
+            # 条重新画出来的那一拍要按它重新对相位、并且不再补帧 —— 见 _max_reanchor。
+            self._after_max = True
         elif empty and not wrap_pending:
             # (b)：条这一拍压根没画出来。冻结，等条重新出现时相位重同步自己接上。
             # 这里**不再**要求「运行中」连续确认（原来那道理由上面 wrap_pending 接管了）：
             # 空条读数要能进像素通道，唯一入口就是「上一拍条是满的」，比原来的门更窄，
             # 而且回费后相位立刻掉下来，同一段暂停里最多只放行一帧。
+            #
+            # 2026-10-14 这里曾经按挂钟把「本费开头那 1~4 帧」逐帧垫上（_head_step）、
+            # 2026-10-15 回退：那几个帧数垫的是**账**、相位一步没动，读数回来时要扣掉，
+            # 只要有一条路（resync / 起锚 / 拒帧）把账丢了就是多记 —— 用户实测 50% 一费
+            # 被垫成 62 帧、25% 又反过来少 2 帧。像素通道不碰挂钟这条老规矩不能破：
+            # 那几帧宁可晚一拍、由读数一次补上（总数照样对），也不按挂钟猜。
             mode, delta = ('pause', 0) if paused else ('bar-reject', 0)
         else:
             mode, delta, warn = self._pixel(bar.fill, dt, paused, neg)
@@ -640,6 +656,8 @@ class Counter:
         self.last_k = 0
         self._crossed = False
         self._clock_frac = 0.0
+        self._after_max = False
+        self._max_rate = 0.0
         # 重新起锚 = 中间有一段没读到，周期基准也作废（否则会记出一个超长的假周期）
         self._cycle_ref = None
         self._since_accept = 0.0
@@ -713,16 +731,19 @@ class Counter:
         return k
 
     def _phase_index(self, observed: int) -> int:
-        """把一次条宽读数反推成「本费第几帧」（相位号，1 起）。
+        """把一次条宽读数反推成「本费第几帧」（相位号）。
 
         和 _start() 用的是同一条曲线，只是这里只取相位号、不动状态机。
-        读不准（误差超容差）或落在空条上时按 1 算 —— 也就是「本费刚开始」。
+        **条是空的（0 宽）返回 0** —— 那一刻本费一帧都还没走，正是「第 0 帧」。
+        从前这里用 max(1, k) 兜底，等于把「空条」记成已经走了 1 帧：清零 / 起锚
+        的账跟着差 1（和 _anchor_result 里那个 k - 1 是同一个错，见那里的说明）。
+        读不准（误差超容差）时仍按 1 算 —— 宁可少记，也不猜。
         """
         k, err, _ = self._resync(int(observed), allow_wrap=False,
                                  base=CostTiming(self.required))
         if err > MATCH_TOLERANCE_PX:
             return 1
-        return max(1, int(k))
+        return int(k)
 
     def mark_zero_start(self, bar_fill=None) -> None:
         """清零：下一次起锚只补「清零那一刻之后」才走的帧。
@@ -738,7 +759,37 @@ class Counter:
         self._no_catchup = True
         self._zero_phase = self._phase_index(bar_fill) if bar_fill is not None else None
 
-    def _anchor_result(self, k: int) -> tuple:
+    def _unreadable_head_frames(self, speed: int = None) -> int:
+        """费用周期开头「读不出来」的帧数：这几帧画出来太窄，read_bar 只会给 EMPTY。
+
+        两个原因叠在一起，都跟着回费速率一起变：
+          * 条身比可见条槽宽 3.892%（synthesis.BAR_LENGTH_RATIO），左端那一小截藏在
+            条槽外面 —— 一费开头的几帧条其实已经在走，画出来却是 0 宽；
+          * read_bar 把 fill <= EMPTY_MAX_FILL（现在是 1px）一律读成 EMPTY，和「压根没画条」
+            长得一模一样（见 features.read_bar 末段的判据）。
+        所以「一费开头能补回几帧」= 宽度还没超过 EMPTY_MAX_FILL 的那几帧：
+
+            30 帧/费 -> 1 帧，60 帧/费 -> 2 帧，120 帧/费 -> 4 帧
+
+        为什么不能写死：30 帧/费时它恰好等于老代码那个常数 2 - 1，减费档位上就
+        远远不够。写死 2 的那阵子（到 2026-10-13）：25%（120 帧/费）与 50%（60 帧/费）的开战起锚都落在
+        「读得出来的第一帧」，两个都被上限挡掉、判 anchor-late，一开局就白丢好几帧
+        —— 用户报的「开头几帧识别不到」
+        「25% 完全不准」就是它（回归项 check_state_synth.reduced_rate_anchor_head）。
+        2026-10-14 又把 EMPTY_MAX_FILL 从 4 收到 1（见 features.py）：一费开头那几帧
+        以前是「读不到，只能靠起锚补」，现在是真读得到（前人 25% 回费的实测宽度序列
+        是 0 2 3 4 5…，2px 就是画出来了）。这张上限表因此也变小，只负责兜住「条第一次
+        出现就落在周期中段」那种半路重现。
+        """
+        speed = self._speed() if speed is None else int(speed)
+        trial = CostTiming(self.required)
+        for n in range(1, int(self.frames_per_cost) + 2):
+            trial.advance_one_frame(speed)
+            if self._width(trial.phase()) > EMPTY_MAX_FILL:
+                return n - 1
+        return 0
+
+    def _anchor_result(self, k: int, speed: int = None, visible: bool = False) -> tuple:
         """起锚这一拍该记几帧（返回 mode, delta, warn）。
 
         为什么不能一律记 0：条在「费用周期第 1 帧」是**画不出像素**的
@@ -747,13 +798,40 @@ class Counter:
         用户看到的「费用条空（第 0 帧）到出现第一个像素（第 1 帧）还是不记录」
         就是这里：第 1 帧被起锚吞掉，整段录像的帧号从此差 1。
 
+        上限不是常数：周期开头「读不出来」的帧数随回费速率变多（见
+        _unreadable_head_frames），条最早能在第 (那个数 + 1) 帧被读到，上限取到
+        再往后一帧（那个数 + 2）—— 够放行开战起锚，再放宽就把「半路重现」也放进来了。
+
+        **为什么是 k，不是 k - 1**（2026-10-15 修）：k 是 _start 反推出来的相位号，
+        也就是「本费第几帧」，而 _start 同时把**累加器停在第 k 帧上**。报出去的帧数
+        必须和累加器一致 —— 报 k - 1 的话，面板说「已经走了 2 帧」、累加器却停在
+        第 3 帧，而之后每一拍的 delta 都是**相对累加器**算的，于是整个费用周期从头
+        到尾都少 1 帧。用户报的三条都是它：
+            30 帧/费  「费用条空（第 0 帧）到出现第一个像素（第 1 帧）还是不记录」；
+            25%(120)「第 6 帧开始识别，但是记的是第 4 帧」（模型第 5 帧起锚、报成 4）；
+            25%+负费(240)「到 119 帧的时候只有 117 帧」（实测起锚报 10、累加器在第 11 帧）。
+        真值就是 k：第 n 帧的画面读数 = 相位 n/一费帧数，本费已经走了 n 帧。
+
         为什么卡上限：条如果是在别的地方（切场景 / 关菜单 / 被遮挡）半路重新出现
         的，前面丢了多久无法证明，仍然按 0 起锚 —— 宁可少记也不猜。实测开战起锚
         落在周期第 2 / 第 3 帧（fill=6/7/8 -> k=2；fill=15 -> k=3），半路重现落在
         周期第 16 帧（fill=129 -> k=16），两者分得很开。补不上的标 anchor-late，
         面板 / CSV 里能直接看出来。
         """
-        head = int(k) - 1        # 从周期第 1 帧数到这一拍，已经过去了这么多帧
+        blind = self._unreadable_head_frames(speed)
+        first_visible = blind + 1    # 条第一次读得出来，最早落在本费第几帧
+        cap = max(ANCHOR_MAX_CATCHUP, first_visible + 1)
+        head = int(k)                # 含这一拍读到的那一帧，本费已经走了几帧
+        if visible and head < first_visible and not self._no_catchup:
+            # 走到起锚说明条是**看得见**的（TRACK 读数），而本费开头那 blind 帧画面上
+            # 根本画不出像素 —— 所以反推出来的相位不可能小于 first_visible。小于只可能是
+            # 「模型这一档最小可画宽度」和实测差 1~2px 造成的反推误差：60 帧/费那一档
+            # 的模型宽度只有 0 / 0 / 4 / 8…，实测给出 2，反推落回第 0 帧，于是那一两帧
+            # 被吞掉（用户实测「50% 从 3 帧才开始计数」）。按 first_visible 记，和 120
+            # 帧/费那一档（实测 2px 正好对上第 5 帧）行为一致。
+            head = first_visible
+            # 报了几帧，**累加器必须跟着挪到第 head 帧**（见 _shift_to_frame）。
+            self._shift_to_frame(head, speed)
         if self._no_catchup:
             # 清零之后第一次起锚：只补「清零那一刻之后」才走的帧。
             # _zero_phase = 清零时条已经画到第几帧；None = 当时没读到画面，不猜。
@@ -761,13 +839,37 @@ class Counter:
             base_k = self._zero_phase
             self._zero_phase = None
             if base_k is None:
-                return 'anchor', 0, ('anchor-late' if head > ANCHOR_MAX_CATCHUP else '')
+                return 'anchor', 0, ('anchor-late' if head > cap else '')
             head = int(k) - int(base_k)
-        if 0 < head <= ANCHOR_MAX_CATCHUP:
+        if 0 < head <= cap:
             return 'anchor-head', head, ''
-        if head > ANCHOR_MAX_CATCHUP:
+        if head > cap:
             return 'anchor', 0, 'anchor-late'
         return 'anchor', 0, ''
+
+    def _shift_to_frame(self, frame: int, speed: int = None) -> None:
+        """把累加器挪到「费用周期第 frame 帧」的相位上（起锚垫帧之后用）。
+
+        为什么非挪不可：起锚那一拍给出去的是 head 帧（_anchor_result），而累加器是
+        _resync 反推出来的（这一步可能是**小**的：60 帧/费那一档的模型宽度只有
+        0 / 0 / 4 / 8…，实测给 2，反推落回第 0 帧，head 却按 blind 记成 2）。显示说
+        「已经走了 2 帧」、累加器却停在 0 帧，两者差多少，下一拍 resync 就会补多少 ——
+        而那几帧起锚时**已经算过了**，于是同一段时间被记两遍。
+
+        用户 2026-10-15 实测到的就是它：50%（60 帧/费）起锚显示 2，下一拍读数一次 +4
+        （本该 +1），条走完一费是 63 帧而不是 60（那个 3 = 垫的 2 帧 + 反推少 1 帧）。
+
+        只往前走（frame 比当前相位大才挪）；挪完之后 last_phase 也要跟着刷新，
+        否则「上一拍相位」和累加器对不上，跨回费边界的判据会被带偏。
+        """
+        speed = self._speed() if speed is None else int(speed)
+        if self.timing is None:
+            self.timing = CostTiming(self.required)
+        while self.timing.frames_since_cycle_start < int(frame):
+            if self.timing.accumulator + speed + EPSILON_RAW >= self.required:
+                break                      # 不许跨回费边界：跨了就不是起锚该管的事
+            self.timing.advance_one_frame(speed)
+        self.last_phase = self.timing.phase()
 
     def _resync(self, observed: int, allow_wrap: bool, base: CostTiming = None,
                 speed: int = None, transition: str = '') -> tuple:
@@ -839,6 +941,40 @@ class Counter:
                 best_timing, best_err = nudged, e
         return best_timing, best_err
 
+    def _max_reanchor(self, observed: int, speed: int, dt: float) -> tuple:
+        """满费（MAX / MAX_FADE）之后的第一拍读数：只对相位，帧数交给挂钟。
+
+        为什么非这样不可：满费时条被游戏钉住（相位停在画满那一帧），像素里一点位置
+        信息都没有，那一段的帧数**只能**由挂钟通道数（见 _clock）。可条重新长出来的
+        时候，_resync 会从「上一拍认下的相位」——也就是满费前最后一根还看得见的条
+        （周期末尾）——一路推到当前读数，于是满费那几帧**又被数了一遍**。
+
+        一费 60 帧（50% 回费）那一档的末尾恰好有 1~2 帧是画满的（合成宽度顶到条槽），
+        所以条走完一费会变成 61~62 帧、120 帧那一档变成 123 帧（用户 2026-10-15 报的
+        「50% 条走完一费还是 61 帧或者 62 帧」就是它）。
+
+        做法：用 _start() 按当前读数重新起锚（和「有一段时间读不到画面」之后走同一条
+        路），像素通道这一拍一帧都不出；**这一拍自己的帧数接着由挂钟给** —— 上一拍
+        就是挂钟给的，通道不该在这里断一拍（断了就少 1 帧，60 多轮就是几十帧）。
+        但只在相位读得出来时才给：
+
+            宽度 > EMPTY_MAX_FILL   _start 锚得准，挂钟给几帧就记几帧
+            宽度落在一费开头的死区 相位定不出来，_start 会把累加器放在第 0 帧，
+                                   下一拍的 _resync 会把这一帧一次补上 —— 这里再记
+                                   就重复了，delta 保持 0
+
+        周期统计（_cycle_ref）在这里**归零**（_start 自己就会清掉）：满费把回费周期
+        从中间截断了，「上一次回费 -> 这一次回费」之间混着一段相位被钉住的满费时间，
+        拿它当「一费几帧」本身就是错的（试过按 elapsed 补一个边界，量出来每个周期
+        稳定多 1 帧 —— 那正是用户看到的「61 帧」）。下一个完整周期照常量得准。
+        """
+        self._after_max = False
+        self._start(observed, speed=speed)
+        if observed > EMPTY_MAX_FILL and self._max_rate > 0.0:
+            _mode, delta = self._clock(self._max_rate, dt)
+            return 'max-reanchor', delta, ''
+        return 'max-reanchor', 0, ''
+
     # ---------- 计数通道 ----------
 
     def _pixel(self, observed: int, dt: float, paused: bool, neg: bool = False) -> tuple:
@@ -852,6 +988,9 @@ class Counter:
         # 相位模型连续这么久都匹配不上 -> 模型已经不可信：按当前读数重新起锚，
         # 这一拍 delta = 0（丢掉的帧无法证明，宁可少记也不猜）。见 REJECT_RESYNC_SECONDS。
         speed = speed_for_cost_state(neg)
+        if self._after_max:
+            # 上一拍还是满费：满费那几帧是挂钟记的，这一拍接着由挂钟给（见 _max_reanchor）。
+            return self._max_reanchor(observed, speed, dt)
         stale = self._reject_s > REJECT_RESYNC_SECONDS
         # 负费的转场判据必须在重新起锚**之前**取：起锚会把 last_phase 重新写上，
         # 之后就没法和「上一拍」比了（前人 engine.rs 比的也是 last_accepted_phase）。
@@ -892,9 +1031,17 @@ class Counter:
         # 这两次都变成 bar-reject / 相位重锚，一帧都不多记。
         # 只放宽到 dt 不会误伤帧操：实测暂停键滞后那一刻的位移最多 1~2 帧，
         # 60*dt + DFILL_SLACK 足够放行（见 tools/check_speed_mix.py 的帧操用例）。
+        #
+        # 上限还要再加上「一费开头那几帧画不出像素」的死区（_unreadable_head_frames）：
+        # 死区里读数恒为 0，相位定不出来，模型只能先停在原地，等条重新长出来的那一拍
+        # **一次跨过整段死区** —— 那是合法位移，不是卡顿。死区宽度跟着回费速率变
+        # （30 帧/费 1 帧、60 帧/费 2 帧、120 帧/费 **4 帧**），比 DFILL_SLACK(3) 还宽：
+        # 不加这一项时，-75% 那一档开局每一拍都被判 pixel-jump，整个费用周期一帧都
+        # 记不到（回归项 check_state_synth.reduced_cost_rate_cycles 的 per=120 就是它）。
+        # 保护性不变：误判「绕一圈」是几十上百帧的跳，仍然远超这个上限。
         gap = dt if paused else max(dt, self._since_accept)
-        bound = LOGICAL_FPS * MAX_SPEED_M * gap
-        if k > bound + DFILL_SLACK:
+        bound = LOGICAL_FPS * MAX_SPEED_M * gap + self._unreadable_head_frames(speed)
+        if k > bound + DFILL_SLACK + BOUND_EPS:
             self._reject_s += dt
             return 'pixel-jump', 0, 'pixel-jump'
         self.timing = timing
@@ -934,6 +1081,34 @@ class Counter:
             return TRANS_ENTER_NEG
         return ''
 
+    def _clock_rate(self, m_now, has_digit: bool) -> tuple:
+        """这一拍按多少逻辑帧/秒推（满费挂钟通道用）。
+
+        返回 (每秒逻辑帧, warn)；读不出速率时返回 (0.0, warn) —— 调用方自己决定
+        「冻结」还是「退回旧的通道名」。
+
+        优先级（顺序不能换，子弹时间下倍速键上是没有数字的）：
+          1) 子弹时间：>>> 是**确定**的读数 —— 恒 BULLET_FPS = 6 帧/秒，与倍速设置无关
+             （实测见 BULLET_FPS 上面那段）；
+          2) 倍速键上画着数字、模板也认得出：30 x 数字；
+          3) 数字**画着**、模板认不出（corr 低、m 读成 nan）：沿用上次的倍速。按钮确实
+             画着、画的又不是子弹时间的箭头，只是这一拍字形糊了 —— 沿用比冻结少丢帧。
+             实测这种读数占真实会话 2898/20436 拍（docs 第 23 节）。last_m 的初值是 1X
+             （最常见的档），所以「从没读到过倍速」也不会瞎猜 2X；
+          4) 数字没画、箭头也不实心，但**这一局里刚刚还读到过数字**：按子弹时间兜底。
+             关卡内、运行中还能让那颗键整块空白的只有「拖干员」（见 BULLET_ASSUMED_WARN）；
+          5) 从没读到过倍速数字：不知道速率，返回 0。
+        """
+        if self._bullet:
+            return BULLET_FPS, ''
+        if m_now is not None:
+            return LOGICAL_FPS * m_now, ''
+        if has_digit:
+            return LOGICAL_FPS * self.last_m, 'speed-memory'
+        if self._digit_seen:
+            return BULLET_FPS, BULLET_ASSUMED_WARN
+        return 0.0, 'speed-unknown'
+
     def _clock(self, rate: float, dt: float) -> tuple:
         """满费挂钟通道：这一拍的墙钟时间折成逻辑帧，**带小数余量**。
 
@@ -953,6 +1128,6 @@ class Counter:
         只有 resync()（画面整段读不到、状态未知）才允许把余量丢掉。
         """
         acc = rate * dt + self._clock_frac
-        delta = int(acc)
+        delta = int(acc + CLOCK_ROUND_EPS)
         self._clock_frac = acc - delta
         return 'clock', delta

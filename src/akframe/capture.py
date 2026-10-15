@@ -15,20 +15,126 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
+import dataclasses
 from dataclasses import dataclass
 from typing import Iterator
 
 import numpy as np
 
-from .geometry import (Layout, Rect, bar_only_layout, layout_for,
-                       reframe_layout)
+from .features import fill_run
+from .geometry import (BAR_BAND_BOTTOM, BAR_BAND_TOP, Layout, Rect,
+                       bar_only_layout, layout_for, reframe_layout)
 from .paths import app_dir
 
 # sign = 费用数字左边那个减号（局内负费唯一的像素判据，见 features.read_sign）。
 # 它和另外三路一样抽成一路灰度流：多出来的是 43x11 px/帧，抽流耗时可以忽略。
 ROI_NAMES = ('bar', 'pause', 'speed', 'sign')
 FFMPEG_LABELS = {'bar': 'b', 'pause': 'p', 'speed': 's', 'sign': 'g'}
+
+
+# ---- 「白块起点 = 条槽左边缘」：抽流之前把 ROI 左端吸上去 ----
+# 为什么非吸不可：geometry.layout_for() 的横向锚点（距右边多少）是从另一段录像反推的，
+# 实测偏右 6~9px（见 align.py 顶部、calib.py 顶部两处实测记录）。而相位全靠条槽左端
+# 这一个锚点 —— 6px 在 50% 回费（一费 60 帧、每帧 4px）上是 1.5 帧、25%（每帧 2px）
+# 上是 3 帧，正好是用户报的「一费 61~62 帧」「119 帧只有 117 帧」「开头 2~3 帧识别不到」。
+# 白块起点是画面上本来就有的尺子（填充永远从条槽左端开始长），按它吸一次是**逐帧**准的。
+SNAP_FRAMES = 8        # 抽这么多帧来定白块起点
+SNAP_LPAD = 40         # 往左多看这么多列（= 允许的最大回移量）
+SNAP_MAX = 24          # 白块起点离 ROI 左端超过这么多像素就不敢吸（多半没圈对）
+SNAP_MIN_RUN = 6       # 白块短于这么多列当作噪声（和 calib.MIN_RUN 一致）
+SNAP_MIN_HITS = 2      # 至少要这么多帧看见白块才下结论
+SNAP_SEEKS = (0.35, 0.05, 0.0)   # 先看整段的 35% 处：录像开头常是菜单 / 剧情
+
+
+def _gray_strip(exe: str, video: str, rect: Rect, frames: int, seek: float = 0.0):
+    """抽 rect 这一小块的前 frames 帧灰度图（seek 秒处开抽）。"""
+    vf = 'format=gray,%s' % rect.crop_filter()
+    path = tempfile.mktemp(suffix='.gray', dir=tempfile.gettempdir())
+    head = [exe, '-hide_banner', '-loglevel', 'error']
+    if seek > 0.0:
+        head += ['-ss', '%.3f' % seek]
+    tail = ['-vsync', '0', '-f', 'rawvideo', '-pix_fmt', 'gray', '-y', path]
+    try:
+        subprocess.run(head + ['-i', video, '-vf', vf,
+                               '-frames:v', str(int(frames))] + tail, check=True)
+        data = np.fromfile(path, dtype=np.uint8)
+    finally:
+        if os.path.isfile(path):
+            os.remove(path)
+    per = rect.pixels
+    n = data.size // per
+    if n <= 0:
+        return np.zeros((0, rect.h, rect.w), np.uint8)
+    return data[:n * per].reshape(n, rect.h, rect.w)
+
+
+def snap_bar_left(exe: str, video: str, layout: Layout, size,
+                  duration: float = 0.0, stride: int = 1, frames: int = None) -> tuple:
+    """把费用条 ROI 的左边缘吸附到白块起点（右端不动，真宽跟着改）。返回 (layout, 说明)。
+
+    判据和 read_bar / fill_run 完全一致（逐列中位数 + 最长连续白），所以量到的那一列
+    就是读数以后会用的那一列 —— 这里不正，「每逻辑帧几像素」整个偏掉。
+    量不出来（这一小段里根本没有条：菜单 / 剧情 / 满费）就一个字都不改。
+    """
+    n_frames = int(frames or SNAP_FRAMES)
+    x0 = max(0, int(layout.bar.x) - SNAP_LPAD)
+    x1 = min(int(layout.width), int(layout.bar.x2) + 1)
+    if x1 - x0 < 8 or layout.bar.h <= BAR_BAND_BOTTOM:
+        return layout, '条框太窄 / 太矮，跳过左端吸附'
+    rect = Rect(x0, layout.bar.y, x1 - x0, layout.bar.h)
+    left_col = int(layout.bar.x) - x0
+    band0 = BAR_BAND_TOP
+    band1 = min(BAR_BAND_BOTTOM, rect.h)
+    offs = []
+    for frac in SNAP_SEEKS:
+        try:
+            strip = _gray_strip(exe, video, rect, n_frames, seek=frac * duration)
+        except Exception as exc:                       # noqa: BLE001 抽不动就不吸
+            return layout, '左端吸附没做成（%s），先按预测的框用' % exc
+        offs = []
+        for img in strip:
+            row = np.median(img[band0:band1, :], axis=0).astype(np.int16)
+            run = fill_run(row)
+            if run is None or run[1] - run[0] + 1 < SNAP_MIN_RUN:
+                continue
+            offs.append(float(run[0] - left_col))
+        if len(offs) >= SNAP_MIN_HITS:
+            break
+    if len(offs) < SNAP_MIN_HITS:
+        return layout, ('框里这几帧没看见白块（条空着 / 满费 / 这段不是关卡？）'
+                        '，左端先按预测的位置用')
+    med = int(round(float(np.median(offs))))
+    if med == 0:
+        return layout, '左端已经压在白块起点上（不动）'
+    if abs(med) > SNAP_MAX:
+        return layout, ('白块起点离 ROI 左端 %+dpx（超过 ±%dpx）—— 框可能本来就偏了，'
+                        '左端不动' % (med, SNAP_MAX))
+    # **宽和真宽都不动**：预测的误差是「整块平移」（横向锚点差几像素），不是「左端
+    # 被切掉一段」。跟着把宽也加上 |med| 会让模型以为条槽宽了 5px（实测 239 -> 244），
+    # 每逻辑帧的像素数跟着偏 2%，一个周期又是 1 帧的偏差 —— 只是把误差从一头挪到另一头。
+    x = int(layout.bar.x) + med
+    true_w = float(layout.bar_width_f)
+    # 看得见的宽 = min(真宽, 到画面右边缘还有多少)：预测那份就是被右边缘裁成这么宽的，
+    # 左端往左挪 5px 之后能多看到 5px，就得让它多看到 —— 否则条快满时读数先顶到
+    # ROI 右边缘、最后那一帧的相位再也长不出来（一费又少 1 帧）。
+    w = min(int(round(true_w)), int(layout.width) - x)
+    if x < 0 or w < 8 or true_w < 8.0:
+        return layout, '吸附之后 ROI 跑到画面外了（%+dpx），左端不动' % med
+    out = reframe_layout(layout, 0, 0, layout.width, layout.height)
+    out = _replace_bar(out, Rect(x, int(layout.bar.y), w, int(layout.bar.h)), true_w)
+    try:
+        out.validate()
+    except ValueError:
+        return layout, '吸附之后的 ROI 过不了自检，左端不动'
+    return out, ('费用条 ROI 左端按白块起点吸附 %+dpx（x %d -> %d，宽 %d 不动）'
+                 % (med, layout.bar.x, x, w))
+
+
+def _replace_bar(layout: Layout, bar: Rect, true_w: float) -> Layout:
+    """换掉 bar 那一路（其余不动）。用 dataclasses.replace 保持 Layout 的其他字段。"""
+    return dataclasses.replace(layout, bar=bar, bar_width_frac=float(true_w))
 
 
 def roi_names(layout) -> tuple:
@@ -283,7 +389,8 @@ def open_video(path: str, outdir: str, ffmpeg: str | None = None,
                client_size: tuple | None = None,
                offset: tuple | None = None,
                bar_box: tuple | None = None,
-               layout: Layout | None = None) -> tuple:
+               layout: Layout | None = None,
+               snap: bool = True, notes: list = None) -> tuple:
     """准备视频输入，返回 (layout, fps, 帧迭代器)。
 
     ui_scaler   游戏内「UI 缩放」；None = 用默认档 1.0（不改变 ROI）。
@@ -293,6 +400,10 @@ def open_video(path: str, outdir: str, ffmpeg: str | None = None,
     bar_box     直接给出费用条槽在画面里的像素框 (x, y, w, h)。画面被放大 / 裁剪过、
                 几何推不出来时用，见 geometry.bar_only_layout。
     layout      整套 ROI 直接给全（比 bar_box 更底层，主要给测试用）。
+    snap        True（默认）= 抽流前按白块起点把费用条 ROI 左端吸准（见 snap_bar_left）。
+                **只有「按规则预测出来的 ROI」才需要吸**：用户框选 / 校准表里量过的那份
+                本来就压在像素上。测试要一份「一模一样的预测 ROI」时可以关掉。
+    notes       传一个 list 进来，吸附结果那句话会 append 进去（CLI / 面板打印用）。
     """
     # 缓存命中时连 ffmpeg 都不需要（抽流是一次性成本，之后只读 .raw）
     # 缓存命中时连 ffmpeg 都不需要 —— 但只有「按视频尺寸算 ROI」这一路才敢直接复用
@@ -304,6 +415,7 @@ def open_video(path: str, outdir: str, ffmpeg: str | None = None,
             return Layout.from_dict(cached['layout']), float(cached['fps']), iter_cached(outdir)
 
     exe = find_ffmpeg(ffmpeg)
+    info = None
     if size is None:
         info = probe_video(exe, path)
         if info.size is None:
@@ -312,11 +424,22 @@ def open_video(path: str, outdir: str, ffmpeg: str | None = None,
     scaler = ui_scaler if ui_scaler is not None else 1.0
     if bar_box is not None:
         layout = bar_only_layout(size[0], size[1], Rect(*[int(v) for v in bar_box]))
+        predicted = True
     elif layout is None:
         cw, ch = client_size if client_size else size
         layout = layout_for(cw, ch, scaler)
         if offset:
             layout = reframe_layout(layout, int(offset[0]), int(offset[1]), size[0], size[1])
+        predicted = True
+    else:
+        predicted = False          # 调用方直接给的 layout：里面装什么就信任什么
+    if snap and predicted:
+        if info is None:
+            info = probe_video(exe, path)
+        layout, why = snap_bar_left(exe, path, layout, size,
+                                    duration=float(info.duration or 0.0))
+        if notes is not None:
+            notes.append(why)
     meta = extract(exe, path, layout, outdir, force=force)
     return layout, float(meta['fps']), iter_cached(outdir)
 

@@ -7,12 +7,17 @@
 
     采样 60Hz、2 倍速 -> 每个采样恰好 1 个逻辑帧
 
-**相位怎么走**：一费的 30 个逻辑帧对应相位 1/30, 2/30, ..., 29/30, 30/30(=1.0)，
-也就是可见宽度 0, 8, 17, ..., 233, **240**（回费帧把条画满，下一帧才归零）。
-这是从实测录像里数出来的：回卷处的宽度序列是 `... 223, 232, 240, 0, 8 ...`。
-早先这里写成 `(phase % 30)/30`（回费帧宽度 0），等于给模型喂了一条
-「有两个连续 0 宽帧、没有 240」的信号 —— 那和游戏不一样，自检也就测不出
-回费帧匹配不上的问题。
+**相位怎么走**：一费的 30 个逻辑帧对应相位 1/30, 2/30, ..., 29/30, 0 —— 最后
+那一帧（第 30 帧）就是回费那一帧，**它的条是空的**。所以一费的收尾在画面上是
+`..., 236, 0, 0, 5, ...`：回费帧和它的后一帧都是 0 宽，条要到第 3 帧才重新长出来。
+
+2026-10-15 拿 -50% 的实测录像（Desktop 20.43.51.02，客户区 2558x1440 @(16,45)）
+逐帧核过：那条费用周期里条**从没画到过满宽**，最后可见宽度 236，下一拍整条消失、
+同一个采样上费用数字 +1（拿数字位的二值图逐帧比对，只有那一帧的字形变了）。
+
+早先这里按 `... 223, 232, 240, 0, 8 ...` 喂（回费帧画满、后一帧才归零）—— 那等于
+把「回费前最后一帧」当成了回费帧，相位模型因此每费多算一帧：60 数成 61、120 数成
+121，正是用户 2026-10-15 报的那个。
 
 期望误差 0 帧。合成信号必须按游戏真实的「相位 -> 可见宽度」曲线来画（synthesis.py），
 不能假设条宽是线性的：那样喂进去的就不是游戏里的条，测出来的差异说明不了任何问题
@@ -21,10 +26,13 @@
 这里主要防四类回归：
     1. 状态机丢余量（曾经换个通道就把余量清零，几十次换通道少算好几帧）；
     2. 相位重同步选错 k（比如在「头两帧条还没动」的平段上把 k 选大/选小）；
-    3. 帧操时「回费后条归零的那一拍」不当场计数（要等条重新长出来才补 2 帧，
-       实测晚 0.9 秒 —— 就是用户报的「第一帧记不到」）；
+    3. 帧操时「回费那一拍」不当场计数（那一拍的读数能从「上一拍画满」推出来，
+       见 state.WRAP_MIN_PREV_PHASE；不记就要等条重新长出来才补，实测晚 0.9 秒 ——
+       就是用户报的「第一帧记不到」）；
     4. 暂停期间条读不出来时凭空补帧（实测一段 76 秒暂停录像被多记 61 帧）；
-    5. 漏采狠到跨过 1/4 个周期时相位模型把自己锁死（见 stale_phase_reanchor）。
+    5. 漏采狠到跨过 1/4 个周期时相位模型把自己锁死（见 stale_phase_reanchor）；
+    6. 减费档位（60 / 120 帧/费）与局内负费下，一拍走不到一帧时按挂钟猜帧 ——
+       几十个周期攒下来就是几帧偏差（见 reduced_rate_accuracy）。
 
 用法：python tools/check_state_synth.py
 """
@@ -37,11 +45,13 @@ import numpy as np
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'src'))
 
-from akframe.features import (BarReading, PauseReading, SignReading,  # noqa: E402
-                              SpeedReading)
-from akframe.fp24 import SCALE, SPEED_NEGATIVE, SPEED_NORMAL, CostTiming  # noqa: E402
+from akframe.features import (EMPTY_MAX_FILL, BarReading, PauseReading,  # noqa: E402
+                              SignReading, SpeedReading)
+from akframe.fp24 import (SCALE, SPEED_NEGATIVE, SPEED_NORMAL, CostTiming,  # noqa: E402
+                         required_from_frames)
 from akframe.state import (ANCHOR_MAX_CATCHUP, BULLET_FPS,  # noqa: E402
-                           LOGICAL_FPS, REJECT_RESYNC_SECONDS, Counter)
+                           LOGICAL_FPS, REJECT_RESYNC_SECONDS, Counter,
+                           speed_for_cost_state)
 from akframe.synthesis import synthesized_width                       # noqa: E402
 
 BAR_W = 120
@@ -52,12 +62,16 @@ SPEED = SpeedReading(digit_ratio=0.30, corr_2x=1.0, has_digit=True, m=2.0,
 
 
 def phase_frac(n: float, per: float = 30.0) -> float:
-    """第 n 个逻辑帧应该画在什么相位上（1/per .. per/per，循环）。
+    """第 n 个逻辑帧应该画在什么相位上（1/per, 2/per, ..., (per-1)/per, 0）。
 
-    实测：回费那一帧相位是 1.0（条画满 = 宽 240），下一帧才回到 1/per（宽 0）。
+    实测（2026-10-15 回费 -50% 录像逐帧核过）：**回费那一帧条是空的**（相位 0），画满的那一帧
+    在它前面（宽度已经顶到条槽）。一个费用周期的相位序列是 1/per .. (per-1)/per 再到 0，
+    和计数器内部那个 k（从费用周期原点往前推了几帧）**一一对应**：这里的 n 就是 k，
+    一个周期 per 帧里最后一帧（n = per）正是回费那一帧。所以只能用 n % per；
+    用 (n - 1) % per 会把起锚 / 回费边界全部错一帧。
     per = 一费几个逻辑帧：普通关卡 30，回费速度 -50% 是 60，-75% 是 120。
     """
-    return (((n - 1) % per) + 1) / float(per)
+    return (n % per) / float(per)
 
 
 def bar(fill, state):
@@ -117,36 +131,60 @@ def cycle_lengths(frames=3000, fps=60.0, speed_m=2.0, frames_per_cost=30.0):
 
 
 def frame_step_precision(steps=300, fps=60.0):
-    """帧操（暂停着一下一下推）时，每一拍都必须**当场** +1 —— 包括回费后条归零的那一拍。
+    """帧操（暂停着一下一下推）时总帧数必须一帧不差，回费那一拍必须当场记账。
 
     实测录像 `2026-10-04 19-36-06`（2560x1600@60fps，客户区 2558x1494 @(-5,45)）：
-    条走满之后游戏会把条收起来一拍做回费动画，那一帧读出来是 fill=0 / EMPTY。
-    旧逻辑把它归到「暂停 + 空条 -> 不计数」，于是回费边界的两帧要攒到条重新长出来
-    才一次补上（这次晚了 55 个视频帧 = 0.9 秒），打轴对不上，用户看到的就是
-    「第一帧记不到」。
+    条走满之后游戏会把条收起来做回费动画。2026-10-15 又拿 -50% 的录像（客户区
+    2558x1440 @(16,45)）逐帧核过一遍：**回费那一帧条就是空的（相位 0）**，它的
+    **后一帧**相位只有 1/per、画出来还是 0 宽 —— 一费的收尾在画面上是
+    `..., 236, 0, 0, 5, ...`，中间连着两拍读不出位置信息。
 
-    返回「没有当场记 1 帧」的那些拍（空列表 = 通过）。
+    旧逻辑把这连续两拍都归到「暂停 + 空条 -> 不计数」，要攒到条重新长出来才一次
+    补上（实测晚了 55 个视频帧 = 0.9 秒），打轴对不上 —— 用户报的「第一帧记不到」。
+
+    现在：**回费帧当场 +1**（读数从「上一拍画满」推得出来，见 state.WRAP_MIN_PREV_PHASE）；
+    它后面那拍 0 宽帧没有位置信息，只能冻结，由再下一拍一次 +2 补齐。
+
+    返回失败项列表（空 = 通过）。断言：
+      * 每拍 delta 属于 {0,1,2}，从不为负、也不一次补 3 帧以上；
+      * 一次补 2 帧只准接在「冻结过的那拍」后面；
+      * 只有读不出位置信息的拍（宽度 <= EMPTY_MAX_FILL）才准冻结；
+      * 跑完之后累计帧数**正好等于游戏走过的逻辑帧数**（一拍 = 一个逻辑帧）。
+        最后这条是这次回归的要害：相位模型一旦把回费帧当成「画满」，这里就会多 1。
     """
     c = Counter(BAR_W, fps=fps)
+    game = CostTiming(SCALE)
     dt = 1.0 / fps
     t = 0.0
-    phase = 0
-    started = False
-    missed = []
-    for i in range(1, steps + 1):
+    bad = []
+    prev_delta = 0
+    idx = 0
+    fill = 0
+    for _ in range(steps):
+        idx += 1
         t += dt
-        phase += 1
-        fill = synthesized_width(BAR_W, float(BAR_W), phase_frac(phase))
-        r = c.step(i, t, bar(fill, 'TRACK' if fill > 4 else 'EMPTY'), PAUSED, SPEED)
-        if not started:
-            # 起锚那一拍单独看（见 anchor_head_catchup）：它要补上「费用周期开头
-            # 还没长出像素的那几帧」，所以不是恒等于 1。
-            if r.mode != 'idle':
-                started = True
-            continue
-        if r.delta != 1:
-            missed.append((i, fill, r.bar_state, r.mode, r.delta))
-    return missed
+        game.advance_one_frame(SPEED_NORMAL)
+        fill = synthesized_width(BAR_W, float(BAR_W), game.phase())
+        r = c.step(idx, t, bar(fill, 'TRACK' if fill > EMPTY_MAX_FILL else 'EMPTY'),
+                   PAUSED, SPEED)
+        if not 0 <= r.delta <= 2:
+            bad.append((idx, fill, r.mode, r.delta, 'delta 只能是 0/1/2'))
+        elif r.delta == 2 and prev_delta != 0:
+            bad.append((idx, fill, r.mode, r.delta, '只有补「冻结过的那拍」时准一次 +2'))
+        elif r.delta == 0 and fill > EMPTY_MAX_FILL and idx > 5:
+            bad.append((idx, fill, r.mode, r.delta, '读数里有位置信息就不该冻结'))
+        prev_delta = r.delta
+    # 收尾：最后几拍可能正好停在 0 宽帧上（它要等下一拍才补），喂到条重新画出来为止
+    while fill <= EMPTY_MAX_FILL:
+        idx += 1
+        t += dt
+        game.advance_one_frame(SPEED_NORMAL)
+        fill = synthesized_width(BAR_W, float(BAR_W), game.phase())
+        c.step(idx, t, bar(fill, 'TRACK' if fill > EMPTY_MAX_FILL else 'EMPTY'),
+               PAUSED, SPEED)
+    if c.elapsed != idx:
+        bad.append((idx, None, '累计帧数', c.elapsed, idx))
+    return bad
 
 
 def anchor_head_catchup(fps=60.0):
@@ -155,7 +193,8 @@ def anchor_head_catchup(fps=60.0):
     条在周期第 1 帧画出来宽度是 0 —— 和关卡外根本没画条长得一模一样，所以第一次
     读到条时通常已经是第 2 帧（实测 fill=6/7/8）或第 3 帧（fill=15）。老逻辑起锚
     一律记 0 帧，于是「费用条空（第 0 帧）到出现第一个像素（第 1 帧）」那一帧被吞掉，
-    整段录像的帧号从此差 1。现在起锚这一拍补 (n0 - 1) 帧（n0 = 起锚落在周期第几帧）。
+    整段录像的帧号从此差 1。现在起锚这一拍补 **n0 帧**（n0 = 起锚落在周期第几帧，
+    也就是「含这一帧在内，本费已经走了几帧」—— 和 _start 停在累加器上的那个相位一致）。
 
     返回失败项列表（每个元素：(起锚相位, (mode, delta), 期望 delta, 一周期实测帧数)）。
     """
@@ -180,9 +219,12 @@ def anchor_head_catchup(fps=60.0):
                 at_anchor = c.elapsed
             if n == n0 + 30:
                 at_same = c.elapsed
-        want = n0 - 1 if n0 - 1 <= ANCHOR_MAX_CATCHUP else 0
+        cap = max(ANCHOR_MAX_CATCHUP, c._unreadable_head_frames() + 2)
+        want = n0 if n0 <= cap else 0
         if got[1] != want:
             bad.append((n0, got, want, None))
+        elif want and at_anchor != n0:   # 补了帧的场合，elapsed 就该是本费走到的帧号
+            bad.append((n0, got, 'elapsed=%d' % n0, at_anchor))
         elif at_same - at_anchor != 30:
             bad.append((n0, got, want, at_same - at_anchor))
     return bad
@@ -200,7 +242,9 @@ def clear_zero_start(fps=60.0):
         B 清零时条已经有像素（fill=第一个像素）—— 清零那一拍 delta=0
           （那 1 帧清零前就数过了），之后正常 +1；
         C 清零时条是空的（本费第 0 帧，fill=0）—— 清零之后走到「第一个像素」
-          那 1 帧必须记（用户报的「第零帧到第一帧记不到」就是这里被吃掉的）。
+          那几帧必须记（用户报的「第零帧到第一帧记不到」就是这里被吃掉的）。
+          注意第一个像素落在**本费第 2 帧**（第 1 帧画出来是 0 宽），所以清零后
+          第一次读到条时 elapsed 该是 2，不是 1。
 
     返回失败项列表（每项：(场景, 拍号, (mode, delta), 期望 delta, elapsed, 期望 elapsed)）。
     """
@@ -222,7 +266,9 @@ def clear_zero_start(fps=60.0):
     c = Counter(BAR_W, fps=fps)
     c.mark_zero_start(first_px)              # 清零时条已经在第一个像素上
     t, idx = 0.0, 0
-    for k in range(40):
+    # 只喂到本费第 29 帧：再往后就跨回费边界了（第 30 帧是归零帧），
+    # 边界那两拍的行为由 frame_step_precision / wrap_frame_sampled_or_missed 专门覆盖。
+    for k in range(28):
         idx += 1
         t += dt
         fill = synthesized_width(BAR_W, float(BAR_W), phase_frac(2 + k))
@@ -236,59 +282,67 @@ def clear_zero_start(fps=60.0):
     c = Counter(BAR_W, fps=fps)
     c.mark_zero_start(0)                     # 清零时条是空的（本费第 0 帧）
     t, idx = 0.0, 0
-    for k in range(40):
+    for k in range(28):                      # 同上：不跨回费边界
         idx += 1
         t += dt
         fill = synthesized_width(BAR_W, float(BAR_W), phase_frac(2 + k))
         r = c.step(idx, t, bar(fill, 'TRACK' if fill > 4 else 'EMPTY'), RUN, SPEED)
-        want_e = k + 1                       # 第一个像素那一拍就要有 1 帧
-        if r.delta != 1 or c.elapsed != want_e:
-            bad.append(('C 清零时条空', k, (r.mode, r.delta), 1, c.elapsed, want_e))
+        # 这一拍画面是「本费第 2 + k 帧」：清零时条是空的（第 0 帧），之后第 1、2 帧
+        # 都真的走过了，所以 elapsed 从 2 起步。
+        want_e = k + 2
+        want_d = 2 if k == 0 else 1
+        if r.delta != want_d or c.elapsed != want_e:
+            bad.append(('C 清零时条空', k, (r.mode, r.delta), want_d, c.elapsed, want_e))
             break
     return bad
 
 
 def wrap_frame_sampled_or_missed(fps=60.0):
-    """回费边界那两拍：归零帧「采到了」和「漏采了」必须能被分开。
+    """回费边界那两拍：采样卡了一下不许算错，而且能看出来是哪一种。
 
-    1 倍速下一个逻辑帧只有 33.3ms，采样一旦卡一下就会整帧没采到。两种情况的
-    帧号总数都对（都是 +2），但落点不同：
+    回费那一帧条是空的（相位 0），它的后一帧相位只有 1/per、画出来还是 0 宽 ——
+    边界上**有两拍**读不出位置信息（逐帧核过，见 frame_step_precision）。采样卡一下
+    就会吞掉其中一拍，三种走法都合法，落点各差一拍：
 
-        采到  ：240 -> 0（wrap,     +1）-> 6（pixel,     +1）
-        漏采  ：240 ->            6（wrap-missed, +2）
+        每拍都采到    ： 0（wrap 当场 +1）-> 0（0 宽，冻结 0）-> 5（+2 补齐）
+        漏采 0 宽那拍 ： 0（wrap 当场 +1）-> 5（+2 补齐）
+        漏采归零那拍  ： 0（wrap 当场 +1，落在归零帧上）-> 5（+2 补齐）
 
-    用户报的「有时候第 0 帧还是不读、第一帧补了两帧」就是后者。跑得快（≥120Hz）
-    采样就基本不会发生；这个自检保证「真发生了也能看出来」，不会和普通漏帧混在一起。
+    三种走法的累计帧数都一样（落到条重新画出来那拍时正好对上），差别只在中间
+    差了一拍的相位 —— 也就是用户看到的「数字暂停了一下、然后一次跳 2」。
 
-    返回失败项列表。
+    用户报的「有时候第 0 帧还是不读、第一帧补了两帧」就是后面两种里的一种。
+    采样够快（≥120Hz）基本不会发生；这里保证「真发生了也一帧不差」。
+
+    返回失败项列表（每项：(场景, 实际 (mode, delta) 序列, 期望的 delta 序列,
+    累计帧数, 真值)）。
     """
     bad = []
-    for sampled in (True, False):
+    cases = [
+        ('每拍都采到', (30, 31, 32), [1, 0, 2]),
+        ('漏采 0 宽那一拍', (30, 32), [1, 2]),
+        ('漏采归零那一拍', (31, 32), [1, 2]),
+    ]
+    for name, fed, want in cases:
         c = Counter(BAR_W, fps=fps)
+        game = CostTiming(SCALE)
         dt = 1.0 / fps
-        t = 0.0
-        idx = 0
-        # 先跑完一个周期，把相位推到 240（周期第 30 帧）
-        for n in range(1, 31):
+        t, idx = 0.0, 0
+        beats = []
+        for n in range(1, 33):
+            game.advance_one_frame(SPEED_NORMAL)
+            if n > 29 and n not in fed:
+                continue                        # 这一拍整拍没采到：画面什么都没读
             idx += 1
             t += dt
-            fill = synthesized_width(BAR_W, float(BAR_W), phase_frac(n))
-            c.step(idx, t, bar(fill, 'TRACK'), RUN, SPEED)
-        rows = []
-        if sampled:
-            idx += 1
-            t += dt
-            rows.append(c.step(idx, t, bar(0, 'EMPTY'), RUN, SPEED))   # 周期第 1 帧
-        for n in (2, 3):
-            idx += 1
-            t += dt
-            fill = synthesized_width(BAR_W, float(BAR_W), phase_frac(n))
-            rows.append(c.step(idx, t, bar(fill, 'TRACK'), RUN, SPEED))
-        got = [(r.mode, r.delta) for r in rows]
-        want = [('wrap', 1), ('pixel', 1), ('pixel', 1)] if sampled \
-            else [('wrap-missed', 2), ('pixel', 1)]
-        if got != want:
-            bad.append(('采到归零帧' if sampled else '漏采归零帧', got, want))
+            fill = synthesized_width(BAR_W, float(BAR_W), game.phase())
+            r = c.step(idx, t, bar(fill, 'TRACK' if fill > EMPTY_MAX_FILL else 'EMPTY'),
+                       RUN, SPEED)
+            if n >= 30:
+                beats.append((r.mode, r.delta))
+        truth = max(fed)                        # 一拍一个逻辑帧 -> 真值就是帧号
+        if [d for _, d in beats] != want or c.elapsed != truth:
+            bad.append((name, beats, want, c.elapsed, truth))
     return bad
 
 
@@ -346,7 +400,7 @@ def stale_phase_reanchor(fps=60.0):
     c2 = Counter(BAR_W, fps=fps)
     t2 = 0.0
     triggered = 0
-    for i, n in enumerate(range(2, 122), start=1):
+    for i, n in enumerate(range(2, 123), start=1):
         t2 += dt
         fill = synthesized_width(BAR_W, float(BAR_W), phase_frac(n))
         r = c2.step(i, t2, bar(fill, 'TRACK'), RUN, SPEED)
@@ -354,8 +408,13 @@ def stale_phase_reanchor(fps=60.0):
             triggered += 1
     if triggered:
         bad.append(('连续正常推进误触发重锚', triggered, 0))
-    if c2.elapsed != 120:
-        bad.append(('对照段累计帧数', c2.elapsed, 120))
+    # 喂的是本费第 2..122 帧（121 拍），起锚落在第 2 帧上 —— 本费已经走过 2 帧
+    # （第 1 帧画出来是 0 宽，但也走过了），所以累计是 122。
+    # 为什么不是喂到第 121 帧：第 121 帧的相位只有 1/30、画出来还是 0 宽，那一拍
+    # 没有位置信息，要等下一拍才补得上（宁可晚一拍也不猜）。少喂那一拍，累计就停在
+    # 120 —— 看着像少记 1 帧，其实只是还没结账。
+    if c2.elapsed != 122:
+        bad.append(('对照段累计帧数（起锚补的是本费真走过的 2 帧）', c2.elapsed, 122))
     return bad
 
 
@@ -450,6 +509,207 @@ def reduced_cost_rate_cycles():
     return bad
 
 
+def _blind_head_frames(per):
+    """独立算一遍「费用周期开头有几帧读不出来」：宽度还没超过 EMPTY_MAX_FILL 的那几帧。
+
+    故意不复用 Counter._unreadable_head_frames —— 两条路各算各的，对不上才说明有一边错了。
+    """
+    for n in range(1, int(per) + 1):
+        w = synthesized_width(BAR_W, float(BAR_W), phase_frac(n, per))
+        if w > EMPTY_MAX_FILL:
+            return n - 1
+    return 0
+
+
+def reduced_rate_anchor_head(fps=60.0):
+    """减费档位的起锚补帧：上限必须跟着回费速率一起变。
+
+    一费开头有几帧读不出来 = 宽度还没超过 EMPTY_MAX_FILL 的那几帧。它随回费
+    速率一起变多（30 / 60 / 120 帧/费 -> 1 / 2 / 4 帧，见 _blind_head_frames），
+    可老代码把上限写死 2 —— 只在 30 帧/费那一档够用。
+
+    实测（2026-10-13，用户两段录像）：25% = 120 帧/费、50% = 60 帧/费 的开战起锚
+    都落在读得出来的第一帧，被写死的上限挡掉、判 anchor-late / delta=0，一开局就
+    白丢好几帧。用户报的「开头几帧识别不到」「25% 完全不准」就是它。
+
+    期望值是 blind + 1（不是 blind）：起锚落在第 blind + 1 帧，本费已经走过
+    blind + 1 帧（第 1..blind 帧画出来是 0 宽，但它们照样走过了）。
+
+    返回失败项列表（每项：(per, 实际, 期望)）。
+    """
+    bad = []
+    for per in (30, 60, 120):
+        blind = _blind_head_frames(per)
+        if blind <= 0:
+            bad.append((per, '几何算出来开头没有读不到的帧', '>0'))
+            continue
+        # ① 上限算对了没有
+        got_blind = Counter(BAR_W, fps=fps, frames_per_cost=per)._unreadable_head_frames()
+        if got_blind != blind:
+            bad.append((per, '开头读不到的帧数 %s' % got_blind, blind))
+        # ② 开战起锚：条第一次被读到就在第 (blind + 1) 帧 -> 那 blind 帧必须补上
+        c = Counter(BAR_W, fps=fps, frames_per_cost=per)
+        dt = 1.0 / fps
+        t = 0.0
+        idx = 0
+        for _ in range(5):        # 关卡外待几拍：条没画出来
+            idx += 1
+            t += dt
+            c.step(idx, t, bar(0, 'EMPTY'), RUN, SPEED)
+        got = None
+        for n in range(1, 4 * int(per) + 1):
+            idx += 1
+            t += dt
+            fill = synthesized_width(BAR_W, float(BAR_W), phase_frac(n, per))
+            # 和 features.read_bar 同一条规则：fill <= EMPTY_MAX_FILL 一律算空条
+            r = c.step(idx, t, bar(fill, 'TRACK' if fill > EMPTY_MAX_FILL else 'EMPTY'),
+                       RUN, SPEED)
+            if got is None and r.mode != 'idle':
+                got = (r.mode, r.delta)
+        if got != ('anchor-head', blind + 1):
+            bad.append((per, '开战起锚 %s' % (got,), ('anchor-head', blind + 1)))
+        # ③ 半路重现（周期中段突然又能读到）一帧都不许补
+        c2 = Counter(BAR_W, fps=fps, frames_per_cost=per)
+        t, idx = 0.0, 0
+        for _ in range(5):
+            idx += 1
+            t += dt
+            c2.step(idx, t, bar(0, 'EMPTY'), RUN, SPEED)
+        got2 = None
+        for n in range(int(per) // 2, int(per) + 1):
+            idx += 1
+            t += dt
+            fill = synthesized_width(BAR_W, float(BAR_W), phase_frac(n, per))
+            r = c2.step(idx, t, bar(fill, 'TRACK' if fill > EMPTY_MAX_FILL else 'EMPTY'),
+                        RUN, SPEED)
+            if got2 is None and r.mode != 'idle':
+                got2 = (r.mode, r.delta)
+        if got2 != ('anchor', 0):
+            bad.append((per, '半路重现 %s' % (got2,), ('anchor', 0)))
+    return bad
+
+
+def reduced_rate_accuracy(fps=60.0):
+    """减费档位（60 / 120 帧/费）与局内负费的**逐周期准确性**。
+
+    为什么单列一条：这几档一费要几十上百帧，采样一拍走不到一帧（1X 下 60Hz 采样
+    每拍 0.5 帧、条连着两拍一般宽），任何「按挂钟补一拍」的写法都会把几十个周期
+    下来误差攒成几帧 —— 用户 2026-10-15 实测报的就是「50% 一费被垫成 62 帧」
+    「25% 到 119 帧只有 117 帧」。像素通道的规矩是不碰挂钟：条不动就不动。
+
+    三段都验：
+      ① 逐周期长度只能是 per / per+1（定点累加器的边界周期，见 fp24）；
+      ② 累计帧数 == 真值（±1：起锚那一帧）；
+      ③ 1X（每拍 0.5 帧，条连着两拍一般宽）和 2X（每拍 1 帧）都要成立 —— 采样率
+        一变就错说明在按挂钟猜。
+
+    返回失败项列表。
+    """
+    bad = []
+    dt = 1.0 / fps
+    # (一费几个逻辑帧, 是否局内负费, 每几拍走一个逻辑帧)
+    cases = [(30.0, False, 1), (60.0, False, 1), (120.0, False, 1),
+             (30.0, False, 2), (60.0, False, 2), (120.0, False, 2),
+             (60.0, True, 1), (120.0, True, 1), (120.0, True, 2)]
+    for per, neg, adv in cases:
+        cycle = per * (2 if neg else 1)
+        c = Counter(BAR_W, fps=fps, frames_per_cost=per)
+        t = 0.0
+        # 尽头多采一拍：条画满那一帧（相位 1.0）和 0.99 在画面上同宽（都被条槽宽截住），
+        # 模型要等下一拍「条归零」才把它记上 —— 这是相位本身的歧义，不是丢帧。
+        # 采样停在那一下回卷上，账才是平的（真值仍然按「走了几个逻辑帧」算）。
+        samples = 3 * int(cycle) * adv + 1
+        for i in range(1, samples + 1):
+            t += dt
+            n = (i - 1) // adv + 1
+            fill = synthesized_width(BAR_W, float(BAR_W), phase_frac(n, cycle))
+            sign = SignReading(negative=neg, run=40 if neg else 18,
+                               rows=3 if neg else 0, thr=21)
+            c.step(i, t, bar(fill, 'TRACK' if fill > EMPTY_MAX_FILL else 'EMPTY'),
+                   RUN, SPEED, sign)
+        # 喂进去的相位是 n = 1 .. (samples - 1) // adv + 1，所以走的逻辑帧数就是这个
+        # （adv = 2 时 samples // adv 会少算 1 帧 —— 末尾那一拍只走了半个逻辑帧）。
+        truth = (samples - 1) // adv + 1
+        tag = '%d 帧/费%s%s' % (per, ' + 负费' if neg else '', ' @1X' if adv == 2 else ' @2X')
+        if any(v < cycle or v > cycle + 1 for v in c.cycle_lengths):
+            bad.append((tag, '逐周期长度', c.cycle_lengths[:6], '%d / %d' % (cycle, cycle + 1)))
+        if abs(c.elapsed - truth) > 1:
+            bad.append((tag, '累计帧数', (c.elapsed, truth)))
+        if c.elapsed != c.pixel_frames + c.clock_frames:
+            bad.append((tag, 'elapsed 与分批计数不一致',
+                        (c.elapsed, c.pixel_frames + c.clock_frames)))
+    return bad
+
+
+def reduced_rate_fp24_exact(fps=60.0, cycles=6, tail=24):
+    """减费档位 / 局内负费：条由 **fp24 模型自己**画出来，周期长度必须一帧不差。
+
+    上一条（reduced_rate_accuracy）用的是「每周期恰好 per 帧」的简化编码，而游戏的
+    累加器有**边界周期** —— required 是「每逻辑帧增量」凑出来的，攒够误差的那一费会
+    多出 1 帧（fp24 的说明：30 帧/费是 `30*10, 31`）。简化编码在那种周期上画出来的
+    画面和游戏本身对不上，只能验到「±1 帧」。
+
+    这一条把 CostTiming 的输出直接当画面喂回去 —— 它才是「游戏里到底走了几个逻辑帧」
+    的真值，所以**逐周期长度**要求严格相等（`[120, 121]`、`[240, 241]` 这种边界周期
+    也要一模一样）。用户 2026-10-15 报的「50% 一费 62 帧」「25% 到 119 帧只有 117 帧」
+    两条都能在这一条上现形：前者是垫帧垫多了，后者是回卷那一拍被物理上限误杀。
+
+    累计帧数只要求「不吃掉超过开头读不出来的帧」：一费开头那几帧画出来是 0 宽，
+    和「压根没画条」长得一样（`_unreadable_head_frames`），起锚时只能保守地少记
+    —— 这是帧号起点差 1~2 帧，不是每费都漏，所以逐周期长度仍然必须严格相等。
+
+    adv：每几拍走一个逻辑帧（1 = 2X / 120Hz 采样，2 = 1X）。
+    返回失败项列表。
+    """
+    bad = []
+    dt = 1.0 / fps
+    # (一费几帧, 每逻辑帧攒多快, 画面里有没有减号, 每几拍走一个逻辑帧)
+    cases = [(30.0, SPEED_NORMAL, False, 1), (30.0, SPEED_NORMAL, False, 2),
+             (60.0, SPEED_NORMAL, False, 1), (60.0, SPEED_NORMAL, False, 2),
+             (120.0, SPEED_NORMAL, False, 1), (120.0, SPEED_NORMAL, False, 2),
+             (30.0, SPEED_NEGATIVE, True, 1), (30.0, SPEED_NEGATIVE, True, 2),
+             (60.0, SPEED_NEGATIVE, True, 1), (60.0, SPEED_NEGATIVE, True, 2),
+             (120.0, SPEED_NEGATIVE, True, 1), (120.0, SPEED_NEGATIVE, True, 2)]
+    for per, speed, neg, adv in cases:
+        game = CostTiming(required_from_frames(per))
+        c = Counter(BAR_W, fps=fps, frames_per_cost=per)
+        sign = SignReading(negative=neg, run=40 if neg else 18,
+                           rows=3 if neg else 0, thr=21)
+        t = 0.0
+        idx = 0
+        truth = 0
+        ends = []          # 每个费用周期结束在「第几个逻辑帧」上（真值）
+        # 走 cycles 个完整周期，再多走 tail 帧停在周期中间 —— 末端那一拍要读到条，
+        # 计数器才有机会把最后几帧补上（末端正好压在「条归零」上时相位本身是歧义的）。
+        while True:
+            idx += 1
+            t += dt
+            if idx % adv == 0:
+                truth += 1
+                if game.advance_one_frame(speed):
+                    ends.append(truth)
+                    game.cycles = len(ends)
+            fill = synthesized_width(BAR_W, float(BAR_W), game.phase())
+            c.step(idx, t, bar(fill, 'TRACK' if fill > EMPTY_MAX_FILL else 'EMPTY'),
+                   RUN, SPEED, sign)
+            if len(ends) >= cycles and truth - ends[-1] >= tail:
+                break
+            if idx > 200000:
+                break
+        tag = '%d 帧/费%s%s' % (per, ' + 负费' if neg else '', ' @1X' if adv == 2 else ' @2X')
+        want_cycles = [b - a for a, b in zip(ends, ends[1:])]
+        head = c._unreadable_head_frames(speed_for_cost_state(neg))
+        if list(c.cycle_lengths) != want_cycles:
+            bad.append((tag, '逐周期长度', (list(c.cycle_lengths), want_cycles)))
+        if not 0 <= truth - c.elapsed <= head:
+            bad.append((tag, '累计帧数（只许丢开头读不出来的那几帧）',
+                        (c.elapsed, truth, head)))
+        if c.elapsed != c.pixel_frames + c.clock_frames:
+            bad.append((tag, 'elapsed 与分批计数不一致',
+                        (c.elapsed, c.pixel_frames + c.clock_frames)))
+    return bad
+
+
 def rate_switch_rescale(fps=60.0):
     """跑动中认出减费速率时，**已经数出来的**帧要按新旧速率比例换算。
 
@@ -512,23 +772,31 @@ def negative_cost_timing(fps=60.0):
     为什么这条是**必须**做的：不认减号时，相位按 1/30 往前推，_resync 只能挑到真值
     一半的 k —— 整段负费被数成一半（不是差一两帧）。下面「对照组」就是同一段信号
     把减号抹掉再跑一遍，差多少直接摆出来。
+
+    **容差**：换挡那一拍（正 -> 负 / 负 -> 正）游戏用的是旧速度还是新速度，取决于
+    它是在这一拍的画面取到之前还是之后换的 —— 一帧像素里分不出来，累加器会差半个
+    负费增量（= 半个正常帧、约 4px，落在 _resync 的 5px 容差里面）。所以「中途换挡」
+    的用例给 ±1 帧的容差（state.py 里 _boundary_correction 只修相位、不修帧数）；
+    其余用例一帧都不许差。
     返回 (失败项列表, 报告行列表)。
     """
     bad, lines = [], []
 
     cases = [
-        ('全负费 300 拍', 300, lambda i: True),
-        ('正 -> 负(第120拍) -> 正(第300拍) 420 拍', 420, lambda i: 120 <= i < 300),
-        ('负 -> 正(第150拍) 300 拍', 300, lambda i: i < 150),
-        ('转场正好压在回费边界上 400 拍', 400, lambda i: 30 <= i < 45),
+        ('全负费 300 拍', 300, lambda i: True, 0),
+        ('正 -> 负(第120拍) -> 正(第300拍) 420 拍', 420, lambda i: 120 <= i < 300, 1),
+        ('负 -> 正(第150拍) 300 拍', 300, lambda i: i < 150, 0),
+        ('转场正好压在回费边界上 400 拍', 400, lambda i: 30 <= i < 45, 0),
     ]
-    for name, n, fn in cases:
+    for name, n, fn, tol in cases:
         c, truth = _negative_run(n, fn, fps)
-        mark = 'OK' if c.elapsed == truth else 'BAD'
-        lines.append('  %-4s %-34s elapsed=%4d 真值=%4d 差 %+d  周期=%s'
-                     % (mark, name, c.elapsed, truth, c.elapsed - truth,
+        diff = c.elapsed - truth
+        mark = 'OK' if abs(diff) <= tol else 'BAD'
+        lines.append('  %-4s %-34s elapsed=%4d 真值=%4d 差 %+d%s  周期=%s'
+                     % (mark, name, c.elapsed, truth, diff,
+                        '' if tol == 0 else '（转场那一拍容差 ±%d）' % tol,
                         sorted(set(c.cycle_lengths))[:4]))
-        if c.elapsed != truth:
+        if abs(diff) > tol:
             bad.append((name, c.elapsed, truth))
 
     # 长跑：负费期间的「61 帧那一费」也要和 fp24 算得一样。定点累加器每帧少攒
@@ -680,11 +948,12 @@ def main():
     print()
     print('帧操逐帧精度（暂停着一下一下推 300 拍）：')
     if missed:
-        print('  ❌ 有 %d 拍没有当场记 1 帧，前 8 个 (拍号, fill, 状态, 通道, delta)：' % len(missed))
+        print('  ❌ 有 %d 项不对 (拍号, fill, 状态, 通道, delta, 原因)，前 8 项：' % len(missed))
         for m in missed[:8]:
             print('     %s' % (m,))
     else:
-        print('  ✅ 通过（含回费后条归零的那一拍，每一拍都当场 +1）')
+        print('  ✅ 通过（回费那一拍当场 +1；它后面那拍 0 宽、由再下一拍一次补 2，'
+              '累计一帧不差）')
     ok3 = not missed
 
     bad_wrap = wrap_frame_sampled_or_missed()
@@ -692,9 +961,10 @@ def main():
     print('回费边界两拍（归零帧采到 / 漏采）：')
     if bad_wrap:
         for b in bad_wrap:
-            print('  ❌ %s：实际 %s，期望 %s' % b)
+            print('  ❌ %s：实际 %s，期望 delta=%s；累计 %s 期望 %s' % b)
     else:
-        print('  ✅ 通过（采到 -> wrap+1 / pixel+1；漏采 -> wrap-missed+2，总数一样）')
+        print('  ✅ 通过（每拍都采到 / 漏采 0 宽那拍 / 漏采归零那拍：落点差一拍，'
+              '总数都对）')
     ok6 = not bad_wrap
 
     bad_anchor = anchor_head_catchup()
@@ -705,8 +975,8 @@ def main():
         for b in bad_anchor:
             print('     %s' % (b,))
     else:
-        print('  ✅ 通过（第 2/3 帧补 1/2 帧；第 4/16 帧是半路重现，按 0 起锚；'
-              '一个费用周期恒为 30 帧）')
+        print('  ✅ 通过（第 2/3 帧补 2/3 帧、elapsed 就是本费已经走的帧数；'
+              '第 4/16 帧是半路重现，按 0 起锚；一个费用周期恒为 30 帧）')
     ok5 = not bad_anchor
 
     bad_clear = clear_zero_start()
@@ -718,7 +988,7 @@ def main():
                   '期望 %s' % b)
     else:
         print('  ✅ 通过（条宽未知 -> 一直 0；条已在第一个像素 -> 那一拍 0、之后 +1；'
-              '条空时清零 -> 第一个像素那拍就 +1）')
+              '条空时清零 -> 第一个像素那拍补 2 帧 = 本费已经走的帧数）')
     ok10 = not bad_clear
 
     bad_stale = stale_phase_reanchor()
@@ -754,10 +1024,43 @@ def main():
     print('减费环境逐周期长度（一费 60 / 120 逻辑帧）：')
     if bad_rate:
         for b in bad_rate:
-            print('  ❌ %s：%s，%s' % b)
+            print('  ❌ ' + '：'.join(str(x) for x in b))
     else:
         print('  ✅ 通过（60 帧/费、120 帧/费都逐周期稳定，偶尔 +1 是定点取整的边界效应）')
     ok8 = not bad_rate
+
+    bad_head = reduced_rate_anchor_head()
+    print()
+    print('减费档位的起锚补帧（一费开头读不出来的帧：' + ' / '.join(str(_blind_head_frames(p)) for p in (30, 60, 120)) + ' 帧）：')
+    if bad_head:
+        for b in bad_head:
+            print('  ❌ %s：实际 %s，期望 %s' % b)
+    else:
+        print('  ✅ 通过（60 / 120 帧/费的开战起锚不再被判 anchor-late、那几帧全补回来；'
+              '半路重现仍然一帧都不补）')
+    ok14 = not bad_head
+
+    bad_rate = reduced_rate_accuracy()
+    print()
+    print('减费档位 / 局内负费的逐周期准确性（一拍走不到一帧时不许按挂钟猜）：')
+    if bad_rate:
+        for b in bad_rate:
+            print('  ❌ %s：实际 %s，期望 %s' % b)
+    else:
+        print('  ✅ 通过（30 / 60 / 120 帧/费、负费翻倍、1X 与 2X 采样：'
+              '逐周期 per/per+1、累计帧数一帧不差）')
+    ok15 = not bad_rate
+
+    bad_exact = reduced_rate_fp24_exact()
+    print()
+    print('减费档位 / 局内负费：条按 fp24 模型画出来，帧数一帧不差：')
+    if bad_exact:
+        for b in bad_exact:
+            print('  ❌ %s：实际 %s，期望 %s' % b)
+    else:
+        print('  ✅ 通过（累计帧数、逐周期长度都严格相等；'
+              '边界周期 120 -> [120, 121]、240 -> [240, 241] 都对得上）')
+    ok16 = not bad_exact
 
     bad_switch = rate_switch_rescale()
     print()
@@ -794,8 +1097,9 @@ def main():
         print('  ✅ 通过（读到过数字之后按固定 6 帧/秒；从没读到过就冻结不猜）')
     ok13 = not bad_blind
 
-    return 0 if (ok and ok2 and ok3 and ok4 and ok5 and ok6 and ok7
-                 and ok8 and ok9 and ok10 and ok11 and ok12 and ok13) else 1
+    return 0 if (ok and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 and ok8
+                 and ok9 and ok10 and ok11 and ok12 and ok13 and ok14 and ok15
+                 and ok16) else 1
 
 
 if __name__ == '__main__':

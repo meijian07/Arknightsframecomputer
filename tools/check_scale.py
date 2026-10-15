@@ -217,7 +217,30 @@ def main():
     check('轴点右边印的是**绝对帧号**（不再有 +40 这种带符号帧差）',
           '1198' in nums and not any(t.startswith('+') for f, t in drawn),
           '画到的数字：%r' % nums[:10])
+    print('12) 刻度表：四边 1px 描边 / 「现在」读数给帧号那列让位（2026-10-13）')
+    rgb = lambda hx: tuple(int(hx[i:i + 2], 16) for i in (1, 3, 5))   # noqa: E731
+    th2 = scale_render.Theme()
+    img2 = scale_render.render(l11)
+    check('四边有 1px 描边（刻度区看着像一块凹槽，不再漂在面板上）',
+          img2.getpixel((0, 0)) == rgb(th2.stroke)
+          and img2.getpixel((img2.width - 1, img2.height - 1)) == rgb(th2.stroke),
+          '%s vs %s' % (img2.getpixel((0, 0)), rgb(th2.stroke)))
+    # 从右往左走指针线（白）：第一个非白像素就是「现在」读数垫底那块
+    # 底色，它右边剩下多少像素就是留给轴帧号那列的。最多四位数（≈ 32px，
+    # 右对齐在 W-pad_right），所以至少要留 36px；原来读数贴着 W-6，这个数是 9。
+    # （最右一列 W-1 是描边，所以从 W-2 开始往左走）
+    py = int(round(l11.geom.pointer_y))
+    acc = rgb(th2.accent)
+    x = img2.width - 2
+    check('读数右边那条指针线照旧画到最右边（没被底色一并擦掉）',
+          img2.getpixel((x, py)) == acc)
+    while x > 0 and img2.getpixel((x, py)) == acc:
+        x -= 1
+    gap = img2.width - 2 - x
+    check('「现在」读数往左让位：右边给帧号那列留出 >= 36px',
+          gap >= 36, gap)
     print()
+
     if FAILED:
         print('失败 %d 项：%s' % (len(FAILED), ', '.join(FAILED)))
         return 1

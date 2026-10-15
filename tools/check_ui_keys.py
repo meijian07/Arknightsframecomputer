@@ -17,10 +17,11 @@
        Shift+方向键 / S / R / K 只在窗口开着时绑上，关窗口（或 Esc）一定解绑
        （以前是全局的 —— 打字、翻条、误按都会碰到 ROI）；
     5. 刻度跨度**固定 150 帧**（2026-10-11 删了 [ ] 缩放档：跨度常量算出来的
-       px_per_frame 得对得上）；翻条走标题栏按钮（回看偏移、边界、没轴时提示）；
+       px_per_frame 得对得上）；翻条那两颗键（◀ 回看 / 现在 ▶）2026-10-13 按用户要求
+       **删干净**（连 _prom_scroll / _prom_shift / build(now=) / 那条灰线一起）；
     6. 「CSV」按钮、「刻度缩放」四个键、「局内负费」下拉**都删掉了**（用户看板批注）；
     7. 诊断那一层删掉了（2026-10-11）：按钮 / 折叠方法没了，fr_diag 一直不 pack；
-    8. 刻度表的「回看」：build(now=...) 时多画一条「现在」灰线（画出来的图不一样）；
+    8. （作废）刻度表的「回看」灰线 —— 2026-10-13 跟着翻条键一起删了，组也删了；
     9. 拖动标题栏：位移精确（收起 / 展开各一次 —— 展开态竖直拖不动 = _anchor_bottom
        没跟着挪），松手结束「拖动中」；以及**绕开面板**把窗口挪走（系统标题栏 / 系统
        贴边 / 换分辨率）之后，下一次布局重算不许把它拽回去（见 9b）。
@@ -61,6 +62,14 @@
         Shift+拖挪视窗」作废（用户实测：在放大图里随便一拖框就跑了）。按钮那一对现在
         **可以拉大拉小**（原来写死标称尺寸）。
 
+    17. 第八轮（53）：**二级窗口统一外壳** —— 四个二级窗口都 overrideredirect（系统标题栏
+        拿掉）+ 自画一条 header（3px 色条 / 标题 / ? / ×）；标题只写一遍（原来手动校准写
+        两遍）；按钮分档（主 / 次 / 危险 / 幽灵）；轴窗平时不把「pip install tkinterdnd2」
+        印给用户；读取窗口不再是「一行 5 个字段」的 Listbox（两行一条 + 刷新）；二级窗口
+        一律夹在工作区里（本机工作区到 y=1528，不然最下面那排键压在任务栏底下）。
+    18. 第八轮（53）：取景器顶部从 12 行 / 681 字的总说明换成「一行提示（跟着目标走）+
+        ? 展开全文」，界面上不再漏 markdown 星号；左图从屏幕 0.55 倍收到 0.40 倍。
+
 用法：python tools/check_ui_keys.py
 """
 
@@ -73,10 +82,6 @@ import types
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'src'))
-
-from akframe.scale import ScaleGeom, Theme, build                  # noqa: E402
-from akframe.scale_render import render as render_scale            # noqa: E402
-from akframe.timeline import Cue                                   # noqa: E402
 
 TEMP = os.environ.get('TEMP') or os.environ.get('TMP') or '.'
 
@@ -286,18 +291,19 @@ def t_no_keys(app):
           and not hasattr(ui_mod.MonitorApp, '_calib_keys')
           and not hasattr(app, '_on_escape'),
           '%s %s' % (hasattr(ui_mod.MonitorApp, '_bind_keys'), hasattr(app, '_on_escape')))
-    # 打轴器的翻条挪到标题栏那两个按钮上（↑↓ 没了）——按钮在、而且真接上了 _prom_scroll
+    # 「◀ 回看 / 现在 ▶」2026-10-13 按用户要求删了（「回看现在是什么加的功能，删掉」）：
+    # 那颗键 + 它背后的偏移 + 刻度表那条灰线是一条链，这里钉住整条链都不在。
     fr = getattr(app, 'fr_more_top', None)
     btns = _btn_texts(fr) if fr is not None else []
-    check('打轴器标题栏有「◀ 回看 / 现在 ▶」两个按钮', '◀ 回看' in btns and '现在 ▶' in btns,
-          str(btns))
+    check('打轴器标题栏只剩「重载 / 导入轴…」两个键',
+          '重载' in btns and '导入轴…' in btns
+          and '◀ 回看' not in btns and '现在 ▶' not in btns, str(btns))
+    check('翻条那一套名字全没了（_prom_scroll / _prom_shift）',
+          not hasattr(app, '_prom_scroll') and not hasattr(app, '_prom_shift'))
     app._set_axis_text('300 部署 银灰\n330 技能 银灰')
     app.apply_axis_text()
-    app._prom_scroll(1)
-    check('「◀ 回看」那条路真能翻条（回看 30 帧）',
-          abs(app._prom_shift - 30.0) < 1e-9, app._prom_shift)
-    app._prom_scroll(-99)
-    check('「现在 ▶」回到 0', app._prom_shift == 0.0, app._prom_shift)
+    check('轴照旧能进提词器（删的只是翻条）',
+          app.prompter.timeline is not None and len(app.prompter.timeline.cues) == 2)
 
 
 def t_calib_mode(app):
@@ -331,8 +337,9 @@ def t_calib_mode(app):
 
 
 def t_scale_and_scroll(app):
-    """5：刻度固定 150 帧（没有缩放档了）+ 标题栏按钮翻条（↑↓ 键没了）。"""
+    """5：刻度固定 150 帧（没有缩放档了）；翻条那两颗键 2026-10-13 删了。"""
     from akframe import ui as ui_mod
+    from akframe.scale import Layout
 
     # 看板批注「刻度缩放固定为 150 帧」：跨度是常量，缩放那一套（[ ] 键、四个按钮、
     # set_scale_zoom / _zoom_step）2026-10-11 全删了 —— 这里正着反着都钉一遍。
@@ -351,23 +358,19 @@ def t_scale_and_scroll(app):
           not hasattr(app, 'lb_span_note') and not hasattr(app, 'lb_cue_next')
           and not hasattr(app, 'lb_axis_hint') and not hasattr(app, 'lb_help'))
 
-    app._prom_scroll(1)
-    check('没有轴时翻条只提示，不动偏移',
-          app._prom_shift == 0.0 and '先导入' in app.lb_note.cget('text'),
-          app.lb_note.cget('text'))
     app._set_axis_text('300 部署 银灰\n330 技能 银灰\n360 撤退')
     app.apply_axis_text()
     check('轴进到提词器',
           app.prompter.timeline is not None and len(app.prompter.timeline.cues) == 3)
-    app._prom_scroll(1)
-    check('「◀ 回看」 = 往回看 30 帧（1 费 = 1 秒）',
-          abs(app._prom_shift - 30.0) < 1e-9, app._prom_shift)
-    app._prom_scroll(1, 1000.0)
-    check('回看有上限（600 帧）', abs(app._prom_shift - 600.0) < 1e-9, app._prom_shift)
-    app._prom_scroll(-1, 1000.0)
-    check('「现在 ▶」一路回到「现在」',
-          app._prom_shift == 0.0 and '现在' in app.lb_note.cget('text'),
-          app.lb_note.cget('text'))
+    # 翻条（◀ 回看 / 现在 ▶）2026-10-13 删了：刻度表摆的那一帧永远是「现在」。
+    check('翻条那套连名字都不在（方法 / 状态 / 灰线参数）',
+          not hasattr(app, '_prom_scroll') and not hasattr(app, '_prom_shift')
+          and 'now' not in Layout.__dataclass_fields__)
+    import inspect
+    from akframe.scale import build as _scale_build
+    check('build 不再收 now（刻度摆的那一帧就是「现在」）',
+          'now' not in inspect.signature(_scale_build).parameters,
+          str(list(inspect.signature(_scale_build).parameters)))
 
 
 def t_removed_controls(app):
@@ -523,7 +526,7 @@ def t_layout_top(app):
           '%r / %r' % (app.fr_more_top.winfo_manager(), app.fr_more.winfo_manager()))
     order2 = list(root.pack_slaves())
     check('收起：常驻区没被展开区带走',
-          app.fr_nums in order2 and app.fr_ctrl in order2 and app.lb_note in order2)
+          app.fr_nums in order2 and app.fr_ctrl in order2 and app.fr_note in order2)
 
     def park(x, y):
         app._user_pos = (x, y)
@@ -811,6 +814,7 @@ def t_status_row(app):
           not bad, bad[:3])
 
     t_switch_clears(app)
+    t_rate_switch_clears(app)
     t_picker_cancel(app)
 
 
@@ -837,6 +841,33 @@ def t_switch_clears(app):
                                       app.btn_start.cget('text')))
     check('切模式也给一句话（提示切过去是待命、点「开始」才数）',
           '已清零' in app.lb_note.cget('text'), repr(app.lb_note.cget('text')))
+
+
+def t_rate_switch_clears(app):
+    '''20：切「回费效率」= 自动清零（用户 2026-10-14：「切换回费效率自动清零的优化」）。
+
+    切档位就是「从现在起按新档数」：旧行为是按比例换算已经数出来的帧（30 -> 60 时
+    已数的 30 帧当场变成 60 帧），数字跳一下看着像数错了。现在直接复用 _reset_count：
+    停采样 + 归零 + 主按钮三态拉回「开始」，和「清零」那个键一模一样。
+    '''
+    if not app.monitor.alive:
+        app.monitor.start()
+    app._counting_started = True
+    app._set_text('frames', app.lb_frames, '1234')     # 假装已经数了一千多帧
+    app.apply_cost_rate(120.0)
+    check('切回费效率自动清零：数字回 0、按钮回「开始」、停采样待命',
+          app._counting_started is False and app.monitor.alive is False
+          and app.lb_frames.cget('text') == '0'
+          and app.btn_start.cget('text') == '开始',
+          '%s / %s / %r / %s' % (app._counting_started, app.monitor.alive,
+                                 app.lb_frames.cget('text'),
+                                 app.btn_start.cget('text')))
+    check('切档位刷成新档 + 说一句（回费速率 = …，已清零）',
+          app.rate_var.get().startswith('120')
+          and '回费速率' in app.lb_note.cget('text')
+          and '已清零' in app.lb_note.cget('text'),
+          '%r / %r' % (app.rate_var.get(), app.lb_note.cget('text')))
+    app.apply_cost_rate(30.0)          # 复位成默认档，别影响后面几组
 
 
 def t_picker_cancel(app):
@@ -1193,19 +1224,6 @@ def t_picker_pan(app):
         app.root.update()
 
 
-def t_scrub_render():
-    """8：刻度表的「回看」多画一条「现在」灰线。"""
-    g = ScaleGeom(px_per_frame=1.5)
-    cues = [Cue(300, '部署 银灰', 1, '300 部署 银灰'), Cue(360, '撤退', 2, '360 撤退')]
-    plain = build(342.0, cues, 0, g)
-    check('build 的默认 now = frame（老行为不变）', plain.now == 342.0, plain.now)
-    scrubbed = build(312.0, cues, 0, g, now=342.0)
-    check('回看时视图帧是 312（刻度按它摆）', scrubbed.frame == 312.0, scrubbed.frame)
-    a = render_scale(plain, Theme()).tobytes()
-    b = render_scale(scrubbed, Theme()).tobytes()
-    check('回看的图和「现在」的图不一样（多画了那条灰线）', a != b)
-
-
 def t_drag(app):
     """9：按住标题栏拖动（用户视频 1：「窗口拖拽卡顿，位置漂移」）。
 
@@ -1465,9 +1483,376 @@ def t_picker_zoom(app):
 
 
 
+def _walk(widget, cls):
+    """递归找某一类控件（要控件本身，不只是文字）。"""
+    out = []
+    for c in widget.winfo_children():
+        if isinstance(c, cls):
+            out.append(c)
+        out.extend(_walk(c, cls))
+    return out
+
+
+def _hdr_btn(top, prefix):
+    """二级窗口 header 上那个 ? / ×（文字以 prefix 开头）。"""
+    import tkinter as tk
+
+    for b in _walk(top, tk.Button):
+        if str(b.cget('text')).startswith(prefix):
+            return b
+    return None
+
+
+def t_dialog_shell(app):
+    """17：二级窗口统一外壳（2026-10-13 第八轮，用户看完设计图：「都改成这一版吧」）。
+
+    四个二级窗口以前三套做法：只有系统标题栏 / 系统标题栏 + 自己又画一遍「◆ 手动校准」/
+    裸 Listbox。现在统一 = overrideredirect 去掉系统标题栏 + 自画一条 header（3px 色条 +
+    标题 + ? + ×）+ 按钮分档（`_btn_kw`）。这里钉住「外壳真的换了」和「说明真的收起来了」。
+    """
+    import tkinter as tk
+
+    from akframe import ui as ui_mod
+
+    # ---- 手动校准 ----
+    app.open_calib_dialog()
+    try:
+        top = app._calib_win
+        check('手动校准：系统标题栏拿掉了（overrideredirect）',
+              bool(top.overrideredirect()))
+        labels = [str(x.cget('text')) for x in _walk(top, tk.Label)]
+        heads = [t for t in labels if t == '手动校准']
+        check('手动校准：标题只写一遍（以前系统栏 + 窗内「◆ 手动校准」两遍）',
+              heads == ['手动校准'] and not any('◆' in t for t in labels), labels)
+        acts = {}
+        for b in _walk(top, tk.Button):
+            t = str(b.cget('text'))
+            if t in ('保存校准', 'ROI 框', '恢复默认', '重新选窗口…'):
+                acts[t] = b
+        check('手动校准：四个动作键都在', len(acts) == 4, sorted(acts))
+        check('手动校准：保存校准 = 主键（白底深字）',
+              acts['保存校准'].cget('bg') == ui_mod.PRIMARY
+              and acts['保存校准'].cget('fg') == ui_mod.UI_BG,
+              acts['保存校准'].cget('bg'))
+        check('手动校准：恢复默认 = 危险键（红字）',
+              acts['恢复默认'].cget('fg') == ui_mod.ERR, acts['恢复默认'].cget('fg'))
+        check('手动校准：ROI 框 = 次键（底色同背景 + 1px 描边）',
+              acts['ROI 框'].cget('bg') == ui_mod.UI_BG
+              and int(acts['ROI 框'].cget('highlightthickness')) == 1)
+        check('手动校准：重新选窗口 = 幽灵键（纯文字）',
+              acts['重新选窗口…'].cget('bg') == ui_mod.UI_BG
+              and acts['重新选窗口…'].cget('fg') == ui_mod.UI_DIM
+              and int(acts['重新选窗口…'].cget('highlightthickness')) == 0)
+        check('手动校准：header 上有 ×', _hdr_btn(top, '×') is not None)
+        check('手动校准：窗口夹在工作区里（下缘不钻到任务栏底下）',
+              top.winfo_y() + top.winfo_reqheight() <= ui_mod.work_area()[1]
+              + ui_mod.work_area()[3],
+              'y=%d h=%d' % (top.winfo_y(), top.winfo_reqheight()))
+    finally:
+        app.close_calib_dialog()
+        app.root.update()
+
+    # ---- 导入 / 编辑轴 ----
+    app.open_axis_dialog()
+    try:
+        top = app._axis_win
+        check('导入轴：系统标题栏拿掉了（overrideredirect）',
+              bool(top.overrideredirect()))
+        texts = [str(x.cget('text')) for x in _walk(top, tk.Label)
+                 if x.winfo_manager()]
+        check('导入轴：平时不把「pip install tkinterdnd2」印给用户看',
+              not any('pip install' in t for t in texts), texts[:2])
+        check('导入轴：提示行说人话（一行）',
+              any('拖进来' in t and '帧号开头' in t for t in texts))
+        q = _hdr_btn(top, '?')
+        q.invoke()
+        top.update_idletasks()
+        texts = [str(x.cget('text')) for x in _walk(top, tk.Label)
+                 if x.winfo_manager()]
+        check('导入轴：点 ? 才铺开完整说明（含那句 pip）',
+              any('pip install' in t for t in texts))
+        hint2 = [x for x in _walk(top, tk.Label) if x.winfo_manager()
+                 and 'pip install' in str(x.cget('text'))]
+        appl = [b for b in _walk(top, tk.Button)
+                if str(b.cget('text')) == '应用到提词器'][0]
+        check('导入轴：完整说明挂在提示行下面（在按钮行之前）',
+              bool(hint2) and hint2[0].winfo_rooty() < appl.winfo_rooty(),
+              [x.winfo_rooty() for x in hint2] + [appl.winfo_rooty()])
+        q.invoke()
+        top.update_idletasks()
+        check('导入轴：再点一次收回去',
+              not any(x.winfo_manager() and 'pip install' in str(x.cget('text'))
+                      for x in _walk(top, tk.Label)))
+        got = {}
+        for b in _walk(top, tk.Button):
+            t = str(b.cget('text'))
+            if t in ('应用到提词器', '选择 md 文件…', '清空', '保存为 md'):
+                got[t] = b
+        check('导入轴：应用到提词器 = 主键，选择 md = 次键，清空 / 保存 = 幽灵键',
+              got['应用到提词器'].cget('bg') == ui_mod.PRIMARY
+              and int(got['选择 md 文件…'].cget('highlightthickness')) == 1
+              and got['清空'].cget('fg') == ui_mod.UI_DIM
+              and got['保存为 md'].cget('fg') == ui_mod.UI_DIM)
+    finally:
+        app._close_axis_dialog()
+        app.root.update()
+
+    # ---- 读取窗口（顺手修掉的「点开必崩」就在这条路上）----
+    app._window_dialog('读取窗口', lambda _w: None, sub='选中哪个就读它', ok='读这个窗口')
+    try:
+        tops = [w for w in app.root.winfo_children()
+                if isinstance(w, tk.Toplevel) and w.winfo_exists()]
+        top = tops[-1] if tops else None
+        check('读取窗口：开得出来（以前 _btn(font=...) 直接 TypeError）',
+              top is not None)
+        check('读取窗口：系统标题栏拿掉了（overrideredirect）',
+              bool(top.overrideredirect()))
+        check('读取窗口：标题只有两个词',
+              [str(x.cget('text')) for x in _walk(top, tk.Label)
+               if x.winfo_manager()][:1] == ['读取窗口'],
+              [str(x.cget('text')) for x in _walk(top, tk.Label)][:2])
+        check('读取窗口：列表不再是 Listbox（自己画的两行一条）',
+              not _walk(top, tk.Listbox) and len(_walk(top, tk.Canvas)) == 1)
+        labels = [str(x.cget('text')) for x in _walk(top, tk.Button)]
+        check('读取窗口：有「刷新」和主键「读这个窗口」',
+              '刷新' in labels and '读这个窗口' in labels, labels)
+        okb = [b for b in _walk(top, tk.Button)
+               if str(b.cget('text')) == '读这个窗口'][0]
+        check('读取窗口：读这个窗口 = 主键（白底深字）',
+              okb.cget('bg') == ui_mod.PRIMARY and okb.cget('fg') == ui_mod.UI_BG)
+        rs = [b for b in _walk(top, tk.Button) if str(b.cget('text')) == '刷新'][0]
+        check('读取窗口：刷新 = 幽灵键', rs.cget('fg') == ui_mod.UI_DIM)
+        _, wy, _, wh = ui_mod.work_area()
+        check('读取窗口：窗口夹在工作区里（最下那排键点得到）',
+              top.winfo_y() + top.winfo_reqheight() <= wy + wh,
+              'y=%d h=%d' % (top.winfo_y(), top.winfo_reqheight()))
+    finally:
+        for w in app.root.winfo_children():
+            if isinstance(w, tk.Toplevel) and w.winfo_exists():
+                w.destroy()
+        app.root.update()
+
+
+def t_picker_head(app):
+    """18：取景器顶部（2026-10-13 第八轮）。
+
+    原来顶上挂着 12 行 / 681 字的总说明，还带字面的 ** （tk.Label 不认 markdown，
+    用户看到的就是「**左边**」）；左图按屏幕 0.55 倍排，本机把窗口顶到 1996x1366
+    （屏幕 78% x 85%）。现在：一行提示跟着目标走、全文进 ?、左图 0.40 倍。
+    """
+    import tkinter as tk
+
+    import numpy as np
+
+    from akframe import ui as ui_mod
+    from akframe.geometry import layout_for
+
+    h, w = 1600, 2560
+    frame = np.zeros((h, w), dtype=np.uint8)
+    pk = ui_mod.BoxPicker(app.root, lambda i: (frame, layout_for(w, h)), 3, 1,
+                          lambda _b: None)
+    try:
+        check('取景器：系统标题栏拿掉了（overrideredirect）',
+              bool(pk.top.overrideredirect()))
+        sw, sh = pk.top.winfo_screenwidth(), pk.top.winfo_screenheight()
+        want = min(1.0, max(420, int(sw * 0.40)) / float(w),
+                   max(280, int(sh * 0.40)) / float(h))
+        old = min(1.0, max(420, int(sw * 0.55)) / float(w),
+                  max(280, int(sh * 0.55)) / float(h))
+        check('取景器：左图按屏幕 0.40 倍排（原来是 0.55，本机 1408x880）',
+              abs(pk.scale - want) < 1e-9 and pk.scale < old,
+              'scale=%s want=%s 0.55 时会是 %s' % (pk.scale, want, old))
+        check('取景器：左图画布 = 缩过的那一帧',
+              int(pk.cv.cget('width')) == int(w * pk.scale), pk.cv.cget('width'))
+        text = [str(x.cget('text')) for x in _walk(pk.top, tk.Label)]
+        check('取景器：界面上不再漏 markdown 星号（原来印出字面 **左边**）',
+              not any('**' in t for t in text))
+        long_lab = [x for x in _walk(pk.top, tk.Label) if len(str(x.cget('text'))) > 200]
+        check('取景器：那段总说明只有一份，而且默认是收着的',
+              len(long_lab) == 1 and not long_lab[0].winfo_manager())
+        check('取景器：顶部换成一行提示，跟着目标走',
+              pk.lb_hint.cget('text') == ui_mod.PICKER_HINTS['bar'],
+              pk.lb_hint.cget('text'))
+        pk.set_target('pause')
+        check('取景器：换目标，那行提示跟着换',
+              pk.lb_hint.cget('text') == ui_mod.PICKER_HINTS['pause'],
+              pk.lb_hint.cget('text'))
+        pk.top.update_idletasks()
+        h0 = pk.top.winfo_reqheight()
+        q = _hdr_btn(pk.top, '?')
+        q.invoke()
+        pk.top.update_idletasks()
+        check('取景器：点 ? 铺开完整说明（窗口跟着变高）',
+              bool(long_lab[0].winfo_manager())
+              and pk.top.winfo_reqheight() > h0,
+              '%d -> %d' % (h0, pk.top.winfo_reqheight()))
+        q.invoke()
+        pk.top.update_idletasks()
+        check('取景器：再点一次收回去，窗口回原高',
+              not long_lab[0].winfo_manager()
+              and pk.top.winfo_reqheight() == h0,
+              '收起后 %d，原高 %d' % (pk.top.winfo_reqheight(), h0))
+        check('取景器：读数不再是 Consolas（全项目就轴编辑器留一处等宽）',
+              'Consolas' not in str(pk.lb_read.cget('font')),
+              pk.lb_read.cget('font'))
+        check('取景器：主键「用这些框」= 白底深字，取消 = 幽灵键',
+              pk.btn_ok.cget('bg') == ui_mod.PRIMARY
+              and [b for b in _walk(pk.top, tk.Button)
+                   if str(b.cget('text')) == '取消'][0].cget('fg') == ui_mod.UI_DIM)
+    finally:
+        pk.close()
+        app.root.update()
+
+
+def t_panel_skin(app):
+    """19：面板头一段的皮肤（2026-10-13 看板批注 ① ⑤ ⑥ ⑦ + 两条追加）。
+
+    这一组盯的是「看一眼就能看出来」的那几件事：窗内那行重复的标题没了、展开区不再
+    有两条挨着的分隔线、打轴器标题里不印内部标记、四颗控制键分了权重、回费那一行
+    右边的「自定义」按需铺。判据一律用 pack 顺序 / 控件属性 / 高度，不用坐标 ——
+    坐标会随字号和 DPI 走，属性不会。
+    """
+    import tkinter as tk
+    from akframe import ui as ui_mod
+    from akframe.scale import ScaleGeom, Theme
+
+    root = app.root
+    root.deiconify()
+    root.update()
+    if not app._more:
+        app.toggle_more()
+    root.update_idletasks()
+
+    # ① 标题行
+    check('窗内那行重复的标题删了（系统标题栏那条还在）',
+          not hasattr(app, 'lb_title'))
+    texts = sorted(b.cget('text') for b in app.head.pack_slaves())
+    check('标题行只剩 ▾ / − / × 三个键，行高 = HEAD_H(36)',
+          app.head.winfo_height() == ui_mod.HEAD_H
+          and texts == sorted(['▾', '−', '×']),
+          '%d %s' % (app.head.winfo_height(), texts))
+    # 标题行的键矮下来的真因：Tk 的按钮默认 bd=2（白吃 4px 高）+ 默认
+    # pady=3。不写死像素：自检进程不是 DPI aware，高度只有真界面的两分之一。
+    check('标题行的键不再白吃高度（bd=2 -> 0，pady=0）',
+          all(int(b.cget('bd')) == 0 and int(b.cget('pady')) == 0
+              for b in app.head.pack_slaves()),
+          [(b.cget('bd'), b.cget('pady')) for b in app.head.pack_slaves()])
+    check('标题行整条还能拖着走（绑在 head 上）',
+          bool(app.head.bind('<Button-1>')))
+
+    # ② 分隔线只留一条
+    seps = [w for w in root.pack_slaves()
+            if w.winfo_class() == 'Frame' and w.winfo_reqheight() == 1]
+    check('展开态上下只有一条 1px 分隔线（原来 57 / 65 两条）',
+          len(seps) == 1, len(seps))
+
+    # ③ 打轴器标题不印内部标记
+    check('打轴器标题：没导入写「未导入」',
+          app.lb_prom_title.cget('text') == '打轴器 · 未导入',
+          app.lb_prom_title.cget('text'))
+    app._set_axis_text('300 部署 银灰\n330 技能 银灰\n360 撤退')
+    app.apply_axis_text()
+    check('手写轴的标题也不写「(轴窗口)」那类内部名字',
+          app.lb_prom_title.cget('text') == '打轴器 · 手写轴 ｜ 0/3',
+          app.lb_prom_title.cget('text'))
+    app.root.update_idletasks()
+
+    # ④ 打轴器两颗键：矮下来 + 按级分色
+    tb = dict((b.cget('text'), b) for b in app.lb_prom_title.master.pack_slaves()
+              if isinstance(b, tk.Button))
+    check('打轴器两颗键也不白吃高度',
+          bool(tb) and all(int(b.cget('bd')) == 0 and int(b.cget('pady')) == 0
+                           for b in tb.values()),
+          [(k, v.cget('bd'), v.cget('pady')) for k, v in tb.items()])
+    check('「导入轴…」是次一级（1px 描边）「重载」是 ghost（纯字）',
+          tb['导入轴…'].cget('highlightbackground') == ui_mod.RING
+          and tb['重载'].cget('highlightthickness') == 0
+          and tb['重载'].cget('fg') == ui_mod.UI_DIM,
+          [(k, v.cget('fg')) for k, v in tb.items()])
+
+    # ⑤ ⑥ 刻度区：底色 + 描边 + 过去的轴抬亮
+    th = Theme()
+    check('刻度区底 #0b0b0e + 1px #2a2a2e 描边',
+          th.bg == '#0b0b0e' and th.stroke == '#2a2a2e', '%s / %s' % (th.bg, th.stroke))
+    check('已经过去的轴抬亮到 #8f8f95（2.99:1 -> 5.72:1）',
+          th.mark_past == '#8f8f95' and th.faint == '#8f8f95',
+          '%s / %s' % (th.mark_past, th.faint))
+
+    # 追加：「现在」读数往左让位。右边那列帧号最多四位数（≈ 32px，
+    # 右对齐在 W-pad_right），所以读数的右边距至少要比 pad_right 多 34px。
+    g = ScaleGeom()
+    check('「现在」读数的右边距给帧号那列让位',
+          g.now_pad_right >= g.pad_right + 34 and g.now_pad_right != g.pad_right,
+          '%d vs %d' % (g.now_pad_right, g.pad_right))
+
+    # ⑦ 控制行：四颗键分档 + 矮下来
+    cb = dict((b.cget('text'), b) for b in app.fr_ctrl.pack_slaves())
+    check('控制行：暂停 = 主（白底深字）',
+          cb['开始'].cget('bg') == ui_mod.PRIMARY
+          and cb['开始'].cget('fg') == ui_mod.UI_BG,
+          cb['开始'].cget('bg'))
+    check('控制行：校准 = 次（1px 描边），手动校准 / 清零 = ghost',
+          cb['校准：PC端▾'].cget('highlightbackground') == ui_mod.RING
+          and cb['手动校准'].cget('fg') == ui_mod.UI_DIM
+          and cb['清零'].cget('fg') == ui_mod.UI_DIM,
+          [(k, v.cget('fg')) for k, v in cb.items()])
+    check('控制行四颗键都矮下来（bd=0，pady=0）',
+          all(int(b.cget('bd')) == 0 and int(b.cget('pady')) == 0
+              for b in cb.values()),
+          [(k, v.cget('bd'), v.cget('pady')) for k, v in cb.items()])
+
+    # 追加：回费效率那一行：「自定义」那一截按需铺，且不动面板尺寸
+    row = app.fr_rate_custom.master
+    check('回费行右边「自定义」那一截默认收着',
+          app.fr_rate_custom.winfo_manager() == '' and app._rate_custom_open is False,
+          app.fr_rate_custom.winfo_manager())
+    h0, w0 = root.winfo_height(), root.winfo_width()
+    app._on_rate_pick(ui_mod.RATE_CUSTOM_LABEL)
+    root.update_idletasks()
+    texts = [g2.cget('text') if 'text' in g2.keys() else ''
+             for g2 in app.fr_rate_custom.pack_slaves()]
+    check('选「自定义」才铺出输入框 / 应用',
+          app.fr_rate_custom.winfo_manager() == 'pack'
+          and texts == ['自定义', '', '应用'], texts)
+    check('铺出来也不动面板尺寸（那一行行高是定死的）',
+          root.winfo_height() == h0 and root.winfo_width() == w0,
+          '%dx%d vs %dx%d' % (root.winfo_width(), root.winfo_height(), w0, h0))
+    check('输入框比原来（width=4）宽一格 + 1px 描边',
+          int(app.en_rate.cget('width')) == 5
+          and int(app.en_rate.cget('highlightthickness')) == 1,
+          '%s / %s' % (app.en_rate.cget('width'),
+                       app.en_rate.cget('highlightthickness')))
+    check('铺开之后整行还塞得下（没有谁被挤掉）',
+          sum(g2.winfo_reqwidth() for g2 in row.pack_slaves()) <= row.winfo_width(),
+          '%d vs %d' % (sum(g2.winfo_reqwidth() for g2 in row.pack_slaves()),
+                        row.winfo_width()))
+    app.apply_cost_rate(60.0)
+    root.update_idletasks()
+    check('切回预设档（60）就把那一截收起来',
+          app.fr_rate_custom.winfo_manager() == ''
+          and app.rate_var.get().startswith('60'), app.rate_var.get())
+    check('回费行的行高固定（RATE_ROW_H），不跟内容跑',
+          row.winfo_height() == ui_mod.RATE_ROW_H, row.winfo_height())
+    app._show_rate_custom(False)
+
+    # 追加 2（2026-10-13）：图上没编号的那两条 —— 刻度画布铺满内宽、提示行钉 22px
+    check('刻度画布铺满面板内宽（COLLAPSED_W - 两侧 padx 10）',
+          int(app.cv_scale.cget('width')) == app.COLLAPSED_W - 20
+          and app.scale_geom.width == app.COLLAPSED_W - 20,
+          '%s / %s' % (app.cv_scale.cget('width'), app.scale_geom.width))
+    check('提示行钉在 NOTE_H(22px) 的定高 Frame 里（原来是 10pt 的自然高 33）',
+          app.fr_note.winfo_height() == ui_mod.NOTE_H
+          and app.lb_note.master is app.fr_note,
+          '%d（NOTE_H=%d）' % (app.fr_note.winfo_height(), ui_mod.NOTE_H))
+    check('提示行改用 place，不参与 Frame 的尺寸传播（否则 33px 又把它顶开）',
+          app.lb_note.winfo_manager() == 'place'
+          and float(app.lb_note.place_info().get('relwidth')) == 1.0,
+          '%r %r' % (app.lb_note.winfo_manager(), app.lb_note.place_info().get('relwidth')))
+
+
 def main():
     print('面板键位 / 折叠自检（2026-10-10 示意图那批 + 2026-10-11 看板批注）')
-    t_scrub_render()
+
     print('1-2. 读数搬家 / 开始-暂停-继续三态')
     try:
         import tkinter as tk                   # noqa: F401
@@ -1497,7 +1882,7 @@ def main():
             try:
                 print('4. ROI 校准模式')
                 t_calib_mode(app2)
-                print('5. 刻度固定 150 帧 / ↑↓ 翻条')
+                print('5. 刻度固定 150 帧（翻条那两颗键已删）')
                 t_scale_and_scroll(app2)
                 print('6. CSV / 刻度缩放 / 局内负费 都删掉了')
                 t_removed_controls(app2)
@@ -1517,10 +1902,24 @@ def main():
                 t_picker_pan(app2)
                 print('16. 放大图能滚轮局部放大 / 「吸附左端」删了')
                 t_picker_zoom(app2)
+                print('17. 二级窗口统一外壳 / 按钮分档 / ? 展开说明（第八轮）')
+                t_dialog_shell(app2)
+                print('18. 取景器顶部：一行提示 + 左图 0.40 倍')
+                t_picker_head(app2)
             finally:
                 kill_afters(app2)
                 try:
                     app2.root.destroy()
+                except Exception:              # noqa: BLE001
+                    pass
+            app3, _dm3 = make_app()            # 19 组要一个干净的（还没导入过轴的）面板
+            try:
+                print('19. 面板头一段：标题行 / 分隔线 / 按钮分档 / 回费行按需')
+                t_panel_skin(app3)
+            finally:
+                kill_afters(app3)
+                try:
+                    app3.root.destroy()
                 except Exception:              # noqa: BLE001
                     pass
     print()

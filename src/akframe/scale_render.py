@@ -126,16 +126,8 @@ def render(lay, theme: Theme = None, scale: float = 1, flash: bool = False) -> I
                 font=f_act, fill=txt, anchor='rm')
 
     # ---- 「现在」线：钉在正中不动。刻度整条往上滚，就是轴点在穿过这条线 ----
-    # 回看（lay.now != lay.frame）时多画一条**灰**线标出真正的「现在」在哪：
-    # 视角往上退了多少帧，那条灰线就在指针上方多少像素。指针那行这时印「回看」。
-    now = lay.now if lay.now is not None else lay.frame
-    scrubbed = abs(now - lay.frame) > 1e-6
-    if scrubbed:
-        y_now = S(g.y_of(now, lay.frame))
-        if 0.0 <= y_now <= H:
-            dr.line([0, y_now, W, y_now], fill=th.tick)
-            dr.text((S(g.width - g.pad_right), y_now), '现在 %.1f' % now,
-                    font=f_small, fill=th.num, anchor='rm')
+    # （「回看」时那条额外的灰线 2026-10-13 跟着翻条那两颗键一起删了：指针不再离位，
+    #   刻度摆的那一帧就是「现在」。）
     py = S(lay.pointer_y)
     dr.line([0, py, W, py], fill=th.accent)
     dr.polygon([(S(g.ruler_w) - 7, py - S(4)), (S(g.ruler_w) - 7, py + S(4)),
@@ -144,11 +136,22 @@ def render(lay, theme: Theme = None, scale: float = 1, flash: bool = False) -> I
     # 「现在」两个字必须走中文字体：Bahnschrift 里没有汉字，PIL 也不会像 Tk 那样
     # 自动回退，用错字体就会画成两个空豆腐块。数字仍旧用 Bahnschrift，和刻度上的
     # 帧号保持同一种观感。
-    lbl, val = ('回看', '%.1f' % lay.frame) if scrubbed else ('现在', '%.1f' % now)
+    lbl, val = '现在', '%.1f' % lay.frame
     w_lbl = dr.textlength(lbl, font=f_small)
     w_val = dr.textlength(val, font=f_num)
-    nx = W - S(g.pad_right) - w_lbl - S(4) - w_val
-    dr.rectangle([nx - S(3), py - S(7), W - 1, py + S(7)], fill=th.bg)
+    # 读数右边缘 = W - now_pad_right（2026-10-13 从 pad_right 换过来）：原来读数贴最右边，
+    # 正好压在轴帧号那一列上（截图里「570」被读数盖掉一半）。垫底那块底色**只盖读数自己
+    # 这一段**，不再一路铺到右边 —— 否则指针线在读数右边整段被擦掉，那条线看着像断了。
+    x1 = W - S(g.now_pad_right)
+    nx = x1 - w_lbl - S(4) - w_val
+    dr.rectangle([nx - S(3), py - S(7), x1 + S(3), py + S(7)], fill=th.bg)
     dr.text((nx, py), lbl, font=f_small, fill=th.accent, anchor='lm')
     dr.text((nx + w_lbl + S(4), py), val, font=f_num, fill=th.accent, anchor='lm')
+
+    # ---- 刻度区四边 1px 描边（2026-10-13）----
+    # 为什么要有：刻度区底 (#0b0b0e) 对面板底 (#151517) 只差 1.06:1，画布边界看不出来，
+    # 刻度表像浮在面板上（用户看板：「刻度区读不出『一块凹槽』」）。描边最后画，压在
+    # 底色和「下一条」那条高亮行上面 —— 那条行本来一直铺到 W-1。
+    dr.rectangle([0, 0, W - 1, H - 1], outline=th.stroke,
+                 width=max(1, int(round(scale))))
     return img

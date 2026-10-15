@@ -117,7 +117,10 @@ CHECK_SAMPLES = 16
 VERIFY_SEEKS = (0.0, 0.5, 0.9)   # 在整段的这几个位置各取一小段来验（开头常是菜单）
 VERIFY_FRAMES = 8                # 每个位置取几帧
 VERIFY_LPAD = 12                 # 验的时候往 ROI 左边多取几列：白块在左边缘哪一侧才判得出
-VERIFY_LEFT_TOL = 5              # 白块起点离 ROI 左边缘超过这么多像素 = ROI 没钉在条槽上
+VERIFY_LEFT_TOL = 2              # 白块起点离 ROI 左边缘超过这么多像素 = ROI 没钉在条槽上。
+                                 # 原来是 5 —— 5px 在 50% 回费（每帧 4px）上是 1.25 帧、
+                                 # 25%（每帧 2px）上是 2.5 帧，正好放过了用户报的那几个数
+                                 # （「一费 61~62 帧」「119 帧只有 117 帧」）。
 VERIFY_JITTER = 3.0              # 白块左端的抖动上限（像素）
 VERIFY_MIN_HITS = 2              # 一小段里至少这么多帧看得见白块才有结论
 SNAP_LPAD = 40                   # 「吸附左端」时往左多看的列数（= 允许的最大回移量）
@@ -454,8 +457,12 @@ class VideoSource:
             if lay.width == vw and lay.height == vh:
                 ok, why = self._verify_layout(lay)
                 if ok is not False:
+                    # 自检只是「偏得不多」，不是「一像素不差」：表里那份是**上一次**量准的，
+                    # 窗口挪了 1~2px / 缩放改了半档，它就差那么几像素 —— 而相位全靠条槽
+                    # 左端这一个锚点。所以照抄之后仍按白块起点吸一次（8 帧，代价可忽略）。
+                    lay, snap_why = self._snap_bar_left(lay)
                     self.notes.append('费用条 / 按钮 ROI 直接用表里记的那份（跳过量条槽）'
-                                      '；自检：%s' % why)
+                                      '；自检：%s；%s' % (why, snap_why))
                     return (int(client[0]), int(client[1])), (int(offset[0]), int(offset[1])), lay
                 self.notes.append('⚠ 表里那份 ROI 对不上画面（%s）—— 丢掉它，'
                                   '重新量条槽' % why)

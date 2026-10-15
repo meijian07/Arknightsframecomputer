@@ -15,6 +15,9 @@
 钉的这组数字来自真负费录像 `Desktop 2026.10.09 - 22.36.10.14.mp4`
 （2560x1600 桌面录像、客户区 2560x1440 落在画面 (0,54)、条槽 240px、减号 41x5）。
 整段 1994 帧用真 read_sign 跑过：负费段 1768/1768 判对、闲时 226 帧零误报（最长横杠 7px）。
+下面第 6 组钉的是另一头的边界：**有损采集把减号芯磨暗**（实测 240~243）之后仍然认得出，
+再暗下去（没有白可认）就一律不判 —— 这两头都由 tools/check_state_synth.py 的
+reduced_rate_fp24_exact() 接着验「认出来了就一帧不差」。
 
 用法：python tools/check_sign_box.py
 """
@@ -58,18 +61,22 @@ def _band(a, y0, y1, x0, x1, value=255):
     a[y0:y1 + 1, x0:x1 + 1] = value
 
 
-def make_frame(with_minus=True):
-    """按上面那组真坐标画一张假 HUD：满条、数字、菱形、那行字。"""
+def make_frame(with_minus=True, white=255):
+    """按上面那组真坐标画一张假 HUD：满条、数字、菱形、那行字。
+
+    white 是 HUD 的「白电平」：有损采集（尤其是细横杠）会把 255 磨下去，
+    实测减号芯能掉到 240~243（见下面的第 6 组），所以白电平得能调。
+    """
     a = np.full((FRAME[1], FRAME[0]), 40, np.uint8)
-    _band(a, 1133, 1140, 2320, 2559)          # 费用条（满）
-    _band(a, 1050, 1113, 2519, 2524)          # 数字 "4" 的竖笔
-    _band(a, 1092, 1096, 2477, 2525)          # 数字 "4" 的横笔（49px，比阈值长）
-    _band(a, 1085, 1086, 2334, 2347)          # 菱形图标左半
-    _band(a, 1085, 1086, 2358, 2391)          # 菱形图标右半（34px，比阈值长）
+    _band(a, 1133, 1140, 2320, 2559, white)   # 费用条（满）
+    _band(a, 1050, 1113, 2519, 2524, white)   # 数字 "4" 的竖笔
+    _band(a, 1092, 1096, 2477, 2525, white)   # 数字 "4" 的横笔（49px，比阈值长）
+    _band(a, 1085, 1086, 2334, 2347, white)   # 菱形图标左半
+    _band(a, 1085, 1086, 2358, 2391, white)   # 菱形图标右半（34px，比阈值长）
     for y0, y1, x0, x1 in _TEXT:              # 「剩余可放置角色：7」
-        _band(a, y0, y1, x0, x1)
+        _band(a, y0, y1, x0, x1, white)
     if with_minus:
-        _band(a, MINUS[2], MINUS[3], MINUS[0], MINUS[1])
+        _band(a, MINUS[2], MINUS[3], MINUS[0], MINUS[1], white)
     return a
 
 
@@ -135,6 +142,28 @@ def main() -> int:
         sg = lay.sign
         check('框不碰条和文字行 / ' + tag, sg.y2 < lay.bar.y and sg.y2 < TEXT_TOP,
               'sign y%d..%d  条 y%d  文字 y%d' % (sg.y, sg.y2, lay.bar.y, TEXT_TOP))
+    # 6) 有损采集：减号芯被磨暗也必须认得出，且不许因此误报
+    #    实测依据（用户 2026-10-15 录像 `Desktop 2026.10.15 - 10.06.18.01.mp4`，
+    #    2560x1600 桌面录像、客户区 2549x1441、减号 41x4）：
+    #      减号芯峰值只有 240~243（同一帧里费用数字的笔画还有 250~251，条身还是 255），
+    #      按纯白 250 判 -> 整段 3150 帧**一帧都没认出减号**，一费 240 帧被数成 120 帧。
+    tag, lay = real[0]
+    dim = (255, 248, 243, 238, 229, 224)
+    for white in dim:
+        rn = read(make_frame(True, white), lay)
+        rp = read(make_frame(False, white), lay)
+        check('压暗到 %d 仍认得出减号 / %s' % (white, tag),
+              rn.negative and rn.run == MINUS[1] - MINUS[0] + 1
+              and not rp.negative and rp.run < thr_of(lay),
+              '有减号 run=%d 判=%s；无减号 run=%d 判=%s（阈值 %d）'
+              % (rn.run, rn.negative, rp.run, rp.negative, thr_of(lay)))
+    # 再暗下去（低于 features.SIGN_WHITE_FLOOR）就**不判**了：那一小块根本没有白，
+    # 硬还原等于放大噪声；「读不到负费」比「把正常回费判成负费」安全得多
+    # （后者会让整段按一半的速度推，见 docs 第 31 节）。
+    rn = read(make_frame(True, 200), lay)
+    check('暗到 200 一律不判负费（宁可漏也不误报）/ ' + tag, not rn.negative,
+          'run=%d，白电平低于 SIGN_WHITE_FLOOR(220)' % rn.run)
+
     # 5) 条挪多少，框挪多少（sign 是按条反推的）
     _c, _o, base = layout_from_bar_box(FRAME, BAR_BOX, 1.0)
     moved_box = Rect(BAR_BOX.x - 30, BAR_BOX.y - 25, BAR_BOX.w, BAR_BOX.h)

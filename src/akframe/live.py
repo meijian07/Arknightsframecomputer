@@ -24,8 +24,8 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from .features import read_bar, read_pause, read_sign, read_speed
-from .geometry import UI_SCALER_DEFAULT, Layout, layout_for, union_rect
+from .features import fill_run, read_bar, read_pause, read_sign, read_speed
+from .geometry import UI_SCALER_DEFAULT, Layout, Rect, layout_for, union_rect
 from .cost_rate import RateEstimator
 from .settings import DEFAULT_FRAMES_PER_COST, negative_override, parse_negative
 from .state import CSV_HEADER, LOGICAL_FPS, Counter, FrameResult
@@ -36,6 +36,20 @@ from .win32 import (ScreenGrabber, WindowInfo, arknights_ui_scaler, client_rect,
 def _default_build_layout(w: int, h: int) -> Layout:
     """没显式传 build_layout 时的兜底：按注册表里的「UI 缩放」算 ROI。"""
     return layout_for(w, h, arknights_ui_scaler())
+
+
+# ---- 费用条 ROI 左端吸附（在线） ----
+# 为什么必须有：read_bar 的 fill 是「ROI 左端起、到最右那个白像素」的宽度，而合成模型
+# （synthesis.synthesized_width）认的是「条槽左端起」。规则推出来的 ROI 左端（layout_for）
+# 实测比条槽左端偏几个像素 —— 实测一段 1440p 录像偏 5px，120 帧/费那一档就是 2.5 帧：
+# 起锚相位、每个周期的帧数全跟着偏，用户报的「119 帧只有 117 帧」「第 6 帧开始识别却
+# 记成第 4 帧」「一费 61~62 帧」都是它。录像链路早在 capture.snap_bar_left 里吸过，
+# 实时（PC）链路一直是规则直接给的 —— 这里补上同一套判据。
+SNAP_LPAD = 40      # 往左多看这么多列（= 允许的最大回移量）
+SNAP_MAX = 24       # 偏移超过这么多像素就不敢吸（多半框错地方了）
+SNAP_MIN_RUN = 6    # 白块短于这么多列当噪声
+SNAP_FRAMES = 6     # 一次吸附最多抓几拍等白块出现
+SNAP_EVERY = 8      # 采样循环里每隔多少拍试一次（没读到白块就下拍再来）
 
 
 @dataclass
@@ -150,6 +164,11 @@ class LiveMonitor:
         self._union = None
         self._last_window_scan = 0.0
         self._unreadable_since = None
+        # 费用条 ROI 左端还没吸附过：规则算出来的布局在被采样循环用起来之前，
+        # 会先按画面里的白块起点校一次左端（见 snap_bar_left）。
+        self._snap_pending = True
+        self._snap_try = 0
+        self.snap_note = ''
         for lay in ([layout] if layout is not None else []):
             self.set_layout(lay)
 
@@ -176,6 +195,51 @@ class LiveMonitor:
         self._apply_cost_rate()
         # 外接矩形变了，之前按尺寸缓存的 DIB 不再需要（ScreenGrabber 自己按尺寸复用）
         self._grabber = None
+
+    def snap_bar_left(self, layout: Layout, win: WindowInfo,
+                      tries: int = SNAP_FRAMES) -> tuple:
+        """把费用条 ROI 的左端吸到白块起点，返回 (新 layout, 说明)。
+
+        判据和 read_bar / features.fill_run 完全一致（逐列中位数 + 最长连续白），量到的
+        那一列就是读数以后会用的那一列。条这一拍没画出来（空条 / 满费 / 不在关卡里）时
+        返回原 layout 和空说明 —— 调用方下一拍再试。
+
+        只挪左端：条的右端（= x + w）保持不动；挪完不足模型宽度时按模型宽度补足，
+        这样 visible_w 不会小于合成模型的满值、尾部那几帧不会因为裁剪而分不出来。
+        bar_width_frac（模型里那个「条槽多宽」）一个字都不改 —— 误差是整块平移，
+        不是条被切窄。
+        """
+        if self._grabber is None:
+            self._grabber = ScreenGrabber()
+        band0, band1 = layout.bar_band
+        h = band1 - band0 + 1
+        x0 = max(0, layout.bar.x - SNAP_LPAD)
+        lpad = layout.bar.x - x0
+        w = min(layout.width - x0, layout.bar.w + lpad)
+        cx, cy = win.client[0], win.client[1]
+        left = None
+        for _ in range(max(1, int(tries))):
+            bgra = self._grabber.grab_bgra(cx + x0, cy + layout.bar.y + band0, w, h)
+            row = np.median(to_gray(bgra), axis=0).astype(np.int16)
+            run = fill_run(row)
+            if run is not None and (run[1] - run[0] + 1) >= SNAP_MIN_RUN:
+                left = x0 + int(run[0])
+                break
+        if left is None:
+            return layout, ''
+        shift = left - layout.bar.x
+        if shift == 0:
+            return layout, '费用条 ROI 左端已对齐白块起点'
+        if abs(shift) > SNAP_MAX:
+            return layout, ('费用条 ROI 左端离白块起点 %dpx（太大，不敢吸）' % shift)
+        x_new = layout.bar.x + shift
+        w_new = max(layout.bar.w - shift, layout.model_bar_w)
+        if x_new < 0 or x_new + w_new > layout.width or w_new < 4:
+            return layout, ''
+        bar = Rect(x_new, layout.bar.y, w_new, layout.bar.h)
+        return (replace(layout, bar=bar),
+                '费用条 ROI 左端按白块起点吸附 %+dpx（x %d -> %d，宽 %d -> %d）'
+                % (shift, layout.bar.x, x_new, layout.bar.w, w_new))
 
     def set_cost_rate(self, spec) -> float:
         """改回费速率：数字 = 手工档（一费几个逻辑帧）；'auto' = 开自动识别。
@@ -317,6 +381,17 @@ class LiveMonitor:
 
         if self.layout is None or (w, h) != (self.layout.width, self.layout.height):
             self.set_layout(self.build_layout(w, h))
+            self._snap_pending = True
+        if self._snap_pending:
+            self._snap_try += 1
+            if self._snap_try >= SNAP_EVERY:
+                self._snap_try = 0
+                snapped, why = self.snap_bar_left(self.layout, win)
+                if why:
+                    self.snap_note = why
+                    self._snap_pending = False
+                if snapped is not self.layout:
+                    self.set_layout(snapped)
 
         if self._grabber is None:
             self._grabber = ScreenGrabber()
@@ -549,6 +624,8 @@ class LiveMonitor:
         else:
             try:
                 self.set_layout(self.build_layout(*win.client_size), keep_elapsed=True)
+                self._snap_pending = True
+                self._snap_try = SNAP_EVERY - 1     # 下一拍就试着按白块起点吸左端
             except Exception as exc:                 # noqa: BLE001
                 note = '重新校准：按 %dx%d 重算 ROI 失败（%s: %s）' % (
                     win.client[2], win.client[3], type(exc).__name__, exc)

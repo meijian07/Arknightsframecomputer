@@ -140,6 +140,7 @@ def main(argv=None) -> int:
     templates = load_templates(args.templates)
 
     ui_scaler = args.ui_scaler if args.ui_scaler is not None else registry_ui_scaler()
+    calib_notes = []          # 条 ROI 的实测对齐结果（见 capture.snap_bar_left）
     images = resolve_images(args.input)
     if images:
         layout, fps, frames = open_images(images, fps=args.fps or 60.0, ui_scaler=ui_scaler)
@@ -166,9 +167,12 @@ def main(argv=None) -> int:
                     print('自动对齐  : 失败 —— 没在画面里找到费用条。'
                           '请用 --roi-offset X,Y 手动指定。')
                     return 2
-                roi_offset = (found[0], found[1])
+                # detect_offset 返回 (dx, dy, 阶跃强度, 填充出现频率, 平台列数)：
+                # 前两个是偏移，后三个只是诊断信息（平台列数录像链路不用，见 align）。
+                dx, dy, strength, fill_freq = found[:4]
+                roi_offset = (dx, dy)
                 print('自动对齐  : offset=%d,%d（频率阶跃 %.3f，填充出现频率 %.3f）'
-                      % found)
+                      % (dx, dy, strength, fill_freq))
             else:
                 ox, oy = spec.split(',')
                 roi_offset = (int(ox), int(oy))
@@ -189,12 +193,14 @@ def main(argv=None) -> int:
         layout, fps, frames = open_video(args.input, cache, ffmpeg=args.ffmpeg,
                                         force=args.force, size=size, ui_scaler=ui_scaler,
                                         client_size=client_size, offset=roi_offset,
-                                        bar_box=bar_box)
+                                        bar_box=bar_box, notes=calib_notes)
         source_desc = '视频 %s' % os.path.basename(args.input)
         if bar_box:
             print('费用条框  : x=%d y=%d w=%d h=%d  <- 手工指定（暂停/倍速通道关闭）'
                   % bar_box)
 
+    for note in calib_notes:
+        print('费用条对齐: %s' % note)
     print('输入      : %s' % source_desc)
     print('帧率      : %.3f fps' % fps)
     print('ROI       : bar=%s pause=%s speed=%s (scale=%.4f)'
