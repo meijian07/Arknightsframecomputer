@@ -61,8 +61,7 @@ from .geometry import (BAR_BAND_BOTTOM, BAR_BAND_TOP, PAUSE_SHAPE_BAND, Rect,
                        layout_for, layout_from_bar_box, load_calibration)
 from .live import LiveMonitor
 from .settings import (COST_RATE_PRESETS, DEFAULT_FRAMES_PER_COST,
-                       clamp_frames_per_cost, format_frames_per_cost,
-                       parse_negative, save_cost_rate)
+                       clamp_frames_per_cost, parse_negative, save_cost_rate)
 from .scale import ScaleGeom, Theme, build as build_scale
 from .scale_render import render as render_scale
 from .state import LOGICAL_FPS
@@ -222,6 +221,16 @@ RATE_ROW_H = 36
 #                （pack_propagate(False)）—— 切掉的只是上下两截**空行距**，字面在
 #                linespace 里居中（实测占 7~27px），22px 装得下，一px 都不切。
 NOTE_H = 22
+
+# 底部那一行**只许出现这七个词**（用户 2026-10-17：「只留下未开始，正在计数，暂停计数，
+# 正在校准，校准完成请开始，应用完成，导入失败请重试这几种状态，其他状态全删掉」）：
+#     未开始 / 正在计数 / 暂停计数 / 正在校准       —— 四个**状态**（_status_text 算）
+#     校准完成请开始 / 应用完成 / 导入失败请重试     —— 三个**动作结果**
+# _set_note 卡着这张表（不在表里的字一个都不写），所以「已清零」「回费速率 = …」
+# 「已切换到 X」这类说到哪儿是哪儿的反馈全没了。真出错 / 下一步要你动手的那几条走
+# _set_alert（一共六处，报备过 —— 见它的说明）。
+NOTE_WORDS = ('未开始', '正在计数', '暂停计数', '正在校准',
+              '校准完成请开始', '应用完成', '导入失败请重试')
 
 # 采样线程多久没有心跳就判「停了」。选 1 秒：正常采样 120Hz（心跳每 8ms 一次），
 # 1 秒 = 120 次心跳一次都没来，绝不可能是抖动；而 1 倍速下一个逻辑帧才 33ms，
@@ -1285,9 +1294,6 @@ class MonitorApp:
         self._win_w, self._win_h = self.COLLAPSED_W, 150
         self._refit()
         self._fit_at = 0.0
-        # 面板起来是待命态（上面 _counting_started 那段）：这一句告诉用户该点哪里。
-        if not self._counting_started:
-            self._set_note('点「开始」起采样（再点 = 暂停）', hold=8.0)
         # timeline_text 是直接把轴喂进面板输入框（演示模式用：轴不来自文件，
         # 但仍然能在面板里改、能点「应用到提词器」重解析）。
         if timeline_text:
@@ -2179,14 +2185,11 @@ class MonitorApp:
             return
         self._calib = on
         if on:
-            self._set_note('微调「%s」' % ROI_LABELS.get(self.target, self.target),
-                           hold=6.0)
             if self.overlay is None:
                 self.toggle_overlay()          # 进微调就把屏幕上的框亮出来
         else:
             if self.overlay is not None:
                 self.toggle_overlay()
-            self._set_note('已退出微调')
         if self._more:
             self._refit()
 
@@ -2367,7 +2370,7 @@ class MonitorApp:
         try:
             self.monitor.set_layout(apply_deltas(base, self.deltas, self.calib_scale))
         except ValueError:
-            self._set_note('ROI 越界（已忽略）')
+            pass                            # ROI 越界：忽略这一下（底部那行不说话）
 
     def _base_layout(self):
         """方向键的 delta 加在谁身上。
@@ -2399,27 +2402,25 @@ class MonitorApp:
                 src.save_current(layout=self.monitor.layout, source='面板校准',
                                 note='面板上挪过 / 确认过的 ROI')
             except OSError as exc:
-                self._set_note('%s存盘失败：%s' % (what, exc))
+                self._set_alert('%s存盘失败：%s' % (what, exc))
                 return
-            self._set_note('已保存校准（%dx%d 的%s）'
-                           % (src.size[0], src.size[1], what))
+            self._set_note('应用完成')
             return
         base = self._base_layout()
         if base is None:
-            self._set_note('没找到窗口，不能保存')
-            return
+            return                          # 没找到窗口，没什么可存的
         data = {'client': [base.width, base.height], 'scale': base.scale,
                 'deltas': self.deltas,
                 'abs': self.monitor.layout.to_dict() if self.monitor.layout else base.to_dict()}
         with open(self.calib_path, 'w', encoding='utf-8') as fh:
             json.dump(data, fh, ensure_ascii=False, indent=2)
-        self._set_note('已保存校准')
+        self._set_note('应用完成')
 
     def reset_calib(self):
         self.deltas = {'bar': [0, 0, 0, 0], 'pause': [0, 0, 0, 0], 'speed': [0, 0, 0, 0]}
         self.calib_scale = None
         self._apply_deltas()
-        self._set_note('已恢复默认布局')
+        self._set_note('应用完成')
 
     # ---------------- ROI 叠加框 ----------------
 
@@ -2427,10 +2428,8 @@ class MonitorApp:
         if self.overlay is not None:
             self.overlay.destroy()
             self.overlay = None
-            self._set_note('已关闭 ROI 框')
             return
         if self.monitor.layout is None or self.monitor.window is None:
-            self._set_note('没找到窗口')
             return
         x, y, w, h = virtual_screen_bounds()
         top = tk.Toplevel(self.root)
@@ -2456,7 +2455,6 @@ class MonitorApp:
             wrapper = top.winfo_id()
         set_click_through(wrapper)
         self._draw_overlay()
-        self._set_note('ROI 框已显示（鼠标可穿透）')
 
     def _draw_overlay(self):
         if self.overlay is None:
@@ -2492,7 +2490,7 @@ class MonitorApp:
         开始计数才生效、暂停期间没用」）。计数器那边其实已经归零了，这里只是把面板的
         显示跟上。
         """
-        self._reset_count('已清零')
+        self._reset_count()
 
     def _reset_count(self, note=None):
         """停采样 + 归零 + 主按钮回到「开始」（清零那个键和「切换模式」共用）。
@@ -2578,9 +2576,8 @@ class MonitorApp:
         按住的那一段既不会事后补进来、数字也不会跳）。符号画面变了的话是因为这个
         开关只管计数，不管特征提取。
         """
-        on = self.monitor.toggle_manual_pause()
+        self.monitor.toggle_manual_pause()
         self._sync_ctrl_row()          # 主按钮的字跟着三态走（开始 / 暂停 / 继续）
-        self._set_note('暂停计数' if on else '继续计数')
 
     def _show_rate_custom(self, on: bool) -> None:
         """「自定义」那一截（说明 + 输入框 + 应用）按需铺。
@@ -2603,7 +2600,6 @@ class MonitorApp:
             self._show_rate_custom(True)
             self.en_rate.focus_set()
             self.en_rate.select_range(0, 'end')
-            self._set_note('填「一费几个逻辑帧」再点「应用」')
             # 下拉框回显真实值，免得看上去像已经切过去了
             self.rate_var.set(_rate_label(self._current_rate()))
             return
@@ -2641,11 +2637,9 @@ class MonitorApp:
         try:
             v = float(text)
         except ValueError:
-            self._set_note('要填数字（例如 60，-50%% 回费就是 60）：%r' % text)
-            return
+            return                      # 填的不是数：不切档（底部那行只留七个词）
         if not (v > 0):
-            self._set_note('要填正数（例如 60）')
-            return
+            return                      # 0 / 负数同样不切档
         self.apply_cost_rate(v)
 
     def apply_cost_rate(self, value):
@@ -2664,13 +2658,11 @@ class MonitorApp:
         # 显示成「39  自定义」）就留着，方便接着微调。
         self._show_rate_custom(not _is_preset_rate(v))
         self.en_rate.delete(0, 'end')
-        note = '回费速率 = %s' % format_frames_per_cost(v)
         try:
             save_cost_rate(self.settings_path, v)
-            note += '（已存盘）'
-        except OSError:
-            note += '（存盘失败）'
-        self._reset_count('%s，已清零' % note)
+        except OSError as exc:
+            self._set_alert('%s存盘失败：%s' % ('回费速率', exc))
+        self._reset_count('应用完成')      # 切档位 = 一次「应用」
 
     def pick_window(self):
         """「换窗口」：换实时链路读的那个窗口（不改帧来源）。
@@ -2690,7 +2682,6 @@ class MonitorApp:
         self.monitor.set_layout(
             layout_for(win.client[2], win.client[3], arknights_ui_scaler()), keep_elapsed=True)
         self._apply_deltas()
-        self._set_note('已切换到 %s' % win)
 
     def recalibrate(self):
         """重新校准：把「从屏幕哪块读、当前相位对到哪一帧」重新对一遍。
@@ -2707,14 +2698,16 @@ class MonitorApp:
             # (进程名, 客户区尺寸) 的那份就直接套用，几毫秒；没有才跑网格搜索。
             # 数出来的帧数保留（_adopt_window 里把 Counter 接过来），本来在数就接着数。
             note = '窗口：重新校准（几秒钟，帧数保留）'
-            self._set_note(note, hold=4.0)
             self.start_window_calib(self._window_win, note=note)
             return note
         note = self.monitor.recalibrate()
         # 让看门狗从这一刻重新计时：否则刚重开就会被「之前停了 8 秒」立刻再报一次。
         self._last_ticks = self.monitor.stats.ticks
         self._stall_since = 0.0
-        self._set_note(note, hold=4.0)
+        # monitor 那句结论（'重新校准完成…' / '没找到窗口'）不再往底部写（词表见
+        # NOTE_WORDS）；**没找到窗口时不许写「校准完成请开始」** —— 那件事由告警行说。
+        if self.monitor.window is not None:
+            self._set_note('校准完成请开始', hold=6.0)
         return note
 
     def back_to_live(self):
@@ -2723,7 +2716,6 @@ class MonitorApp:
         切走时把「我们钉上去的置顶」还回去 —— 否则播放器会一直盖在所有窗口最上面。
         """
         if self._src_kind == 'live':
-            self._set_note('已经是 PC端')
             return
         try:
             self.monitor.stop()
@@ -2743,7 +2735,7 @@ class MonitorApp:
         self._apply_deltas()
         # 换来源 = 新计数（用户：「切换模式自动清零」）—— 切过去是**待命**态，
         # 点「开始」才数（和读窗口那条链路一个规矩，两边都一眼看得出没在数）。
-        self._reset_count('已切到 PC端（已清零，点「开始」接着数）')
+        self._reset_count()
         self.lb_source.configure(text='PC端（实时游戏窗口）', fg=UI_DIM)
 
     # ---------------- 读窗口 ----------------
@@ -2869,7 +2861,6 @@ class MonitorApp:
     def read_window(self):
         """读一个窗口：选窗口 -> 后台校准 -> 等用户点「开始计数」。"""
         if self._window_busy:
-            self._set_note('正在校准，等它弄完')
             return
         self._window_dialog('读取窗口', self.start_window_calib,
                             sub='选中哪个就读它 · 校准完点「开始」才起采样',
@@ -2882,7 +2873,6 @@ class MonitorApp:
         进度写在 _window_stage 里，主线程在 _poll_window 里读（后台线程不碰 Tk）。
         """
         if self._window_busy:
-            self._set_note('正在校准，等它弄完')
             return
         self._window_busy = True
         self._window_stage = ('align', -1.0, '准备…')
@@ -2890,7 +2880,7 @@ class MonitorApp:
         # 目标窗口不能被盖住（盖住的那块抓到的是盖它的那个窗口）：选完窗口**就钉**
         # （用户 2026-10-11：「窗口模式置顶删除，默认置顶」）。校准本身也要看得见画面。
         self._pin_window(win)
-        self._set_note(note or '正在校准…', hold=0.0)
+        self._set_note('正在校准', hold=0.0)
         threading.Thread(target=self._window_worker, name='akframe-window', daemon=True,
                          args=(win, box, force)).start()
 
@@ -2929,7 +2919,7 @@ class MonitorApp:
             self._window_busy = False
             if exc is not None:
                 self._release_pin()        # 校准没成：把刚钉上去的置顶还回去
-                self._set_note('读窗口失败：%s' % exc, hold=8.0, color=ERR)
+                self._set_alert('读窗口失败：%s' % exc, hold=8.0, color=ERR)
             else:
                 self._adopt_window(src, win, note)
             return False
@@ -2940,7 +2930,7 @@ class MonitorApp:
         self._set_text('perf', self.lb_perf,
                        '%s%s  %s' % (WINDOW_STAGES.get(stage, stage), pct,
                                                  note or '…'), fg=UI_DIM)
-        self._set_note(note or '正在校准…', hold=0.0)
+        self._set_note('正在校准', hold=0.0)
         # 看门狗在这段时间不能计时：否则校准一完就会被「之前停了 8 秒」立刻报一次
         self._last_ticks = self.monitor.stats.ticks
         self._stall_since = 0.0
@@ -3007,22 +2997,25 @@ class MonitorApp:
                     '自己框的' if src.manual else '自动试出来的',
                     ' ｜ '.join(src.notes[-2:])), fg=UI_FG)
         self._pin_noted = ''
-        self._counting_started = mon.alive
-        self._update_start_btn()
         self._last_ticks = mon.stats.ticks
         self._stall_since = 0.0
         if was_running:
             mon.start(reset_clock=False)     # 本来在数就接着数（时间基准不能倒退）
+        # 顺序要放在起线程**之后**：_counting_started 是「用户点过开始」那一态，
+        # 底部那一行和主按钮都看它。写在 mon.start() 前面的话，「本来在数、半路重新
+        # 校准」这一刻它还是 False，而线程已经在跑了 —— 面板会写着「未开始」而数字
+        # 在涨（用户 2026-10-17 收紧词表之后，这一拍不再有那句「已校准（帧数接着数）」
+        # 盖着，当场就露出来了）。
+        self._counting_started = mon.alive
+        self._update_start_btn()
         # 校准的结论只用**提示行那一行**说（用户 2026-10-11：「下方的教程删除」）。
         # 细节（src.describe / src.notes）搬进「当前输入」那行读数（fr_diag，不铺出来），
         # 要排查时仍然看得到。
         if not src.verified and not src.manual:
-            self._set_note('自动校准没把握（点「手动校准」）', hold=6.0)
-        elif was_running:
-            self._set_note('已校准（帧数接着数）', hold=4.0)
-        else:
-            self._set_note('已校准（%s），点「开始」'
-                           % ('自己框的' if src.manual else '自动试出来的'), hold=4.0)
+            self._set_alert('自动校准没把握（点「手动校准」）', hold=6.0)
+        elif not was_running:
+            # 本来就在数的话帧数接着走，状态行自己会写「正在计数」—— 不抢那一句
+            self._set_note('校准完成请开始', hold=6.0)
 
     def toggle_count(self):
         """「开始计数」/「停止计数」（主按钮）：采样线程由这一下控制。
@@ -3038,13 +3031,11 @@ class MonitorApp:
         mon = self.monitor
         if mon.alive:
             mon.stop()
-            self._set_note('已停止（帧数保留）')
         else:
             # reset_clock=True：停止这一段挂钟不算进来（t 从头来，dt<=0 只当一拍）。
             mon.start()
             if mon.counter is not None:
                 mon.counter.resync()
-            self._set_note('开始计数')
         self._counting_started = mon.alive
         self._last_ticks = mon.stats.ticks
         self._stall_since = 0.0
@@ -3158,7 +3149,6 @@ class MonitorApp:
         if ok:
             self._pin_noted = ''
             self._raise_ours()              # 抬目标会把它压到我们所有窗上面，得抢回来
-            self._note_pin('置顶丢了，已重新钉上')
             return
         self._note_pin('系统不让置顶（手动勾播放器「总在最前」）')
 
@@ -3238,7 +3228,7 @@ class MonitorApp:
         if text == self._pin_noted:
             return
         self._pin_noted = text
-        self._set_note(text, hold=6.0)
+        self._set_alert(text, hold=6.0)
 
     def _roi_hits(self) -> list:
         """面板压住了哪几个**被读的 ROI**（费用条 / 暂停键 / 倍速键）。
@@ -3311,8 +3301,7 @@ class MonitorApp:
         暂停 / 倍速那两路只能靠用户自己指，放大镜就是给他对位置用的。
         """
         if self._src_kind != 'window' or self._window_win is None:
-            self._set_note('先选一个窗口（校准 → 窗口）')
-            return
+            return                      # 还没读窗口：先去「校准 -> 读取窗口」
         if self._picker is not None:
             return
         win = self._window_win
@@ -3324,8 +3313,7 @@ class MonitorApp:
                     build_window_layout(win.exe, size[0], size[1]))
 
         self._picker = BoxPicker(self.root, fetch, 1, 0, on_apply=self._apply_window_box,
-                                 on_note=self._set_note, on_close=self._picker_closed)
-        self._set_note('对着参照图圈住 ROI', hold=6.0)
+                                 on_note=self._set_alert, on_close=self._picker_closed)
 
     def _picker_closed(self):
         """取景器关掉了（应用 / 取消 都算）——把引用清掉。
@@ -3346,7 +3334,6 @@ class MonitorApp:
         win = self._window_win
         if win is None:
             return
-        self._set_note('按这个框重算 ROI（几秒钟）', hold=0.0)
         what = '框了 %d 块' % len(box) if isinstance(box, dict) else '框了 %dx%d' % (box.w, box.h)
         self.start_window_calib(win, box=box, note='按框选校准（%s）' % what)
 
@@ -3365,20 +3352,17 @@ class MonitorApp:
         try:
             with open(path, encoding='utf-8-sig') as fh:      # utf-8-sig 顺带吃掉 BOM
                 text = fh.read()
-        except OSError as exc:
-            self._set_note('读不了这个轴文件：%s' % exc)
+        except OSError:
+            self._set_note('导入失败请重试')
             return
         self._timeline_path = os.path.abspath(path)
         self._set_axis_text(text)       # 顺手填进输入框，接着就能在面板里改
         tl = parse_lines(text.splitlines(), source=self._timeline_path)
         if not tl.cues:
-            self._set_note('没解析出轴（格式见 maps/example.md）')
+            self._set_note('导入失败请重试')
             return
         self._use_timeline(tl)
-        note = '已导入 %s：%d 条轴' % (tl.name, len(tl))
-        if tl.warnings:
-            note += '  ｜  ' + tl.warnings[0]
-        self._set_note(note)
+        self._set_note('应用完成')       # 导入 = 直接把这份轴应用到提词器
 
     def reload_timeline(self):
         """重新解析当前轴：来自文件就重读文件，来自面板就重新解析输入框。"""
@@ -3388,7 +3372,6 @@ class MonitorApp:
         if self.prompter.timeline is not None:
             self.apply_axis_text()
             return
-        self._set_note('还没有轴（点「导入轴…」）')
 
     def open_axis_dialog(self):
         """「导入轴…」：弹一个**独立小窗**（看板批注第 6 条）。
@@ -3483,20 +3466,17 @@ class MonitorApp:
         """把轴窗口里的文本解析成轴，换掉当前提词用的轴。"""
         tl = parse_lines(self._axis_read().splitlines(), source='(轴窗口)')
         if not tl.cues:
-            self._set_note('没解析出轴（例如：120 部署银灰）')
+            self._set_note('导入失败请重试')
             return
         self._timeline_path = None      # 轴现在来自面板，不再是某个文件
         self._use_timeline(tl)
-        note = '已应用面板里的 %d 条轴' % len(tl)
-        if tl.warnings:
-            note += '  ｜  ' + tl.warnings[0]
-        self._set_note(note)
+        self._set_note('应用完成')
 
     def save_axis_text(self):
         """把轴窗口里的文本存成 md 文件（存完仍以窗口内容为准）。"""
         text = self._axis_read()
         if not text.strip():
-            self._set_note('轴文本是空的')
+            self._set_note('导入失败请重试')     # 轴相关的动作没成，就是这一句
             return
         path = filedialog.asksaveasfilename(
             parent=self.root, title='把轴保存成 md 文件', defaultextension='.md',
@@ -3506,14 +3486,13 @@ class MonitorApp:
             return
         with open(path, 'w', encoding='utf-8') as fh:
             fh.write(text.rstrip('\n') + '\n')
-        self._set_note('已保存到 %s（点「应用到提词器」生效）' % path)
+        self._set_note('应用完成')
 
     def clear_axis_text(self):
         """只清空轴文本；已经在跑的提词轴不动。"""
         self._axis_text = ''
         if self.txt_axis is not None:
             self.txt_axis.delete('1.0', 'end')
-        self._set_note('轴文本已清空')
 
     def _maps_dir(self) -> str:
         d = os.path.join(os.getcwd(), 'maps')
@@ -3600,8 +3579,6 @@ class MonitorApp:
         if p.newly:
             self._prom_flash_until = time.time() + 1.4
         flash = time.time() < self._prom_flash_until
-        if len(p.newly) > 1:
-            self._set_note('这一拍一下跨过 %d 条轴' % len(p.newly), hold=2.0)
 
         # 刻度用带小数的帧号：满费走挂钟时那才是精确值，刻度也能一格一格地滑，而不是
         # 整帧整帧地跳。轴逻辑那边照旧用整数（和离线 CSV 里的绝对帧号是同一个）。
@@ -3651,13 +3628,38 @@ class MonitorApp:
         return '暂停计数' if self._manual_paused() else '正在计数'
 
     def _set_note(self, text: str, hold: float = 3.0, color=None):
-        """底部那一行：一句话反馈（用户点完一件事之后）。
+        """底部那一行：**状态**（NOTE_WORDS 里那七个词之一），别的字进不来。
 
         hold > 0：这句话留 `hold` 秒，然后让位给**状态**（见 _status_text）——
         不让位的话它会一直挂在那儿，看起来就像一行甩不掉的状态。
-        hold = 0：一直留着，等下一个说话的人来盖。只留给两类：正在跑的工序进度
-        （校准期间 _tick_body 提前 return，轮不到状态那一段）和面板自己出错的告警。
-        color 留给「必须看一眼」的那几条用（读窗口失败这类），默认是淡灰。
+        hold = 0：一直留着，等下一个说话的人来盖。校准那道工序用它 —— 那段时间
+        _tick_body 提前 return，轮不到状态那一段。
+        color 留给「必须看一眼」的那几条用，默认是淡灰。
+
+        2026-10-17 用户把这一行的词表钉死（见 NOTE_WORDS）。这里**卡表**：不在表里的
+        字直接不写。卡表不只是少写几句 —— 「谁又随手加了一句提示」这件事从此在自检里
+        查得住（第 12 组把 ui.py 里所有字面量扫一遍），不用靠人记。
+        """
+        if text and text not in NOTE_WORDS:
+            return
+        self._set_text('note', self.lb_note, text, color or UI_DIM)
+        self._note_hold = (time.perf_counter() + hold) if hold > 0 else 0.0
+
+    def _set_alert(self, text: str, hold: float = 3.0, color=None):
+        """底部那一行的**例外**：只有「真出错 / 下一步要你动手」才走这里。
+
+        用户 2026-10-17 那句「其他状态全删掉，如果你觉得有很重要的不能删就告诉我」——
+        这几条就是报备过、留着的（正文见 docs 第 58 节）：
+            面板出错：…      面板自己崩了。不写的话数字就那么停着，看着像在漏帧，
+                             而控制台里那串 traceback 用户根本看不到。
+            存盘失败：…      校准没存上。不写的话用户以为存好了，下次启动还是老 ROI。
+            读窗口失败：…    读窗口这条路没成，得去「手动校准」自己框。
+            自动校准没把握…  同上：得去手动校准。
+            目标窗口不见了…  目标窗口被关了 / 被重建了，得重新选一个。
+            系统不让置顶…    播放器钉不住（画面会被别的窗盖住），得手动勾「总在最前」。
+            取参照帧失败：…  取景器那一帧没抓到（它自己会空着，得说一声）。
+        判据是「不说出来，用户既不知道该做什么、也看不出哪里不对」。只影响观感的那
+        些（已清零 / 已保存 / 已切换到 X …）一律删掉，不许走这里。
         """
         self._set_text('note', self.lb_note, text, color or UI_DIM)
         self._note_hold = (time.perf_counter() + hold) if hold > 0 else 0.0
@@ -3668,13 +3670,14 @@ class MonitorApp:
         冻住的界面看起来就是「数字不动了」，用户会以为在漏帧/卡住 —— 而真实原因
         只是某一行抛了个异常（实测踩过：ROI 预览拿到 None，_tick 崩掉之后
         root.after 不再排下一次，整个面板就停在那儿，只有控制台里有 traceback）。
-        所以这里兜住异常：印到控制台、把错误写进提示行，然后照常排下一次刷新。
+        所以这里兜住异常：印到控制台、把错误写进底部那一行（走 _set_alert ——
+        那是词表外的例外，见它的说明），然后照常排下一次刷新。
         """
         try:
             self._tick_body()
         except Exception as exc:                     # noqa: BLE001
             traceback.print_exc()
-            self._set_note('面板出错：%s' % exc, hold=0.0)
+            self._set_alert('面板出错：%s' % exc, hold=0.0)
         finally:
             self.root.after(self.poll_ms, self._tick)
 

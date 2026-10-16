@@ -209,6 +209,12 @@ def main() -> int:
               mon2.counter.elapsed >= elapsed,
               '重校准前 %d -> 之后 %d' % (elapsed, mon2.counter.elapsed))
         check('刚才在数，重校准完自己接着数', mon2.alive)
+        # 2026-10-17：_counting_started 是「用户点过开始」那一态（底部那一行 + 主按钮都
+        # 看它）。它以前写在 mon.start() 前面 —— 半路重新校准这一下会留下 False 而线程
+        # 已经在跑，于是面板写着「未开始」、数字却在涨（那一轮把底部词表收紧到七个词，
+        # 不再有「已校准（帧数接着数）」盖着它，当场露出来了）。
+        check('半路重新校准：_counting_started 跟着线程一起是 True（否则底下写「未开始」）',
+              app._counting_started is True, '%r' % app._counting_started)
 
         # ---- 4b. 手框按钮：用户指的位置直接钉上，**不再**跑那道几十秒的网格搜索 ----
         # 用户 2026-10-11：「暂停键倍速键也会截取不到，需要手动校准」。自动搜按钮只认
