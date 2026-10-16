@@ -72,6 +72,11 @@
         一律夹在工作区里（本机工作区到 y=1528，不然最下面那排键压在任务栏底下）。
     18. 第八轮（53）：取景器顶部从 12 行 / 681 字的总说明换成「一行提示（跟着目标走）+
         ? 展开全文」，界面上不再漏 markdown 星号；左图从屏幕 0.55 倍收到 0.40 倍。
+    22. 2026-10-17（用户：「把所有面板的直角换成经典的圆角」）：主面板 + 四个二级窗口
+        都换成 Win11 的 DWM 圆角（DWMWCP_ROUND），不用 SetWindowRgn（那是按区域裁剪，
+        边缘不抗锯齿：实测过渡像素 0 vs 86）。这一组钉住「系统真的记下了」（读回来）、
+        「二级窗口是映射之后才生效的」（建窗那一拍设会被系统丢掉）、「重新映射还在」、
+        「Win10 上安静退回直角」。
 
 用法：python tools/check_ui_keys.py
 """
@@ -283,7 +288,8 @@ def t_no_keys(app):
     """
     from akframe import ui as ui_mod
 
-    seqs = [s for s in app.root.bind() if s not in ('<Motion>',)]
+    # <Map> 是窗口级事件（圆角那个钩子挂在它上面），跟 <Motion> 一样收不到按键
+    seqs = [s for s in app.root.bind() if s not in ('<Motion>', '<Map>')]
     keys = [s for s in seqs if not s.startswith('<Button') and not s.startswith('<B1')
             and not s.startswith('<Double') and not s.startswith('<Enter')
             and not s.startswith('<Leave')]
@@ -2048,6 +2054,111 @@ def t_panel_skin(app):
           '%r %r' % (app.lb_note.winfo_manager(), app.lb_note.place_info().get('relwidth')))
 
 
+def t_round_corners(app):
+    """22：圆角（2026-10-17 用户：「把所有面板的直角换成经典的圆角」）。
+
+    走的是 Win11 的 DWM（DWMWA_WINDOW_CORNER_PREFERENCE = ROUND），不是
+    SetWindowRgn：后者按区域裁剪、边缘不抗锯齿（实测同一块角：过渡像素 86 vs 0）。
+
+    这里钉四件看一眼看不出来的事：
+      - 系统**真的**记下了 —— 读 DwmGetWindowAttribute 回来，不光看自己那个返回值
+        （属性号写错、系统把偏好丢掉，DwmSetWindowAttribute 照样返回 0）；
+      - 二级窗口**映射出来之后**才是 ROUND：建窗那一拍窗口还没映射，toplevel_hwnd()
+        拿到的是另一个句柄，设进去的会被系统丢掉（本机实测踩到过），真正生效的是
+        win32.set_round_corners_on_map 那个 <Map> 钩子；
+      - 重新映射（withdraw / deiconify）之后还在；
+      - 系统不支持这个属性（Win10）/ 拿不到句柄时安静退回直角，不抛异常。
+    """
+    import tkinter as tk
+    from akframe import ui as ui_mod, win32
+
+    root = app.root
+    root.deiconify()
+    root.update()
+
+    check('主面板设得进去（set_round_corners 返回 True）',
+          win32.set_round_corners(root, win32.DWMWCP_ROUND) is True)
+    got = win32.get_round_corners(root)
+    if got is None:
+        skip('系统读回圆角偏好', '系统不支持这个属性（Win10）/ 窗口读不到句柄')
+    else:
+        check('系统读回来就是 ROUND(2) —— 不是我们自己在记账',
+              got == win32.DWMWCP_ROUND, got)
+
+    # 主面板抖过 -alpha（_place 里那一下），窗口是分层的；实测圆角照样在
+    root.attributes('-alpha', 0.0)
+    root.update()
+    root.attributes('-alpha', 1.0)
+    root.update()
+    check('抖过 -alpha（分层窗口）之后圆角还在',
+          win32.get_round_corners(root) in (None, win32.DWMWCP_ROUND),
+          win32.get_round_corners(root))
+
+    # 二级窗口：四个都经过 _dialog_header（框选 ROI / 手动校准 / 读取窗口 / 导入编辑轴）
+    top = tk.Toplevel(root)
+    top.overrideredirect(True)
+    top.geometry('240x160+300+300')
+    ui_mod._dialog_header(top, '自检用二级窗口', top.destroy)
+    top.update()
+    root.update()
+    check('二级窗口映射出来之后就是 ROUND',
+          win32.get_round_corners(top) in (None, win32.DWMWCP_ROUND),
+          win32.get_round_corners(top))
+    # 读回是活的（设成直角就该读回直角）—— 不然上面那几条等于在测一个常量
+    win32.set_round_corners(top, win32.DWMWCP_DONOTROUND)
+    check('设成 DONOTROUND 之后读回来就是 1（读回这条链是通的）',
+          win32.get_round_corners(top) in (None, win32.DWMWCP_DONOTROUND),
+          win32.get_round_corners(top))
+    top.withdraw()
+    top.update()
+    top.deiconify()
+    top.update()
+    check('偏好被抹掉之后重新映射会补回 ROUND —— <Map> 钩子那一次真的干活了',
+          win32.get_round_corners(top) in (None, win32.DWMWCP_ROUND),
+          win32.get_round_corners(top))
+    top.destroy()
+
+    # 真的开一次「手动校准」（用户看得见的那个二级窗口）
+    app.open_calib_dialog()
+    try:
+        top = app._calib_win
+        for _ in range(3):
+            root.update()
+        hwnd = win32.toplevel_hwnd(top)
+        check('真开一次「手动校准」：窗口句柄认得到、偏好是 ROUND',
+              bool(hwnd) and win32.get_round_corners(top) in (None, win32.DWMWCP_ROUND),
+              win32.get_round_corners(top))
+    finally:
+        app.close_calib_dialog()
+        root.update()
+
+    # `_place` 每次换尺寸都调它 —— 一次 DwmSetWindowAttribute 是微秒级的，
+    # 不记账（句柄会被系统回收再发，记账迟早漏窗口），这里只钉「不发疯」。
+    calls = []
+    real = win32._dwmapi.DwmSetWindowAttribute
+
+    def spy(*a, **kw):
+        calls.append(1)
+        return real(*a, **kw)
+
+    win32._dwmapi.DwmSetWindowAttribute = spy
+    try:
+        app.toggle_more()
+        root.update()
+        app.toggle_more()
+        root.update()
+    finally:
+        win32._dwmapi.DwmSetWindowAttribute = real
+    check('展开 / 收起走一次只发一两次系统调用（不是每帧都在发）',
+          0 < len(calls) <= 4, len(calls))
+
+    # Win10 / 窗口还没建出来：安静退回直角
+    check('拿不到窗口句柄时返回 False（Win10 就是这么退回直角的）',
+          win32.set_round_corners(None) is False
+          and win32.set_round_corners(root.winfo_toplevel().winfo_children()[0]
+                                      if root.winfo_children() else None) is False)
+
+
 def main():
     print('面板键位 / 折叠自检（2026-10-10 示意图那批 + 2026-10-11 看板批注）')
 
@@ -2118,6 +2229,8 @@ def main():
                 t_panel_titlebar_fonts(app3)
                 print('21. 展开/收起那一拍：尺寸缓存 + 擦除刷子')
                 t_toggle_flicker(app3)
+                print('22. 圆角（Win11 的 DWM）')
+                t_round_corners(app3)
             finally:
                 kill_afters(app3)
                 try:

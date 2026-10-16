@@ -155,6 +155,100 @@ def add_taskbar_button(widget_root) -> bool:
         return False
 
 
+# 用户 2026-10-17：「把所有面板的直角换成经典的圆角」。
+# 走 DWM 的 DWMWA_WINDOW_CORNER_PREFERENCE（Win11 / build 22000+），不走
+# SetWindowRgn —— 理由见 set_round_corners 的说明。
+DWMWA_WINDOW_CORNER_PREFERENCE = 33
+DWMWCP_DEFAULT = 0        # 跟着系统「圆角 / 直角」那项设置
+DWMWCP_DONOTROUND = 1
+DWMWCP_ROUND = 2          # 大圆角（资源管理器 / 设置那一档，默认用它）
+DWMWCP_ROUNDSMALL = 3     # 小圆角
+_dwmapi = ctypes.WinDLL('dwmapi', use_last_error=True)
+_dwmapi.DwmSetWindowAttribute.argtypes = [wt.HWND, wt.DWORD, ctypes.c_void_p,
+                                          wt.DWORD]
+_dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
+_dwmapi.DwmGetWindowAttribute.argtypes = [wt.HWND, wt.DWORD, ctypes.c_void_p,
+                                          wt.DWORD]
+_dwmapi.DwmGetWindowAttribute.restype = ctypes.c_long
+
+
+def get_round_corners(widget_root):
+    """读回系统**真的**记在这个窗口上的圆角偏好（读不到返回 None）。
+
+    为什么要有这一条：`set_round_corners` 只按 DwmSetWindowAttribute 的返回值记账 ——
+    万一属性号写错、或系统悄悄不认，自己这边一点异常都看不出来。读回来才是真凭据
+    （自检第 22 组就是这么钉的）。
+    窗口还 withdraw 着 / 已经销毁时系统不认这个句柄（E_HANDLE 0x80070006），
+    Win10 上没有这个属性 —— 两种都算「读不到」，返回 None，不当失败。
+    """
+    try:
+        hwnd = toplevel_hwnd(widget_root)
+        if not hwnd:
+            return None
+        out = ctypes.c_int(-1)
+        hr = _dwmapi.DwmGetWindowAttribute(ctypes.c_void_p(hwnd),
+                                           DWMWA_WINDOW_CORNER_PREFERENCE,
+                                           ctypes.byref(out), ctypes.sizeof(out))
+        if hr != 0:
+            return None
+        return out.value
+    except Exception:                      # noqa: BLE001  Win10 / 窗口还没建出来
+        return None
+
+
+def set_round_corners(widget_root, pref: int = DWMWCP_ROUND) -> bool:
+    """把顶层窗口换成 Win11 的 DWM 圆角，返回系统接没接受。
+
+    为什么不走 SetWindowRgn + CreateRoundRectRgn（更老、更常见的做法）：那是按区域
+    **裁剪**，边缘不抗锯齿。同一块左上角实测（本机 150% DPI，把角裁下来放大 12 倍）：
+        DWM  圆角 -> 86 个过渡像素（平滑）
+        区域裁剪  -> 0 个（一格一格的台阶，肉眼能看出锯齿）
+    所以圆角用 DWM，锯齿那套只留作参考 —— 见 docs 第 57 节。
+
+    **得等窗口映射出来再设**（实测踩到的坑）：窗口还没映射时调用会返回成功，可
+    DwmGetWindowAttribute 读回来还是 0 —— 系统把这一次设的偏好丢了（映射前后
+    toplevel_hwnd() 给的句柄也确实不是同一个：本机实测 2233758 -> 映射后 1709512）。
+    所以除了建窗那一拍设一次，还要 set_round_corners_on_map() 挂个钩子在映射之后再补
+    一次；已经映射着的窗口随时设都行（换尺寸不用重设，这点和 SetWindowRgn 正相反）。
+
+    为什么不像 add_taskbar_button 那样记「设过了」的账：句柄会被系统回收再发出去，按
+    句柄记账迟早把「刚建好、复用了老句柄」的新窗口漏掉（DWM 属性跟着窗口走，老窗口
+    销毁时一起没了）。一次 DwmSetWindowAttribute 是微秒级的、反复设幂等，不记账更省心。
+
+    实测过：进程用过 -alpha / -transparentcolor 之后窗口是分层的（WS_EX_LAYERED），
+    DWM 圆角照样有效（主面板就是这么用的）。
+    Win10 上没有这个属性：调用会失败，这里返回 False —— 调用方忽略即可，退回直角，
+    其余一切不变。
+    """
+    try:
+        hwnd = toplevel_hwnd(widget_root)
+        if not hwnd:
+            return False
+        want = ctypes.c_int(pref)
+        hr = _dwmapi.DwmSetWindowAttribute(ctypes.c_void_p(hwnd),
+                                          DWMWA_WINDOW_CORNER_PREFERENCE,
+                                          ctypes.byref(want), ctypes.sizeof(want))
+        return hr == 0
+    except Exception:                      # noqa: BLE001  Win10 / 窗口还没建出来
+        return False
+
+
+def set_round_corners_on_map(widget_root, pref: int = DWMWCP_ROUND):
+    """挂一个 <Map> 钩子：窗口每被映射出来一次就补设一次圆角（理由见上）。
+
+    Tk 的 <Map> 事件连子控件的那些也会冒到顶层窗口的绑定上（本机实测建一个二级窗口会
+    来 6 次），所以只认「事件源就是顶层窗口自己」那一拍 —— 不然一次白白多好几个系统
+    调用。
+    """
+    def _on_map(ev):
+        if ev.widget is widget_root:
+            set_round_corners(widget_root, pref)
+    try:
+        widget_root.bind('<Map>', _on_map, add='+')
+    except Exception:                      # noqa: BLE001  窗口已经没了
+        pass
+
+
 def set_erase_brush(widget_root, color: str) -> bool:
     """把顶层窗口的**类背景画刷**换成面板底色，返回系统接没接受。
 

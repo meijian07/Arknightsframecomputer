@@ -70,8 +70,9 @@ from .timeline import Teleprompter, parse_lines
 from .win32 import (ScreenGrabber, add_taskbar_button, arknights_ui_scaler,
                     client_rect, is_above, is_topmost, is_window, minimize_window,
                     raise_window, set_click_through, set_topmost,
-                    set_erase_brush, to_gray, top_level, virtual_screen_bounds,
-                    work_area)
+                    set_erase_brush, set_round_corners,
+                    set_round_corners_on_map, to_gray, top_level,
+                    virtual_screen_bounds, work_area)
 
 # 「把 md 文件拖进【导入 / 编辑轴】窗口」这一条要 tkinterdnd2（**可选**依赖）：
 #     pip install tkinterdnd2
@@ -364,7 +365,13 @@ def _dialog_header(top, title, on_close, on_hint=None, hint_text='? 完整说明
     四个二级窗口以前是三套做法（只有系统标题栏 / 系统 + 自己画的「◆ 标题」两套 /
     裸 Listbox），用户要的是统一成面板那套。系统标题栏走 overrideredirect 去掉，
     于是「拖窗口」由 _drag_window 接在 header 上。
+
+    圆角也在这里统一设（四个二级窗口都经过这个函数，见 win32.set_round_corners）；
+    叫「二级窗口」的四个窗口分别是：框选 ROI / 手动校准 / 读取窗口 / 导入编辑轴。
+    建窗这一拍窗口还没映射，设了也会被系统丢掉 —— 真正生效的是那个 <Map> 钩子。
     """
+    set_round_corners(top)
+    set_round_corners_on_map(top)
     head = tk.Frame(top, bg=CARD)
     head.pack(fill='x')
     bar = tk.Frame(head, width=3, bg=ACCENT)
@@ -1233,6 +1240,12 @@ class MonitorApp:
         #     -> 「−」改走 win32.minimize_window，见 _minimize。
         self.root.overrideredirect(True)
         self.root.attributes('-topmost', True)
+        # 圆角（用户 2026-10-17：「把所有面板的直角换成经典的圆角」）。
+        # 走 Win11 的 DWM 圆角，不是 SetWindowRgn；按钮 / 窗口尺寸一律没动，
+        # 被切掉的只是四个角上的方角像素。见 win32.set_round_corners。
+        # 这一拍窗口还没映射（设了会被系统丢掉），真正生效的是 _on_map 那个钩子。
+        set_round_corners(self.root)
+        set_round_corners_on_map(self.root)
         sh = self.root.winfo_screenheight()
         # 默认**收起**（小面板）。真正的尺寸等 _build_ui() 之后按内容需求算（见 _refit）。
         self._more = False
@@ -1619,6 +1632,9 @@ class MonitorApp:
         self.root.geometry('%dx%d+%d+%d' % (w, h, x, y))
         self._asked_pos = (x, y)
         self._keep_taskbar_button()
+        # 圆角也顺手核一次（窗口级、跟尺寸无关的属性，不重设本来也不会掉 ——
+        # 留着是给「换尺寸这一拍正好赶上重新映射」兜底）。
+        set_round_corners(self.root)
 
     def _keep_taskbar_button(self):
         """核一次「无边框面板在任务栏里有没有按钮」（见 win32.add_taskbar_button）。
