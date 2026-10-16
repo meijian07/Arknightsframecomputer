@@ -72,7 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--no-ui', action='store_true', help='不开图形界面，控制台打印')
     p.add_argument('--duration', type=float, default=0.0, help='运行多少秒后自动退出（0=不限）')
     p.add_argument('--timeline', default=None,
-                   help='打轴器：启动时直接导入的 md 轴文件（界面里也能按 T 换）')
+                   help='打轴器：启动时直接导入的 md 轴文件（界面里也能用「导入轴…」换）')
     # ---- 演示模式：没有游戏画面也能把面板跑起来（刻度表预览 / 调界面用）----
     p.add_argument('--demo-axis', action='store_true',
                    help='演示模式：不找游戏窗口，用合成的费用条推着面板跑。'
