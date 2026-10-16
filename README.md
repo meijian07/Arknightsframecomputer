@@ -119,6 +119,14 @@ $env:PYTHONPATH='src'
 其中 `check_bar_linearity.py` / `check_timeline.py` 要传帧序列参数、`check_live.py` 要一份
 本地取样日志 `out/fake_log.txt`，缺件时它们会以退出码 2 / 1 提示，不会假绿。
 
+`out/cache/` 是抽流缓存（把录像解码成 ROI 灰度流的中间产物），跑一轮自检能长到 1GB 上下，
+攒多了就清一次 —— 纯缓存，删了不丢数据，下次读录像自动重算：
+
+```powershell
+.venv\Scripts\python.exe tools\clean_cache.py          # 先看会删多少
+.venv\Scripts\python.exe tools\clean_cache.py --yes    # 真删
+```
+
 ## 目录结构
 
 ```
