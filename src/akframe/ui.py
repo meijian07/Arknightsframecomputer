@@ -2564,7 +2564,7 @@ class MonitorApp:
         """
         on = self.monitor.toggle_manual_pause()
         self._sync_ctrl_row()          # 主按钮的字跟着三态走（开始 / 暂停 / 继续）
-        self._set_note('已暂停' if on else '继续计数')
+        self._set_note('暂停计数' if on else '继续计数')
 
     def _show_rate_custom(self, on: bool) -> None:
         """「自定义」那一截（说明 + 输入框 + 应用）按需铺。
@@ -3609,25 +3609,30 @@ class MonitorApp:
 
     # ---------------- 每帧刷新 ----------------
 
-    def _status_text(self, sampling_dead: bool = False) -> str:
+    def _status_text(self) -> str:
         """底部那一行的**状态**（用户 2026-10-11：「下方的状态描述用一行简短的文字，
         比如正在校准。。。；正在计数。。。」）。
 
         为什么要它：那一行原来只在「刚点过什么」之后才有字，平时空着 —— 而真正
-        **现在在干什么**（正在校准 / 正在计数 / 暂停 / 停了）反而没地方看。
-        动作反馈说完（hold 到点）就让位给它；状态没变一个 Tk 调用都不发
-        （_set_text 有记忆，见 _tick_body 里那一段）。
+        **现在在干什么**反而没地方看。动作反馈说完（hold 到点）就让位给它；
+        状态没变一个 Tk 调用都不发（_set_text 有记忆，见 _tick_body 里那一段）。
 
-        sampling_dead 由调用方传进来：那是 _tick_body 的看门狗判出来的，语义是
-        「在数，但采样线程不涨了」，这里只是换一句话说。
+        2026-10-16 收敛成**只有四个词**（用户：「不需要这么多，只留下未开始，正在
+        计数，暂停计数，正在校准」）：
+            正在校准 / 未开始 / 暂停计数 / 正在计数
+
+        两条改名 / 删除的理由：
+        * 「采样已停」不再是状态 —— 它当初是为了把「数字不动」和「游戏暂停」分开，
+          那件事现在由**告警行**说完整（红字「采样已停 %.1fs（原因）→ 点「重新校
+          准」」），底部这一行不重复第二遍；
+        * 「已暂停」改叫「暂停计数」：它指的是**你按了面板上那个暂停**（手动暂停计
+          数），不是游戏自己暂停 —— 游戏里按暂停时这一行照旧写「正在计数」。
         """
         if self._window_busy or self._calib:
-            return '正在校准…'
-        if sampling_dead:
-            return '采样已停'
+            return '正在校准'
         if not (self.monitor.alive and self._counting_started):
             return '未开始'
-        return '已暂停' if self._manual_paused() else '正在计数…'
+        return '暂停计数' if self._manual_paused() else '正在计数'
 
     def _set_note(self, text: str, hold: float = 3.0, color=None):
         """底部那一行：一句话反馈（用户点完一件事之后）。
@@ -3810,7 +3815,7 @@ class MonitorApp:
         if self._note_hold and now >= self._note_hold:
             self._note_hold = 0.0
         if not self._note_hold:
-            self._set_note(self._status_text(sampling_dead), hold=0.0)
+            self._set_note(self._status_text(), hold=0.0)
 
         if not dragging:
             self._render_previews(upd)
@@ -3829,8 +3834,9 @@ class MonitorApp:
             why = st.last_error or '采样线程已退出'
             self._set_warn('采样已停 %.1fs（%s）→ 点「重新校准」'
                            % (stall_s, why), ERR)
-            # 底部那一行**不再**跟着说一遍（用户要「一行简短的文字」）：那一行由
-            # _status_text 写「采样已停」，带下一步动作的那条留在告警行里。
+            # 底部那一行**不再**跟着说一遍（用户 2026-10-16：「只留下未开始，正在
+            # 计数，暂停计数，正在校准」）—— 「采样已停」这个状态已经删掉，红字 +
+            # 下一步动作都留在告警行这一条里。
 
     def _update_cycle(self, res):
         """更新「费用周期」那一行：一费几帧 + 本费走到第几帧。

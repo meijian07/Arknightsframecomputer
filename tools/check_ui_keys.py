@@ -34,7 +34,10 @@
         行在面板压住 ROI 时说话。
     12. 第五轮：模式名换成「PC端 / 窗口」；「手动校准」**两种模式都有**（PC端开二级
         窗口、窗口走参照图取景器，按模式分派 manual_calib）；底部那一行平时写**短状态**
-        （未开始 / 正在计数… / 已暂停 / 正在校准…），动作反馈说完自己让位。
+        （未开始 / 正在计数 / 暂停计数 / 正在校准），动作反馈说完自己让位。
+    2026-10-16：这四个词**收敛成只剩这四个**（用户：「不需要这么多，只留下未开始，
+    正在计数，暂停计数，正在校准」）—— 「采样已停」不再写底下一行（那件事归告警
+    行）、「已暂停」改名「暂停计数」。
     15. 第八轮（44）：取景器右边那块放大图能**按住拖动**（看框外面），平移不改倍数；
         框自己微调时视窗反向补，看的还是同一块画面。
     16. 第九轮（46）：放大图能**滚轮局部放大**（盯着鼠标那一点缩，双击复位）；
@@ -772,21 +775,25 @@ def t_status_row(app):
         app._tick_body()
         return app.lb_note.cget('text')
 
+    # 四个状态各读一次，顺便把「词表就只有这四个」钉住（用户 2026-10-16）
+    seen = []
     app._counting_started = False
-    check('没在数 -> 底下写「未开始」', status() == '未开始',
-          repr(app.lb_note.cget('text')))
+    seen.append(status())
+    check('没在数 -> 底下写「未开始」', seen[-1] == '未开始', repr(seen[-1]))
     app.monitor.start()
     app._counting_started = True
-    check('在数 -> 底下写「正在计数…」', status() == '正在计数…',
-          repr(app.lb_note.cget('text')))
+    seen.append(status())
+    check('在数 -> 底下写「正在计数」', seen[-1] == '正在计数', repr(seen[-1]))
     app.toggle_manual_pause()
-    check('暂停 -> 底下写「已暂停」', status() == '已暂停',
-          repr(app.lb_note.cget('text')))
+    seen.append(status())
+    check('暂停 -> 底下写「暂停计数」', seen[-1] == '暂停计数', repr(seen[-1]))
     app.toggle_manual_pause()
     app._calib = True
-    check('在微调 ROI -> 底下写「正在校准…」', status() == '正在校准…',
-          repr(app.lb_note.cget('text')))
+    seen.append(status())
+    check('在微调 ROI -> 底下写「正在校准」', seen[-1] == '正在校准', repr(seen[-1]))
     app._calib = False
+    check('底部状态就只有这四个词', set(seen) == {'未开始', '正在计数', '暂停计数', '正在校准'},
+          seen)
 
     # 动作反馈说完要让位（不让位的话底下一行又变成甩不掉的一句旧话）
     app._set_note('已清零')
@@ -795,7 +802,7 @@ def t_status_row(app):
     check('反馈还没到点：仍然是它（不许被状态抢掉）',
           app.lb_note.cget('text') == '已清零', repr(app.lb_note.cget('text')))
     status()
-    check('反馈到点：自己让位给状态', app.lb_note.cget('text') == '正在计数…',
+    check('反馈到点：自己让位给状态', app.lb_note.cget('text') == '正在计数',
           repr(app.lb_note.cget('text')))
 
     # 「一行简短的文字」查得住：所有写底下的字面量都不超 28 字、不换行
