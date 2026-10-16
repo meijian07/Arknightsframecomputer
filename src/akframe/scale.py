@@ -133,12 +133,6 @@ def one_line(text: str) -> str:
     return ' · '.join(x.strip() for x in (text or '').split('\n') if x.strip())
 
 
-def clip(text: str, n: int) -> str:
-    """按字符数截断（中文一个字算一个），超了用 … 结尾。"""
-    s = one_line(text)
-    return s if len(s) <= n else s[:n - 1] + '…'
-
-
 def _tick_steps(px_per_frame: float):
     """小 / 大刻度的间隔（帧）。小刻度不能密到糊成一片。"""
     minor = TICK_CANDIDATES[-1]

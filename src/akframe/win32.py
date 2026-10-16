@@ -107,6 +107,28 @@ def toplevel_hwnd(widget_root) -> int:
     return int(str(widget_root.frame()), 16)
 
 
+def _get_long_ptr():
+    '''拿 GetWindowLongPtrW，并把 ctypes 原型设成「指针宽度」的整数。
+
+    为什么非要设：64 位下这两个 API 收发的是 LONG_PTR（跟指针一样宽）。不设原型
+    ctypes 会按 C 的 int（32 位）解析，样式里高位的标记会被截掉 —— 而
+    WS_EX_APPWINDOW / WS_EX_TOPMOST / WS_EX_LAYERED 恰好全在高位。
+    设置是幂等的，抄几遍没有副作用，抽出来只为少抄几遍。
+    '''
+    fn = _user32.GetWindowLongPtrW
+    fn.restype = ctypes.c_ssize_t
+    fn.argtypes = [wt.HWND, ctypes.c_int]
+    return fn
+
+
+def _set_long_ptr():
+    '''拿 SetWindowLongPtrW 并设好 ctypes 原型（理由同 _get_long_ptr）。'''
+    fn = _user32.SetWindowLongPtrW
+    fn.restype = ctypes.c_ssize_t
+    fn.argtypes = [wt.HWND, ctypes.c_int, ctypes.c_ssize_t]
+    return fn
+
+
 def add_taskbar_button(widget_root) -> bool:
     """给顶层窗口补上「出现在任务栏」这一位，返回最后是不是真的带上了。
 
@@ -120,12 +142,8 @@ def add_taskbar_button(widget_root) -> bool:
     """
     try:
         hwnd = toplevel_hwnd(widget_root)
-        get = _user32.GetWindowLongPtrW
-        get.restype = ctypes.c_ssize_t
-        get.argtypes = [wt.HWND, ctypes.c_int]
-        setl = _user32.SetWindowLongPtrW
-        setl.restype = ctypes.c_ssize_t
-        setl.argtypes = [wt.HWND, ctypes.c_int, ctypes.c_ssize_t]
+        get = _get_long_ptr()
+        setl = _set_long_ptr()
         ex = get(hwnd, GWL_EXSTYLE)
         if ex & WS_EX_APPWINDOW:
             return True
@@ -318,12 +336,8 @@ def work_area() -> tuple:
 
 def set_click_through(hwnd: int) -> None:
     """给窗口加上「鼠标穿透 + 分层」样式，让它只显示不挡鼠标。"""
-    get = _user32.GetWindowLongPtrW
-    get.restype = ctypes.c_ssize_t
-    get.argtypes = [wt.HWND, ctypes.c_int]
-    setl = _user32.SetWindowLongPtrW
-    setl.restype = ctypes.c_ssize_t
-    setl.argtypes = [wt.HWND, ctypes.c_int, ctypes.c_ssize_t]
+    get = _get_long_ptr()
+    setl = _set_long_ptr()
     ex = get(hwnd, GWL_EXSTYLE)
     setl(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW)
 
@@ -347,9 +361,7 @@ def is_topmost(hwnd: int) -> bool:
     先问一句：标记还在就一个系统调用都不发（稳态零闪烁）；只有播放器切全屏 / 换视频
     **重建了窗口**（新窗口不带这个标记）才真去钉一次。
     """
-    get = _user32.GetWindowLongPtrW
-    get.restype = ctypes.c_ssize_t
-    get.argtypes = [wt.HWND, ctypes.c_int]
+    get = _get_long_ptr()
     return bool(get(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST)
 
 
