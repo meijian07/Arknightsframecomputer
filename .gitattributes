@@ -1,0 +1,9 @@
+# 文本文件一律 LF（和仓库已有的风格一致）；图片 / numpy 素材别动。
+# 为什么要有这个文件：以前 paths.py / check_live.py / fake_screen.py / v2_frames.csv
+# 是 CRLF，别人一碰就满屏假 diff（整文件被当成重写）。
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.gif binary
+*.npy binary
+*.ico binary
