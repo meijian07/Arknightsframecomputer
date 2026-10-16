@@ -1526,6 +1526,174 @@ def _hdr_btn(top, prefix):
     return None
 
 
+def t_panel_titlebar_fonts(app):
+    """20：去掉系统标题栏 / 打轴器字号放大到「时间」那一号 / 展开收起不闪（2026-10-16）。
+
+    三条用户原话：
+        「面板上方的『明日方舟 全局帧数计数器』那行白色的能不能删掉」
+        「打轴器上的字体太小，操作字体和帧号放大到主面板的『时间大小』」
+        「展开收起面板时 ui 会闪动一下」
+    """
+    from PIL import Image, ImageDraw, ImageFont
+
+    from akframe import scale_render, win32
+
+    root = app.root
+    root.deiconify()
+    root.update()
+
+    check('主面板也没有系统标题栏了（那条白字就是它）',
+          bool(root.overrideredirect()))
+
+    # 无边框窗口 Tk 的 iconify() 会直接拒绝（TclError: override-redirect flag is set），
+    # 「−」必须改走 Win32 的 SW_MINIMIZE —— 这一条按源码钉，不真去最小化面板
+    # （最小化之后自检进程自己还得把它弄回来，反而更容易把后面几组弄乱）。
+    src = io.open(os.path.join(ROOT, 'src', 'akframe', 'ui.py'), encoding='utf-8').read()
+    fn = [n for n in ast.walk(ast.parse(src))
+          if isinstance(n, ast.FunctionDef) and n.name == '_minimize']
+    calls = set()
+    for node in (ast.walk(fn[0]) if fn else []):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            calls.add(node.func.id)
+    check('「−」改走 Win32 的 minimize_window（Tk 的 iconify 对无边框窗口会报错）',
+          calls == {'minimize_window'}, calls)
+    check('无边框面板在任务栏里有按钮（不然最小化就点不回来）',
+          win32.add_taskbar_button(root) is True)
+
+    # 展开 / 收起：**真要现量**的那一小段窗口应该是全透明的 —— 否则 Tk 会先按旧尺寸
+    # 把新布局画一拍。缓存命中的路（平时那条）根本不进这里，所以把缓存清掉，逼出一条
+    # 真·现量路径来验。2026-10-16 之前这里靠「换过提示文字」来制造没命中，提示行不进
+    # 指纹之后就造不出来了 —— 换成清缓存，验的还是同一件事（_relayout 的契约）。
+    seen = []
+    real_attr = root.attributes
+
+    def spy(*a, **kw):
+        if a and a[0] == '-alpha':
+            seen.append(a[1])
+        return real_attr(*a, **kw)
+
+    app._fit_cache.clear()
+    root.attributes = spy
+    try:
+        app.toggle_more()
+        root.update_idletasks()
+        app.toggle_more()
+        root.update_idletasks()
+    finally:
+        root.attributes = real_attr
+    check('真要现量时那一拍窗口是全透明的（画在看不见的窗口上）',
+          seen.count(0.0) == 2 and seen[-1] == 1.0, seen)
+    check('换完布局透明度一定回到 1（否则面板一直是半透明的）',
+          float(root.attributes('-alpha')) == 1.0)
+
+    # 打轴器字号：26 = 150% 缩放下 Tk 13pt 的「时间」（一个汉字 26px）。
+    sizes = scale_render.font_sizes()
+    check('刻度表的字放大到主面板「时间」那一号（26px）',
+          sizes == (26, 26, 26), sizes)
+    g = app.scale_geom
+    dr = ImageDraw.Draw(Image.new('RGB', (8, 8)))
+    num_w = dr.textlength('8888', font=ImageFont.truetype(scale_render.FONT_NUM, sizes[0]))
+    check('刻度条装得下最宽的四位帧号、还留得下刻度线',
+          num_w + 12 <= g.ruler_w, '四位帧号 %.0fpx -> 刻度条 %dpx' % (num_w, g.ruler_w))
+    check('行高 / 行距够放这一号字（上下两行叠不到一起）',
+          g.label_gap >= g.label_h >= sizes[0], '%s / %s / %s'
+          % (g.label_h, g.label_gap, sizes[0]))
+
+
+def t_toggle_flicker(app):
+    """21：展开 / 收起那一拍的闪烁（2026-10-16 第二轮：「现在还是会闪」）。
+
+    连拍 300 帧/秒量出来的账（探针见 out/p74_* 那批图）：
+      - 老做法每次换布局都要**现量**尺寸，而量只能在 update_idletasks 里量 —— 那一拍
+        会按**旧**尺寸把新布局画一遍（展开时 = 打轴器已经插好、窗口还是收起的，大数字
+        被挤出窗口）。整段异常实测 26~47ms，等于 2~3 个屏幕刷新；
+      - 之后尺寸变化还自带一次整窗擦除 + 重画，而且系统擦的是窗口类的刷子 ——
+        Tk 那把在建窗时就定成黑色了（实测擦完那一帧是 #000000，面板底色是 #151517），
+        于是中间这一帧是一整块**纯黑**。
+
+    修法三条：尺寸按内容指纹缓存（命中就一次测量都不做、中间那一拍不存在）；
+    类擦除刷子换成面板底色（那一帧从「整块纯黑」降成「底色在、字晚一帧」）；
+    提示行的文字从指纹里去掉（它是定高行 —— 不去掉的话每换一句提示，下一次展开就
+    缓存没命中，而没命中那条路要 _relayout，用户看到的是面板整块消失一瞬）。
+
+    高帧率连拍（300 帧/秒，探针 probe24）实测这一次的账：
+      - 上一轮那版（每次换布局 _relayout 全透明 + 现量）：面板**整个消失 20ms**，
+        接着还有 27ms 的半成品，一共约 47ms = 3 个屏幕刷新；
+      - 现在这一版：整段只剩 1~2 帧「和两态都差一点点」的中间帧（差 2.7~2.9 /
+        量程 0~26），面板不消失、也不出现纯黑。
+    剩下那一帧是改窗口尺寸的固有代价（Tk 的擦除 + 重画不是一次成型的），要彻底消掉
+    得让面板在展开 / 收起时**根本不改尺寸**（另一套架构），这里不碰。
+    """
+    from akframe import ui as ui_mod, win32
+
+    root = app.root
+    root.deiconify()
+    root.update()
+
+    keys = list(app._fit_cache)
+    check('开机就把展开 / 收起两态尺寸都量好了（第一次点展开不用现量）',
+          {k[0] for k in keys} == {True, False} and len(keys) >= 2, keys)
+
+    app.toggle_more()
+    root.update_idletasks()
+    app.toggle_more()
+    root.update_idletasks()
+    calls = []
+    real = root.update_idletasks
+
+    def spy(*a, **kw):
+        calls.append(1)
+        return real(*a, **kw)
+
+    root.update_idletasks = spy
+    try:
+        app.toggle_more()
+    finally:
+        root.update_idletasks = real
+    check('命中缓存时展开 / 收起一次都不测量（没有「按旧尺寸画新布局」那一拍）',
+          calls == [], len(calls))
+
+    k0 = app._size_key()
+    note0, warn0 = app.lb_note.cget('text'), app.lb_warn.cget('text')
+    try:
+        # 提示行是 NOTE_H(22px) 的定高 Frame + place，写多少个字都不占尺寸。把它算进
+        # 指纹的代价是「每换一句提示，下一次展开就缓存没命中」，而没命中那条路得用
+        # _relayout 遮中间那一拍 —— 用户看到的是面板**整块消失**一瞬（实测过）。
+        app.lb_note.configure(text='一句会换行的长提示' * 3)
+        k1 = app._size_key()
+        check('提示行的文字不进尺寸指纹（定高行，字多了也不占位）', k1 == k0, (k0, k1))
+        calls[:] = []
+        root.update_idletasks = spy
+        try:
+            app.toggle_more()
+            app.toggle_more()
+        finally:
+            root.update_idletasks = real
+        check('提示换过之后展开 / 收起还是命中缓存（面板不会消失一瞬）',
+              calls == [], len(calls))
+        app.lb_warn.configure(text='告警：采样停了')
+        k2 = app._size_key()
+        app.lb_warn.configure(text='')
+        k3 = app._size_key()
+        check('告警行进尺寸指纹（它是真会铺出来 / 收起来的整行）', k2 != k3, (k2, k3))
+        app.lb_warn.configure(text=warn0)
+    finally:
+        app.lb_note.configure(text=note0)
+        app.lb_warn.configure(text=warn0)
+
+    win32.set_erase_brush(root, ui_mod.UI_BG)
+    hwnd = win32.toplevel_hwnd(root)
+    check('类擦除刷子换成了面板底色（展开那一帧不再是一整块纯黑）',
+          win32._get_class_long(hwnd, win32.GCLP_HBRBACKGROUND)
+          == win32._ERASE_BRUSHES[ui_mod.UI_BG]
+          and win32._ERASE_BRUSHES[ui_mod.UI_BG] != 0)
+    n = len(win32._ERASE_BRUSHES)
+    win32.set_erase_brush(root, ui_mod.UI_BG)
+    win32.set_erase_brush(root, ui_mod.UI_BG)
+    check('擦除刷子每色只建一把（_place 每次换尺寸都调它，不许每次新建拿 GDI 换内存）',
+          len(win32._ERASE_BRUSHES) == n)
+
+
 def t_dialog_shell(app):
     """17：二级窗口统一外壳（2026-10-13 第八轮，用户看完设计图：「都改成这一版吧」）。
 
@@ -1939,6 +2107,10 @@ def main():
             try:
                 print('19. 面板头一段：标题行 / 分隔线 / 按钮分档 / 回费行按需')
                 t_panel_skin(app3)
+                print('20. 去掉系统标题栏 / 打轴器字号放大 / 展开收起不闪')
+                t_panel_titlebar_fonts(app3)
+                print('21. 展开/收起那一拍：尺寸缓存 + 擦除刷子')
+                t_toggle_flicker(app3)
             finally:
                 kill_afters(app3)
                 try:

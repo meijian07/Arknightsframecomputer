@@ -43,6 +43,7 @@ maps/example.md。
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import threading
@@ -66,9 +67,10 @@ from .scale import ScaleGeom, Theme, build as build_scale
 from .scale_render import render as render_scale
 from .state import LOGICAL_FPS
 from .timeline import Teleprompter, parse_lines
-from .win32 import (ScreenGrabber, arknights_ui_scaler, client_rect, is_above,
-                    is_topmost, is_window, raise_window, set_click_through,
-                    set_topmost, to_gray, top_level, virtual_screen_bounds,
+from .win32 import (ScreenGrabber, add_taskbar_button, arknights_ui_scaler,
+                    client_rect, is_above, is_topmost, is_window, minimize_window,
+                    raise_window, set_click_through, set_topmost,
+                    set_erase_brush, to_gray, top_level, virtual_screen_bounds,
                     work_area)
 
 # 「把 md 文件拖进【导入 / 编辑轴】窗口」这一条要 tkinterdnd2（**可选**依赖）：
@@ -1196,7 +1198,7 @@ class MonitorApp:
         # 之后刻度区正好铺满 —— 不能再跟着 _refit 算出来的 w 走，那会自激
         # （w -> 画布 -> reqw -> w，实测顶到 609，见 _refit）。
         self.scale_geom = ScaleGeom(width=self.COLLAPSED_W - 20, height=SCALE_HEIGHT,
-                                    ruler_w=50,
+                                    ruler_w=84,
                                     px_per_frame=SCALE_HEIGHT / SCALE_SPAN_FRAMES)
         self.scale_theme = Theme()
         self._prom_state = None     # (当前帧, 全部轴, 已触发几条)，换缩放时重画要用
@@ -1218,9 +1220,18 @@ class MonitorApp:
         self._rule_need = None          # 上一拍大数字那一格的预留宽（见 _sync_rule）
         self._load_calib()
 
+        # 两态尺寸缓存：key -> (宽, 高)。见 _refit 上面的说明。
+        self._fit_cache = {}
         self.root = make_root()
         self.root.title('明日方舟 全局帧数计数器')
         self.root.configure(bg=UI_BG)
+        # 去掉系统标题栏（2026-10-16 用户：「面板上方的『明日方舟 全局帧数计数器』那行
+        # 白色的能不能删掉」）。窗内那一条 ▼ / − / × 本来就替代了它的三个键；拖动接在
+        # 整条 head 上，见 _drag_start。副作用两条，都补过了：
+        #   * 无边框窗口 Tk 不进任务栏 -> win32.add_taskbar_button 补一位（见 _place）；
+        #   * Tk 的 iconify() 对无边框窗口直接拒绝（"override-redirect flag is set"）
+        #     -> 「−」改走 win32.minimize_window，见 _minimize。
+        self.root.overrideredirect(True)
         self.root.attributes('-topmost', True)
         sh = self.root.winfo_screenheight()
         # 默认**收起**（小面板）。真正的尺寸等 _build_ui() 之后按内容需求算（见 _refit）。
@@ -1271,7 +1282,23 @@ class MonitorApp:
             self.apply_axis_text()
         elif timeline_path:
             self.load_timeline(timeline_path)
+        # 预量一次展开态，把两态尺寸都填进 _fit_cache（见 _refit）：不预量的话
+        # 用户**第一次**点展开仍然要现量 —— 那一次就还是中间绘制 + 闪。这里量的时候
+        # 窗口还没上屏（winfo_ismapped() 为假，_sync_pos 会直接返回），摆哪儿都不闪，
+        # 量完把布局还原成收起态。
+        if not self._more:
+            self._more = True
+            self._pack_more()
+            self._refit()
+            self._more = False
+            self.fr_more_top.pack_forget()
+            self.fr_more.pack_forget()
+            self._refit()
+
         # 焦点拿回主窗口（没有快捷键了，但输入框里留着光标会一直闪、也容易被误敲）
+        # 窗口上屏后再核一次任务栏按钮 / 擦除刷子：这两样都是「系统给的」，Tk 映射窗口
+        # 时可能覆盖掉（见 _keep_taskbar_button 上面那段）。
+        self.root.after(150, self._keep_taskbar_button)
         self.root.after(300, self.root.focus_set)
         self.root.after(80, self._tick)
 
@@ -1330,7 +1357,15 @@ class MonitorApp:
         self.fr_more_top.pack(fill='x', before=self.fr_nums)
 
     def _minimize(self):
-        """最小化（任务栏）。再点一下任务栏图标就回来。"""
+        """最小化（任务栏）。再点一下任务栏图标就回来。
+
+        2026-10-16：主面板去掉系统标题栏之后走的是 overrideredirect，Tk 的 iconify()
+        对这种窗口**直接拒绝**（实测 TclError: override-redirect flag is set），按钮会
+        变成死的。所以改叫 Win32 的 SW_MINIMIZE，任务栏那一格由 win32.add_taskbar_button
+        保证存在。Tk 那条老路留着兜底（万一哪天面板又变回有边框那种）。
+        """
+        if minimize_window(self.root):
+            return
         try:
             self.root.iconify()
         except tk.TclError:
@@ -1374,7 +1409,104 @@ class MonitorApp:
         self._dragging = False
         self._refit()
 
+    @contextlib.contextmanager
+    def _relayout(self):
+        """换布局这一小段把窗口设成**全透明**（防「闪一下」）。
+
+        2026-10-16 用户：「展开收起面板时 ui 会闪动一下」。根因是 Tk 的重绘在 idle 里
+        做，而 _refit 中间必须调 update_idletasks() 才量得出内容要多高 —— 那一拍就会
+        拿着**旧**的窗口尺寸把**新**布局画一遍（450x280 的刻度表先冒出来、底下的行被挤
+        出去），看上去就是闪一下。设成全透明之后这一拍画在看不见的窗口上，等尺寸和内容
+        都就位了再恢复。展开/收起、告警行收放、重校准都走 _refit，所以挂在这里最省事。
+
+        为什么不用 withdraw / deiconify：那会把窗口从屏幕上摘掉再挂回来 —— 任务栏、
+        Z 序、焦点都要重来一遍，而面板是置顶的，重新映射很容易被游戏窗口抢到上面去。
+        -alpha 只改透明度，映射状态和 Z 序都不动。
+        """
+        try:
+            self.root.attributes('-alpha', 0.0)
+        except tk.TclError:                  # 窗口还没建出来 / 已经销毁
+            yield
+            return
+        try:
+            yield
+        finally:
+            try:
+                self.root.attributes('-alpha', 1.0)
+            except tk.TclError:
+                pass
+
     def _refit(self):
+        """换布局：重算一次窗口尺寸（命中缓存就只摆位置，不测量）。
+
+        `_fit_at` 那一句见下面命中分支里的注释（不推后的话收起态会被 _fit_window 撑回去）。
+
+        为什么要有缓存（2026-10-16 用户第二次报「展开收起还是会闪」，实测出来的根因）：
+        Tk 换布局必须先 update_idletasks 才量得出内容要多高，而那一拍会**按旧窗口尺寸
+        把新布局画一遍** —— 展开时是「打轴器已经插进去、但窗口还是收起的」，大数字被挤
+        出窗口，看着就是一帧乱画面。实测这一拍 7ms，加上之后 resize 触发的整窗擦除 +
+        重画，整段异常 26~47ms（连拍 300 帧/秒量出来的）。
+
+        尺寸其实只在**内容变了**的时候才会变（提示文字换行、告警行收放、换模式），
+        所以按 _size_key() 缓存两态的 (宽, 高)。命中就没有中间绘制那一拍，展开/收起
+        只剩 resize 本身那一帧；不命中才走 _refit_now 老老实实重新量（并把中间那一拍
+        用 _relayout 遮掉，见那里）。
+
+        命中也要重铺 wraplength：两态量出来的 w 可能不一样（展开态内容更宽），
+        不重铺的话提示行会按上一态的宽度折行、高度对不上。
+        """
+        key = self._size_key()
+        got = self._fit_cache.get(key)
+        if got is not None:
+            self._win_w, self._win_h = got
+            self._apply_wraps(got[0])
+            self._place(got[0], got[1])
+            # 这里**不能**顺手 update_idletasks（那就是要躲开的那一拍），所以这一趟
+            # 结束的时候 geometry manager 还没重算 —— `winfo_reqheight()` 读到的还是
+            # **上一态**的值（实测：收起之后仍是展开态的 628）。_fit_window 每 0.5 秒
+            # 拿它和 _win_h 比一次、只见长不见缩，正好会在这一刻把收起态又撑回 628
+            # （用户会看到「点了收起，面板过一下自己又变高」）。
+            # 把它的计时器往后推一格：等下一拍 idle 把 reqheight 刷成真值再核。
+            self._fit_at = time.perf_counter()
+            return
+        with self._relayout():
+            self._refit_now()
+        self._fit_cache[key] = (self._win_w, self._win_h)
+        self._fit_at = time.perf_counter()
+
+    def _size_key(self):
+        """会影响窗口尺寸的那几样东西（其余内容变化一律不影响高度）。
+
+        只有**真会换行 / 真会收放**的行才算进来：诊断那几行挂在 fr_diag 上、从头到尾
+        不 pack，写多少个字都不占位；性能 / 采样那两行同理。算进来的是：
+        - 展开态还是收起态（差着整块打轴器）
+        - 告警行的文字（它铺出来时 wraplength 一定，字多了会多折一行）
+        - 回费效率那一行有没有铺出「自定义」的输入框（宽度会变）
+        - 面板基准宽度（换分辨率 / 改常量时会变）
+
+        **提示行的文字不算**（2026-10-16 第二次改）：fr_note 是 NOTE_H(22px) 的定高
+        Frame、lb_note 在它里面 place —— 写多少个字都不占尺寸。之前把它算进指纹的
+        代价是：每次提示文字换一句（「开始计数」「已暂停」「正在校准…」…），下一次
+        展开 / 收起就变成**缓存没命中**，走 _refit_now 那条路（那一趟要 update_idletasks
+        现量，得用 _relayout 把中间那一拍遮掉）—— 用户看到的就是面板**整块消失**一瞬。
+        实测：这一条修掉之后，展开 / 收起在任何时候都命中缓存。
+        """
+        return (bool(self._more), self.COLLAPSED_W,
+                self.lb_warn.cget('text'),
+                self.fr_rate_custom.winfo_manager() != '')
+
+    def _apply_wraps(self, w: int) -> None:
+        """按最终宽度把 wraplength 铺一遍（顺序和 _refit_now 里一致）。
+
+        先按基准宽铺一次、再按量出来的宽铺一次：只铺后者的话，上一态留下的窄 wrap
+        会让一行长提示把宽度顶开（_refit_now 上面那段注释踩过同样的坑）。
+        """
+        base = self.COLLAPSED_W
+        self._set_wraps(max(360, base - 30))
+        self._fit_preview_canvas(base)
+        self._set_wraps(max(360, w - 30))
+
+    def _refit_now(self):
         """按当前展开状态把窗口尺寸重新夹一次（收起 = 小的，展开 = 大的）。
 
         为什么不写死尺寸：收起态只有 4 行，撑到 1000 高就是一大片空白；展开态的行数
@@ -1396,9 +1528,9 @@ class MonitorApp:
             return
         w = min(max(base, need_w), max(420, sw - 40))
         # 用 base 而不是算出来的 w：画布宽一旦跟着 w 走就自激（w -> 画布 -> reqw -> w，
-        # 实测直接顶到 609）。
-        self._fit_preview_canvas(base)
-        self._set_wraps(max(360, w - 30))
+        # 实测直接顶到 609）。这一遍和 _apply_wraps 里那一遍是同一件事 —— 收敛在那儿，
+        # 免得两条路径各写一份、以后改一条漏一条。
+        self._apply_wraps(w)
         try:
             self.root.update_idletasks()
             need_h = self.root.winfo_reqheight()
@@ -1486,6 +1618,20 @@ class MonitorApp:
         y = min(max(8, y), max(8, bottom - h - off - 8))
         self.root.geometry('%dx%d+%d+%d' % (w, h, x, y))
         self._asked_pos = (x, y)
+        self._keep_taskbar_button()
+
+    def _keep_taskbar_button(self):
+        """核一次「无边框面板在任务栏里有没有按钮」（见 win32.add_taskbar_button）。
+
+        为什么每拍核：Tk 重新映射窗口（最小化 -> 从任务栏点回来）之后可能把那一
+        位清掉，那一刻盘再补一次就找不回来了。_place 只在「尺寸真的变了」时被调
+        （不在 8ms 那条热路径上），所以这里顺手核一下不花钱。
+        """
+        add_taskbar_button(self.root)
+        # 顺手把窗口类的擦除刷子也对齐到面板底色：Tk 每次重新映射窗口都可能把它改回
+        # 黑色，而「展开 / 收起改尺寸」那一拍就是先按这把刷子擦一遍整块客户区再画 ——
+        # 刷子不对的时候中间那一帧是一整块纯黑（见 win32.set_erase_brush）。
+        set_erase_brush(self.root, UI_BG)
 
     def _sync_pos(self, off):
         """窗口被**别人**挪走时，把位置缓存按同一段位移平移（2026-10-11）。

@@ -38,7 +38,14 @@ WS_EX_TOPMOST = 0x00000008              # 这个窗口现在是不是「置顶�
 # SetWindowPos：只改 Z 序那三个标志（见 set_topmost）
 SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
+SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
+SWP_FRAMECHANGED = 0x0020             # 改完样式要让系统重算一次非客户区（见 add_taskbar_button）
+
+WS_EX_APPWINDOW = 0x00040000          # 有这一位的顶层窗口才会出现在任务栏
+SW_MINIMIZE = 6                       # ShowWindow（见 minimize_window）
+GCLP_HBRBACKGROUND = -10            # 窗口类的背景画刷（SetClassLongPtr 的 index）
+_ERASE_BRUSHES = {}                 # color -> 刷子句柄（见 set_erase_brush）
 GA_ROOT = 2                           # GetAncestor：一直往上找到所在的那个顶层窗口
 GW_HWNDNEXT = 2                       # GetWindow：Z 序里的下一个窗（见 is_above）
 
@@ -88,6 +95,123 @@ def client_rect(hwnd: int) -> tuple:
 
 def is_minimized(hwnd: int) -> bool:
     return bool(_user32.IsIconic(hwnd))
+
+
+def toplevel_hwnd(widget_root) -> int:
+    """Tk 根窗口对应的那个**顶层窗口句柄**。
+
+    为什么不用 winfo_id()：它给的是里面那个 TkChild，改 WS_EX_* 样式要改在外层窗口上
+    才生效。主面板现在走 overrideredirect（没有系统标题栏），frame() 返回的就是顶层
+    窗口自己，所以这一条够用（有 wrapper 的普通窗口返回 wrapper，同样是对的）。
+    """
+    return int(str(widget_root.frame()), 16)
+
+
+def add_taskbar_button(widget_root) -> bool:
+    """给顶层窗口补上「出现在任务栏」这一位，返回最后是不是真的带上了。
+
+    背景（2026-10-16 主面板去掉系统标题栏那一条）：overrideredirect 的窗口 Tk 会给它
+    打上 WS_EX_TOOLWINDOW —— 代号是「工具窗口」，**不进任务栏**。于是「−」（最小化）
+    就成了一条不归路：缩下去之后屏幕上没有任何东西可以点回来。补上 APPWINDOW 之后
+    任务栏里有按钮，点一下就能恢复。
+
+    每拍调也没关系：这一位已经在就一个系统调用都不发（Tk 重新映射窗口时可能把它清掉，
+    所以调用方会反复核）。
+    """
+    try:
+        hwnd = toplevel_hwnd(widget_root)
+        get = _user32.GetWindowLongPtrW
+        get.restype = ctypes.c_ssize_t
+        get.argtypes = [wt.HWND, ctypes.c_int]
+        setl = _user32.SetWindowLongPtrW
+        setl.restype = ctypes.c_ssize_t
+        setl.argtypes = [wt.HWND, ctypes.c_int, ctypes.c_ssize_t]
+        ex = get(hwnd, GWL_EXSTYLE)
+        if ex & WS_EX_APPWINDOW:
+            return True
+        setl(hwnd, GWL_EXSTYLE, ex | WS_EX_APPWINDOW)
+        _user32.SetWindowPos(ctypes.c_void_p(hwnd), None, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED)
+        return bool(get(hwnd, GWL_EXSTYLE) & WS_EX_APPWINDOW)
+    except Exception:                      # noqa: BLE001  窗口还没建出来 / 已经被销毁
+        return False
+
+
+def set_erase_brush(widget_root, color: str) -> bool:
+    """把顶层窗口的**类背景画刷**换成面板底色，返回系统接没接受。
+
+    为什么需要这一条（2026-10-16 用户第二次报「展开收起还是会闪」，连拍 300 帧/秒
+    抓出来的）：展开 / 收起要改窗口尺寸，系统会先把整块客户区按**类背景画刷**擦一遍、
+    再让子控件各自重画。Tk 给窗口类配的那把刷子在建窗时就定成黑色了（实测擦完那一帧
+    是 #000000，而面板底色是 #151517），于是中间这一帧是一整块**纯黑** —— 面板越暗
+    越扎眼。换成同色刷子之后，那一帧变成「底色在、字晚一帧」，肉眼基本看不出来。
+
+    每色只建一把刷子、且**类上已经是它就不发系统调用**（_place 每次换尺寸都会调到这里，
+    无条件重建就是拿 GDI 对象换内存，一个进程只有 1 万个额度）。
+
+    CreateSolidBrush 收的是 COLORREF = 0x00BBGGRR（**BGR**，不是 RGB），传反了会变成
+    另一种颜色。刷子按类共享、系统可能不拷贝它，所以建出来就**不能删**。
+    """
+    try:
+        hwnd = int(widget_root.frame() and toplevel_hwnd(widget_root))
+    except Exception:                      # noqa: BLE001  窗口还没建出来 / 已经被销毁
+        return False
+    brush = _ERASE_BRUSHES.get(color)
+    if brush is None:
+        try:
+            r = int(color[1:3], 16)
+            g = int(color[3:5], 16)
+            b = int(color[5:7], 16)
+            brush = _gdi32.CreateSolidBrush((b << 16) | (g << 8) | r)
+        except (ValueError, AttributeError):
+            return False
+        if not brush:
+            return False
+        _ERASE_BRUSHES[color] = brush
+    try:
+        if _get_class_long(hwnd, GCLP_HBRBACKGROUND) == brush:
+            return True                    # 已经是它了
+        _set_class_long(hwnd, GCLP_HBRBACKGROUND, brush)
+        return _get_class_long(hwnd, GCLP_HBRBACKGROUND) == brush
+    except Exception:                      # noqa: BLE001
+        return False
+
+
+def _class_long_fn(name_ptr: str, name32: str):
+    """取 Set/GetClassLongPtrW（32 位 Python 上这两个 API 不存在，退回 ...LongW）。"""
+    fn = getattr(_user32, name_ptr, None) or getattr(_user32, name32)
+    fn.restype = ctypes.c_ssize_t
+    fn.argtypes = [wt.HWND, ctypes.c_int, ctypes.c_ssize_t]
+    return fn
+
+
+def _get_class_long(hwnd: int, index: int):
+    """读窗口**类**的一个 LONG_PTR（返回值可能是画刷句柄，所以按有符号量返回）。"""
+    fn = _class_long_fn('GetClassLongPtrW', 'GetClassLongW')
+    if fn is _user32.GetClassLongW:        # 32 位版没有第三个参数
+        fn.argtypes = [wt.HWND, ctypes.c_int]
+        return fn(ctypes.c_void_p(int(hwnd)), index)
+    return fn(ctypes.c_void_p(int(hwnd)), index, 0)
+
+
+def _set_class_long(hwnd: int, index: int, value: int) -> None:
+    """写窗口**类**的一个 LONG_PTR。"""
+    fn = _class_long_fn('SetClassLongPtrW', 'SetClassLongW')
+    fn(ctypes.c_void_p(int(hwnd)), index, value)
+
+
+def minimize_window(widget_root) -> bool:
+    """把一个 Tk 顶层窗最小化（走 Win32 的 SW_MINIMIZE，不走 Tk 的 iconify）。
+
+    为什么不能用 Tk 的 iconify()：无边框（overrideredirect）的窗口 Tk 直接拒绝 ——
+    `TclError: can't iconify ".": override-redirect flag is set`，按钮会变成死的。
+    Win32 的 SW_MINIMIZE 照样好使，配合 add_taskbar_button 就能从任务栏点回来。
+    """
+    try:
+        hwnd = toplevel_hwnd(widget_root)
+    except Exception:                      # noqa: BLE001
+        return False
+    return bool(_user32.ShowWindow(ctypes.c_void_p(hwnd), SW_MINIMIZE))
 
 
 def _exe_name(pid: int) -> str:
