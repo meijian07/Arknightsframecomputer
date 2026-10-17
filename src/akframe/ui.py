@@ -46,6 +46,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import sys
 import threading
 import time
 import traceback
@@ -227,8 +228,8 @@ NOTE_H = 22
 #     未开始 / 正在计数 / 暂停计数 / 正在校准       —— 四个**状态**（_status_text 算）
 #     校准完成请开始 / 应用完成 / 导入失败请重试     —— 三个**动作结果**
 # _set_note 卡着这张表（不在表里的字一个都不写），所以「已清零」「回费速率 = …」
-# 「已切换到 X」这类说到哪儿是哪儿的反馈全没了。真出错 / 下一步要你动手的那几条走
-# _set_alert（一共六处，报备过 —— 见它的说明）。
+# 「已切换到 X」这类说到哪儿是哪儿的反馈全没了。2026-10-18 用户把那六条报备过的
+# 例外也删了：出错只印控制台，底下这一行**只有**这七个词。
 NOTE_WORDS = ('未开始', '正在计数', '暂停计数', '正在校准',
               '校准完成请开始', '应用完成', '导入失败请重试')
 
@@ -1176,7 +1177,6 @@ class MonitorApp:
         self._pinned_hwnd = None                # 被我们钉到最上层的窗口（切走时还回去）
         self._pin_at = 0.0                      # 上次重新钉置顶的时刻（见 _keep_pin）
         self._full_ticks = 0                    # 满费格式还要多印几拍（见 _tick_body）
-        self._pin_noted = ''                    # 置顶相关的提示只报一次（别每 0.7s 刷一遍）
         self._roi_warn = ''                     # 当前那条「面板压住 ROI」告警（见 _refresh_roi_warn）
         self._picker = None                     # 参照图取景器（BoxPicker，框选费用条用）
         # 倍速模板（read_speed 认 1X / 2X 数字笔画用）。run_monitor 会把它传进来；
@@ -2402,7 +2402,7 @@ class MonitorApp:
                 src.save_current(layout=self.monitor.layout, source='面板校准',
                                 note='面板上挪过 / 确认过的 ROI')
             except OSError as exc:
-                self._set_alert('%s存盘失败：%s' % (what, exc))
+                print('%s存盘失败：%s' % (what, exc), file=sys.stderr)
                 return
             self._set_note('应用完成')
             return
@@ -2661,7 +2661,7 @@ class MonitorApp:
         try:
             save_cost_rate(self.settings_path, v)
         except OSError as exc:
-            self._set_alert('%s存盘失败：%s' % ('回费速率', exc))
+            print('%s存盘失败：%s' % ('回费速率', exc), file=sys.stderr)
         self._reset_count('应用完成')      # 切档位 = 一次「应用」
 
     def pick_window(self):
@@ -2919,7 +2919,7 @@ class MonitorApp:
             self._window_busy = False
             if exc is not None:
                 self._release_pin()        # 校准没成：把刚钉上去的置顶还回去
-                self._set_alert('读窗口失败：%s' % exc, hold=8.0, color=ERR)
+                print('读窗口失败：%s' % exc, file=sys.stderr)
             else:
                 self._adopt_window(src, win, note)
             return False
@@ -2996,7 +2996,6 @@ class MonitorApp:
                  % (win.exe, win.client[2], win.client[3],
                     '自己框的' if src.manual else '自动试出来的',
                     ' ｜ '.join(src.notes[-2:])), fg=UI_FG)
-        self._pin_noted = ''
         self._last_ticks = mon.stats.ticks
         self._stall_since = 0.0
         if was_running:
@@ -3012,7 +3011,7 @@ class MonitorApp:
         # 细节（src.describe / src.notes）搬进「当前输入」那行读数（fr_diag，不铺出来），
         # 要排查时仍然看得到。
         if not src.verified and not src.manual:
-            self._set_alert('自动校准没把握（点「手动校准」）', hold=6.0)
+            print('自动校准没把握（点「手动校准」）', file=sys.stderr)
         elif not was_running:
             # 本来就在数的话帧数接着走，状态行自己会写「正在计数」—— 不抢那一句
             self._set_note('校准完成请开始', hold=6.0)
@@ -3072,12 +3071,11 @@ class MonitorApp:
         已经把「每 0.7 秒无条件重钉」改成「先复核再动手」（见 _keep_pin）—— 钉上之后
         稳态一个系统调用都不发，所以不会再出现「窗口会闪」。
 
-        钉失败（系统不让）不用在这儿报：_keep_pin 每 0.7 秒复核一次，失败它会说一句话。
+        钉失败（系统不让）不用在这儿报：_keep_pin 每 0.7 秒复核一次，失败只印控制台。
         """
         hwnd = int(win.hwnd)
         self._pinned_hwnd = hwnd
         self._pin_at = 0.0                  # 下一拍立刻复核一次
-        self._pin_noted = ''
         try:
             ok = set_topmost(hwnd, True)
         except Exception:                      # noqa: BLE001
@@ -3129,10 +3127,9 @@ class MonitorApp:
         # 目标在这期间丢了标记就再没人钉（第 44 轮顺手补上）。
         if not is_window(hwnd):
             # 窗口没了（被关掉 / 播放器重建了它）。不自动换一个 —— 换窗口要重新校准、
-            # 帧号也得从头数，那是用户的决定；这里只把话说明白。
+            # 帧号也得从头数，那是用户的决定；这里只在控制台说一声。
             self._pinned_hwnd = None
-            self._pin_noted = ''
-            self._note_pin('目标窗口不见了，重新选一个（校准 → 窗口）')
+            print('目标窗口不见了，重新选一个（校准 → 窗口）', file=sys.stderr)
             return
         try:
             if is_topmost(hwnd):
@@ -3147,10 +3144,9 @@ class MonitorApp:
         except Exception:                   # noqa: BLE001
             ok = False
         if ok:
-            self._pin_noted = ''
             self._raise_ours()              # 抬目标会把它压到我们所有窗上面，得抢回来
             return
-        self._note_pin('系统不让置顶（手动勾播放器「总在最前」）')
+        print('系统不让置顶（手动勾播放器「总在最前」）', file=sys.stderr)
 
     def _our_windows(self) -> list:
         """我们自己开着的顶层窗口：面板 + 所有还铺在屏幕上的 Toplevel。
@@ -3222,13 +3218,6 @@ class MonitorApp:
         except Exception:                      # noqa: BLE001
             pass
         return False
-
-    def _note_pin(self, text):
-        """置顶相关的提示只弹一次：_keep_pin 每 0.7 秒跑一遍，每遍都写会把提示行刷爆。"""
-        if text == self._pin_noted:
-            return
-        self._pin_noted = text
-        self._set_alert(text, hold=6.0)
 
     def _roi_hits(self) -> list:
         """面板压住了哪几个**被读的 ROI**（费用条 / 暂停键 / 倍速键）。
@@ -3313,7 +3302,7 @@ class MonitorApp:
                     build_window_layout(win.exe, size[0], size[1]))
 
         self._picker = BoxPicker(self.root, fetch, 1, 0, on_apply=self._apply_window_box,
-                                 on_note=self._set_alert, on_close=self._picker_closed)
+                                 on_close=self._picker_closed)
 
     def _picker_closed(self):
         """取景器关掉了（应用 / 取消 都算）——把引用清掉。
@@ -3645,39 +3634,19 @@ class MonitorApp:
         self._set_text('note', self.lb_note, text, color or UI_DIM)
         self._note_hold = (time.perf_counter() + hold) if hold > 0 else 0.0
 
-    def _set_alert(self, text: str, hold: float = 3.0, color=None):
-        """底部那一行的**例外**：只有「真出错 / 下一步要你动手」才走这里。
-
-        用户 2026-10-17 那句「其他状态全删掉，如果你觉得有很重要的不能删就告诉我」——
-        这几条就是报备过、留着的（正文见 docs 第 58 节）：
-            面板出错：…      面板自己崩了。不写的话数字就那么停着，看着像在漏帧，
-                             而控制台里那串 traceback 用户根本看不到。
-            存盘失败：…      校准没存上。不写的话用户以为存好了，下次启动还是老 ROI。
-            读窗口失败：…    读窗口这条路没成，得去「手动校准」自己框。
-            自动校准没把握…  同上：得去手动校准。
-            目标窗口不见了…  目标窗口被关了 / 被重建了，得重新选一个。
-            系统不让置顶…    播放器钉不住（画面会被别的窗盖住），得手动勾「总在最前」。
-            取参照帧失败：…  取景器那一帧没抓到（它自己会空着，得说一声）。
-        判据是「不说出来，用户既不知道该做什么、也看不出哪里不对」。只影响观感的那
-        些（已清零 / 已保存 / 已切换到 X …）一律删掉，不许走这里。
-        """
-        self._set_text('note', self.lb_note, text, color or UI_DIM)
-        self._note_hold = (time.perf_counter() + hold) if hold > 0 else 0.0
-
     def _tick(self):
         """包一层：面板刷新出错绝不能让界面**冻死**。
 
         冻住的界面看起来就是「数字不动了」，用户会以为在漏帧/卡住 —— 而真实原因
         只是某一行抛了个异常（实测踩过：ROI 预览拿到 None，_tick 崩掉之后
         root.after 不再排下一次，整个面板就停在那儿，只有控制台里有 traceback）。
-        所以这里兜住异常：印到控制台、把错误写进底部那一行（走 _set_alert ——
-        那是词表外的例外，见它的说明），然后照常排下一次刷新。
+        所以这里兜住异常：只印到控制台（底部那一行只有七个状态词，不许写错误），
+        然后照常排下一次刷新。
         """
         try:
             self._tick_body()
-        except Exception as exc:                     # noqa: BLE001
+        except Exception:                            # noqa: BLE001
             traceback.print_exc()
-            self._set_alert('面板出错：%s' % exc, hold=0.0)
         finally:
             self.root.after(self.poll_ms, self._tick)
 

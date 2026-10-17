@@ -41,8 +41,9 @@
     2026-10-17：词表**钉死成七个**（用户：「只留下未开始，正在计数，暂停计数，正在
     校准，校准完成请开始，应用完成，导入失败请重试这几种状态，其他状态全删掉」）——
     四十来句动作反馈（已清零 / 已保存校准 / 已切换到 X / 回费速率 = … / 已导入 N 条轴 …）
-    全删，_set_note 从此**卡表**（不在表里的字一个都不写）；只剩六个报备过的例外走
-    _set_alert。这一组把「ui.py 里出现的字面量」整份扫一遍钉住（见下面 ALERTS）。
+    全删，_set_note 从此**卡表**（不在表里的字一个都不写）。
+    2026-10-18：用户把报备过的六条例外也删了 —— _set_alert / _note_pin 两条通道整个
+    拆掉，出错只印控制台；这一组把 ui.py 扫一遍，确认词表外的写字通道**不存在**。
     15. 第八轮（44）：取景器右边那块放大图能**按住拖动**（看框外面），平移不改倍数；
         框自己微调时视窗反向补，看的还是同一块画面。
     16. 第九轮（46）：放大图能**滚轮局部放大**（盯着鼠标那一点缩，双击复位）；
@@ -97,19 +98,6 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'src'))
 
 TEMP = os.environ.get('TEMP') or os.environ.get('TMP') or '.'
-
-# 底部那一行**只许**出现 ui.NOTE_WORDS 里那七个词（用户 2026-10-17）；词表外的字只许
-# 走 _set_note 的例外通道 _set_alert。这几条是报备过、留着的（正文见 docs 第 58 节）：
-# 不说出来，用户既不知道该做什么、也看不出哪里不对。改这张表 = 改给用户看的承诺，
-# 所以这里不写「至少」而写**等号**。
-ALERTS = frozenset((
-    '%s存盘失败：%s',                        # 校准 / 回费速率没存上
-    '读窗口失败：%s',                        # 读窗口这条路没成 -> 去手动校准
-    '自动校准没把握（点「手动校准」）',        # 同上
-    '面板出错：%s',                          # 面板自己崩了（不说 = 数字悄悄冻住）
-    '目标窗口不见了，重新选一个（校准 → 窗口）',
-    '系统不让置顶（手动勾播放器「总在最前」）',
-))
 
 FAILED = []
 SKIPPED = []
@@ -673,8 +661,9 @@ def t_window_row(app):
         ui_mod.is_window = lambda h: False
         app._pin_at = 0.0
         app._keep_pin(1002.0)
-        check('窗口没了：放开置顶、提示换一个窗口（不再乱钉）',
-              app._pinned_hwnd is None and '不见了' in app.lb_note.cget('text'),
+        check('窗口没了：放开置顶，底部那一行不写消息（只许七个状态词）',
+              app._pinned_hwnd is None
+              and app.lb_note.cget('text') in ui_mod.NOTE_WORDS,
               app.lb_note.cget('text'))
     finally:
         (ui_mod.set_topmost, ui_mod.is_window, ui_mod.is_topmost,
@@ -762,10 +751,11 @@ def t_status_row(app):
     下方的状态描述用一行简短的文字，比如正在校准。。。；正在计数。。。」
 
     2026-10-17 用户把这一行的词表钉死成七个（未开始 / 正在计数 / 暂停计数 / 正在校准 /
-    校准完成请开始 / 应用完成 / 导入失败请重试），其余**全删**。所以这一组除了四个状态
-    各读一次，还要：① 词表外的字**写不进去**（运行时卡表）；② 把 ui.py 里所有写字面量
-    的调用点扫一遍 —— _set_note 的必须在词表里，词表外的只许是 ALERTS 那张表（报备过的
-    六条例外）。
+    校准完成请开始 / 应用完成 / 导入失败请重试），其余**全删**。
+    2026-10-18 连报备过的六条例外也删了（_set_alert / _note_pin 整个拆掉，出错只印
+    控制台）。所以这一组除了四个状态各读一次，还要：① 词表外的字**写不进去**（运行时
+    卡表）；② 把 ui.py 里写底部那一行的调用点扫一遍 —— 只许有 _set_note，而且字面量
+    必须在词表里。
     """
     from akframe import ui as ui_mod
     # 11 组把校准线程 stub 掉了，那道工序的状态会一直挂着（_window_busy=True）——
@@ -846,14 +836,14 @@ def t_status_row(app):
     check('反馈到点：自己让位给状态', app.lb_note.cget('text') == '正在计数',
           repr(app.lb_note.cget('text')))
 
-    # 词表这一条**查得住**：把 ui.py 里写死的那些字扫一遍 —— _set_note 的必须在
-    # NOTE_WORDS 里（写在外面的话运行时会被丢掉，这里连写都不许写）；词表外的只许走
-    # _set_alert / _note_pin，而且只能正好是 ALERTS 那几条（报备过的例外）。
+    # 词表这一条**查得住**：把 ui.py 里写死的那些字扫一遍 —— 只许有 _set_note，而且
+    # 每条字面量都必须在 NOTE_WORDS 里（删掉的通道不许再长回来）。
     src = io.open(os.path.join(ROOT, 'src', 'akframe', 'ui.py'), encoding='utf-8').read()
-    words, alerts, long_bad = set(), set(), []
-    for node in ast.walk(ast.parse(src)):
+    tree = ast.parse(src)
+    words, long_bad = set(), []
+    for node in ast.walk(tree):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr in ('_set_note', '_set_alert', '_note_pin')
+                and node.func.attr == '_set_note'
                 and node.args):
             continue
         arg = node.args[0]
@@ -867,15 +857,13 @@ def t_status_row(app):
             continue
         if len(val) > 28 or '\n' in val:
             long_bad.append('%d: %r' % (node.lineno, val))
-        if node.func.attr == '_set_note':
-            words.add(val)
-        else:
-            alerts.add(val)
-    check('ui.py 里 _set_note 的字面量全在那七个词里',
+        words.add(val)
+    check('ui.py 里写底部那一行的只有 _set_note，字面量全在那七个词里',
           words <= set(ui_mod.NOTE_WORDS), sorted(words - set(ui_mod.NOTE_WORDS)))
-    check('词表外的字面量只有报备过的那六条（_set_alert / _note_pin）',
-          alerts == set(ALERTS), sorted(alerts))
-    check('写底部那一行的字面量全长在 28 字以内、没有换行（用户要「一行简短的文字」）',
+    gone = [n.lineno for n in ast.walk(tree)
+            if isinstance(n, ast.Attribute) and n.attr in ('_set_alert', '_note_pin')]
+    check('词表外的两条通道已经拆掉（没有 _set_alert / _note_pin 了）', not gone, gone)
+    check('底部那一行的字面量全长在 28 字以内、没有换行（用户要「一行简短的文字」）',
           not long_bad, long_bad[:3])
 
     t_switch_clears(app)

@@ -346,12 +346,13 @@ def main() -> int:
                   len(calls) == n and lifted == [4242],
                   'calls=%d lifted=%s' % (len(calls), lifted))
             ui.is_above = lambda a, b: False
-            # 句柄失效 = 窗口被关掉 / 播放器换了一个 —— 放开置顶并当面说清楚，
-            # 不能闷着（闷着就是用户看到的「说好的置顶没了」）
+            # 句柄失效 = 窗口被关掉 / 播放器换了一个 —— 放开置顶。用户 2026-10-18
+            # 把界面提示也删了：这里只印控制台，底下仍然是七个状态词之一。
             ui.is_window = lambda hwnd: False
             app._keep_pin(t_now + 10.0)
-            check('目标窗口句柄失效：放开置顶 + 提示重新选一个窗口',
-                  app._pinned_hwnd is None and '重新选一个' in app.lb_note.cget('text'),
+            check('目标窗口句柄失效：放开置顶，界面不写消息（只印控制台）',
+                  app._pinned_hwnd is None
+                  and app.lb_note.cget('text') in ui.NOTE_WORDS,
                   'pinned=%s ｜ %s' % (app._pinned_hwnd, app.lb_note.cget('text')))
         finally:
             ui.set_topmost, ui.is_window = real_topmost, real_iswin
