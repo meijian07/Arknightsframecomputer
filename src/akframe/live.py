@@ -24,7 +24,8 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from .features import fill_run, read_bar, read_pause, read_sign, read_speed
+from .features import (RoiMemo, fill_run, read_bar, read_pause, read_sign,
+                       read_speed)
 from .geometry import UI_SCALER_DEFAULT, Layout, Rect, layout_for, union_rect
 from .cost_rate import RateEstimator
 from .settings import DEFAULT_FRAMES_PER_COST, negative_override, parse_negative
@@ -169,6 +170,10 @@ class LiveMonitor:
         self._snap_pending = True
         self._snap_try = 0
         self.snap_note = ''
+        # 暂停键 / 倍速键是**离散分类**：同一块像素没变就沿用上一拍结论（见
+        # features.RoiMemo）。费用条不缓存 —— 它的 fill 是连续量。
+        self._pause_memo = RoiMemo()
+        self._speed_memo = RoiMemo()
         for lay in ([layout] if layout is not None else []):
             self.set_layout(lay)
 
@@ -195,6 +200,11 @@ class LiveMonitor:
         self._apply_cost_rate()
         # 外接矩形变了，之前按尺寸缓存的 DIB 不再需要（ScreenGrabber 自己按尺寸复用）
         self._grabber = None
+        # 换 ROI = 旧结论作废（像素虽然会变，但形状/尺寸也可能变，直接清掉更稳）
+        for memo in (getattr(self, '_pause_memo', None),
+                     getattr(self, '_speed_memo', None)):
+            if memo is not None:
+                memo.clear()
 
     def snap_bar_left(self, layout: Layout, win: WindowInfo,
                       tries: int = SNAP_FRAMES) -> tuple:
@@ -428,8 +438,10 @@ class LiveMonitor:
         sign_img = to_gray(cut(lay.sign))
 
         bar = read_bar(bar_img, lay)
-        pause = read_pause(pause_img, lay)
-        speed = read_speed(speed_img, lay, self.templates)
+        # 这两行是「像素没变就复用」：静止画面 / 重复采样时不再重算，也避免
+        # 阈值边上的某一拍翻结论（见 features.RoiMemo）。
+        pause = self._pause_memo.read(pause_img, read_pause, lay)
+        speed = self._speed_memo.read(speed_img, read_speed, lay, self.templates)
         # 局内负费：费用数字左边的减号。负费期间每逻辑帧只攒一半（一费 30 -> 60 帧），
         # 不认出来这一段会被数成一半，见 features.read_sign / state._pixel。
         sign = read_sign(sign_img, lay)

@@ -796,8 +796,10 @@ def read_speed(roi: np.ndarray, layout: Layout, templates=()) -> SpeedReading:
             # 形状模板（三个三角）：形状跟数字条带完全不同，别拿它比数字。
             continue
         # 模板是在某个特定窗口尺寸下采集的，形状不一定和当前 ROI 一致。
-        # 直接按最近邻缩放过去再比：UI 是等比缩放的，这样换分辨率也能用同一批模板。
-        tpl = arr if arr.shape == norm.shape else _resize_nearest(arr, *norm.shape)
+        # 按**面积平均**缩过去再比（不是最近邻）：UI 是等比缩放的，而最近邻缩小会
+        # 跳过细笔画（1X 实测 0.75 倍时 0.691 -> 面积平均 0.791）。
+        # 尺寸只跟「模板 + 当前 ROI」有关，算一次就缓存（120Hz 下每拍都缩会很浪费）。
+        tpl = _tpl_for_shape(arr, *norm.shape)
         if tpl is None:
             continue
         c = _ncc(norm, tpl)
@@ -817,13 +819,70 @@ def read_speed(roi: np.ndarray, layout: Layout, templates=()) -> SpeedReading:
 
 
 def _resize_nearest(src: np.ndarray, h: int, w: int):
-    """最近邻缩放（不依赖 PIL，保持 features 只依赖 numpy）。"""
+    """最近邻缩放（不依赖 PIL，保持 features 只依赖 numpy）。
+
+    只留给三角模板用：那条路的缩放档位是 1.0~1.45（多数是放大），实测换面积平均
+    分数反而在 0.75 倍下掉 0.026（三角 b：0.683 -> 0.657），所以不动它。
+    """
     sh, sw = src.shape
     if sh <= 0 or sw <= 0 or h <= 0 or w <= 0:
         return None
     yi = np.clip((np.arange(h) * sh) // h, 0, sh - 1)
     xi = np.clip((np.arange(w) * sw) // w, 0, sw - 1)
     return src[yi][:, xi]
+
+
+def _resize_area(src: np.ndarray, h: int, w: int):
+    """面积平均缩放（就是 OpenCV 的 INTER_AREA 那个意思）。
+
+    每个输出像素 = 它盖住的那一小块原图的平均值。最近邻是「抽点」：把 110 列缩到
+    82 列时总有 28 列根本没人看，1px 宽的笔画抽不中就整根消失；面积平均按覆盖比例
+    把亮度摊进去，细笔画至少不会凭空没了。
+
+    实测（把 7 张真帧缩到 0.75 / 0.5 倍再跟数字模板比互相关）：
+        1X      0.691 -> 0.791     2X  0.673 -> 0.772
+        2X 最差  0.603 -> 0.703（0.5 倍那组）
+    用积分图算：两次 cumsum 之后，任意矩形求和都只要 4 次加减，跟块大小无关。
+    """
+    sh, sw = src.shape[:2]
+    if sh <= 0 or sw <= 0 or h <= 0 or w <= 0:
+        return None
+    if (h, w) == (sh, sw):
+        return np.asarray(src, dtype=np.float32)
+    a = np.asarray(src, dtype=np.float64)
+    ii = np.pad(a.cumsum(0).cumsum(1), ((1, 0), (1, 0)))
+    ys = np.linspace(0, sh, h + 1)
+    xs = np.linspace(0, sw, w + 1)
+    y0 = np.floor(ys[:-1]).astype(np.intp)
+    y1 = np.minimum(sh, np.maximum(y0 + 1, np.ceil(ys[1:]).astype(np.intp)))
+    x0 = np.floor(xs[:-1]).astype(np.intp)
+    x1 = np.minimum(sw, np.maximum(x0 + 1, np.ceil(xs[1:]).astype(np.intp)))
+    total = (ii[np.ix_(y1, x1)] - ii[np.ix_(y0, x1)]
+             - ii[np.ix_(y1, x0)] + ii[np.ix_(y0, x0)])
+    cnt = (y1 - y0)[:, None] * (x1 - x0)[None, :]
+    return (total / cnt).astype(np.float32)
+
+
+# 数字模板按「当前条带尺寸」缩放一次就存下来：键里带 id()，值里必须回指模板对象
+# 本身（理由同 _GLYPH_TPL_CACHE：ndarray 不可哈希，id 会被回收复用）。
+_TPL_SHAPE_CACHE = {}
+
+
+def _tpl_for_shape(arr: np.ndarray, h: int, w: int):
+    """把模板缩到 (h, w)；同一个 (模板对象, 尺寸) 只算一次。
+
+    不缓存的话 120Hz 下每拍要给 1X / 2X 各缩一次面积平均（实测 ~0.06ms/次），
+    而它们只在换分辨率 / 换 ROI 尺寸时才变。
+    """
+    key = (id(arr), h, w)
+    hit = _TPL_SHAPE_CACHE.get(key)
+    if hit is not None and hit[0] is arr:
+        return hit[1]
+    tpl = arr if arr.shape == (h, w) else _resize_area(arr, h, w)
+    if tpl is None:
+        return None
+    _TPL_SHAPE_CACHE[key] = (arr, tpl)
+    return tpl
 
 
 def _ncc(a: np.ndarray, b: np.ndarray) -> float:
@@ -835,3 +894,40 @@ def _ncc(a: np.ndarray, b: np.ndarray) -> float:
     if na <= 0 or nb <= 0:
         return 0.0
     return float((av * bv).sum() / (na * nb))
+
+
+class RoiMemo:
+    """同一块 ROI 的像素没变，就沿用上一拍结论。
+
+    MaaAssistantArknights 的 hit_costs_cache 是同一个思路（它用相关系数 > 0.98 判
+    「费用数字没变」，省掉一次 OCR）。我们直接逐像素相等：同一次抓屏里的同一帧本来
+    就是逐字节相同的，比 NCC 更省也更严。
+
+    为什么值得做：实时链路 120Hz 采样，而游戏只有 30/60fps —— 静止画面里一半以上的
+    拍子是同一张图。重新分类不但白花时间，还会让「分数刚好压在阈值上」的那一帧有机会
+    翻结论（面板上看着就是闪一下）。像素没变 → 结论必然相同，直接复用。
+
+    只给**离散分类**用（暂停键 / 倍速键）。费用条不能缓存：fill 是连续量，每一拍都得
+    重新量（见 live.LiveMonitor 的采样循环）。
+    """
+
+    __slots__ = ('_img', '_val')
+
+    def __init__(self):
+        self._img = None
+        self._val = None
+
+    def read(self, img: np.ndarray, fn, *args):
+        prev = self._img
+        if (prev is not None and prev.shape == img.shape
+                and np.array_equal(prev, img)):
+            return self._val
+        val = fn(img, *args)
+        self._img = np.array(img, copy=True)
+        self._val = val
+        return val
+
+    def clear(self) -> None:
+        """换 ROI / 重新校准之后调用：缓存的是按旧 ROI 读出来的结论。"""
+        self._img = None
+        self._val = None
