@@ -1177,7 +1177,8 @@ class MonitorApp:
         self._pinned_hwnd = None                # 被我们钉到最上层的窗口（切走时还回去）
         self._pin_at = 0.0                      # 上次重新钉置顶的时刻（见 _keep_pin）
         self._full_ticks = 0                    # 满费格式还要多印几拍（见 _tick_body）
-        self._roi_warn = ''                     # 当前那条「面板压住 ROI」告警（见 _refresh_roi_warn）
+        self._roi_hits_logged = ()              # 上一拍压住的 ROI（只印控制台，不铺界面）
+        self._res_warn_logged = ''              # 上一条 res.warn（变化时才印，免得每拍刷屏）
         self._picker = None                     # 参照图取景器（BoxPicker，框选费用条用）
         # 倍速模板（read_speed 认 1X / 2X 数字笔画用）。run_monitor 会把它传进来；
         # 没传就自己从 templates/ 读一份（面板单独当库用时也能起来）。
@@ -1205,6 +1206,7 @@ class MonitorApp:
         # 采样线程的存活看门狗（见 _tick_body）：盯 stats.ticks 这个心跳。
         self._last_ticks = -1
         self._stall_since = 0.0
+        self._stall_logged = False              # 「采样已停」只在进入故障时印一次控制台
         # 刻度表的几何和配色。布局数学全在 akframe.scale 里（tools/check_scale.py
         # 能脱离界面把它验一遍），这里只负责照着自己画。
         # px_per_frame 由「固定跨度」反算：150 帧正好铺满 280px 高
@@ -1232,7 +1234,6 @@ class MonitorApp:
         # configure 平均 0.8ms），事件循环被塞满，拖窗口就一顿一顿的。
         self._memo = {}
         self._note_hold = 0.0           # 提示行的保留截止时刻（见 _set_note）
-        self._warn_at = 0.0             # 上次「告警行收起来 + 重算窗口」的时刻（见 _set_warn）
         self._rule_need = None          # 上一拍大数字那一格的预留宽（见 _sync_rule）
         self._load_calib()
 
@@ -1436,7 +1437,7 @@ class MonitorApp:
         做，而 _refit 中间必须调 update_idletasks() 才量得出内容要多高 —— 那一拍就会
         拿着**旧**的窗口尺寸把**新**布局画一遍（450x280 的刻度表先冒出来、底下的行被挤
         出去），看上去就是闪一下。设成全透明之后这一拍画在看不见的窗口上，等尺寸和内容
-        都就位了再恢复。展开/收起、告警行收放、重校准都走 _refit，所以挂在这里最省事。
+        都就位了再恢复。展开/收起、重校准都走 _refit，所以挂在这里最省事。
 
         为什么不用 withdraw / deiconify：那会把窗口从屏幕上摘掉再挂回来 —— 任务栏、
         Z 序、焦点都要重来一遍，而面板是置顶的，重新映射很容易被游戏窗口抢到上面去。
@@ -1466,7 +1467,7 @@ class MonitorApp:
         出窗口，看着就是一帧乱画面。实测这一拍 7ms，加上之后 resize 触发的整窗擦除 +
         重画，整段异常 26~47ms（连拍 300 帧/秒量出来的）。
 
-        尺寸其实只在**内容变了**的时候才会变（提示文字换行、告警行收放、换模式），
+        尺寸其实只在**内容变了**的时候才会变（回费自定义输入框收放、换模式），
         所以按 _size_key() 缓存两态的 (宽, 高)。命中就没有中间绘制那一拍，展开/收起
         只剩 resize 本身那一帧；不命中才走 _refit_now 老老实实重新量（并把中间那一拍
         用 _relayout 遮掉，见那里）。
@@ -1499,7 +1500,6 @@ class MonitorApp:
         只有**真会换行 / 真会收放**的行才算进来：诊断那几行挂在 fr_diag 上、从头到尾
         不 pack，写多少个字都不占位；性能 / 采样那两行同理。算进来的是：
         - 展开态还是收起态（差着整块打轴器）
-        - 告警行的文字（它铺出来时 wraplength 一定，字多了会多折一行）
         - 回费效率那一行有没有铺出「自定义」的输入框（宽度会变）
         - 面板基准宽度（换分辨率 / 改常量时会变）
 
@@ -1511,7 +1511,6 @@ class MonitorApp:
         实测：这一条修掉之后，展开 / 收起在任何时候都命中缓存。
         """
         return (bool(self._more), self.COLLAPSED_W,
-                self.lb_warn.cget('text'),
                 self.fr_rate_custom.winfo_manager() != '')
 
     def _apply_wraps(self, w: int) -> None:
@@ -1580,7 +1579,7 @@ class MonitorApp:
         再宽收起态就不「小」了。
         """
         for lb in (self.lb_bar, self.lb_pause, self.lb_cycle, self.lb_perf,
-                   self.lb_warn, self.lb_note,
+                   self.lb_note,
                    # 展开区里这几行也会长：2026-10-11 起展开态宽度 = 收起态（同一个 base），
                    # 不给 wraplength 的话它们会按单行自然宽把整块面板顶宽（实测：轴文本
                    # 那行就要 509px，而 base 只有 470）。
@@ -1661,7 +1660,7 @@ class MonitorApp:
         问题出在 `_user_pos` / `_anchor_bottom` 这两份缓存**只有拖面板自己那条标题栏**
         才会更新（head 那一条，见 _drag_move）。用系统标题栏拖、系统贴边 / 最大化、
         换分辨率、换显示器 —— 这些路都不经过它，缓存就停在原地；于是下一次布局重算
-        （展开 / 收起、告警行收起来、内容长高触发的 _fit_window…）照着旧缓存算位置，
+        （展开 / 收起、内容长高触发的 _fit_window…）照着旧缓存算位置，
         就把窗口**拽回去**了。用户的说法：「点击按钮都有可能导致窗口重置位置（漂移）」。
 
         2026-10-11 复现（本机 1067 高的屏）：geometry 直接挪到 (700, 200) -> 点展开 ->
@@ -1762,7 +1761,7 @@ class MonitorApp:
         """内容长高 / 长宽了就跟着把窗口放大，别把边上的东西切掉。
 
         为什么需要：窗口尺寸是 __init__ 里照**占位文本**算出来定死的，运行时内容还会长：
-            高：性能行 / 告警行 / 费用周期这些会换行的行一长就多占一行 —— 最下面的
+            高：性能行 / 费用周期这些会换行的行一长就多占一行 —— 最下面的
                 帮助行被切在窗口外（实测：性能行多换了一行，帮助行只剩半行）。
             宽：大数字那一格是按**整数位数**预留的（见 _sync_rule），99 -> 100 那一下
                 整张卡就宽 45px —— 而窗口宽是 _refit 那一刻算死的，不管的话右列和右边
@@ -1985,28 +1984,11 @@ class MonitorApp:
         # 初值是收着的（只在左上那个「自定义」下拉项被选中时才铺出来）。
         self._show_rate_custom(False)
 
-        # ---- 常驻③：告警行（平时空的）----
-        # 看板批注「面板缩小…主体显示帧数和时间就行」：原来常驻的两行**诊断证据**
-        # （费用条 / 暂停键 + 倍速 + conf/digit/glyph/ratio）搬进展开区的
-        # 「诊断 / 预览」。只有告警行留在这儿 —— 采样停了 / 校准没把握，这类事必须
-        # 一眼看得见。它平时是空的，**空着的时候整行收起来**：一个空 Label 也照占
-        # 30px 字高（加上这一行的上下 8px，占收起态高度的 10%），见 _set_warn。
-        info = tk.Frame(self.root, bg=UI_BG)
-        info.pack(fill='x', **pad)
-        self.fr_warn = info
-        self.lb_warn = self._label(info, '', 9, WARN, anchor='w', justify='left')
-        self.lb_warn.grid(row=0, column=0, columnspan=4, sticky='w')
-        # 铺一次就收起来（真有告警时 _set_warn 会按 before=fr_ctrl 摆回来）。
-        # 收的是**整条 Frame**而不是里面那个 Label：Tk 的 Frame 不会因为里面的
-        # 控件被 grid_remove / pack_forget 就缩小自己的请求高度（实测：Label 拿掉
-        # 前后 reqh 都是 23），只有把它自己从父容器里拿掉才真的腾出位置。
-        info.pack_forget()
-
         # ---- 常驻④：控制键 ----
         # 看板批注：「改成校准」「开始和暂停合并」。这一轮按读哪儿命名：PC端 / 窗口。
         ctrl = tk.Frame(self.root, bg=UI_BG)
         ctrl.pack(fill='x', **pad)
-        self.fr_ctrl = ctrl          # 告警行重新铺出来时的锚点（见 _set_warn）
+        self.fr_ctrl = ctrl          # 控制行（自检和布局都按它找按钮）
         # 尖角前不留空格：'▾' 和空格一共 26px，控制行是收起态最宽的一行，去掉它
         # 整行才落进 470（实测 132 -> 121）。
         self.btn_src = self._btn(ctrl, '校准：PC端▾',
@@ -2513,6 +2495,7 @@ class MonitorApp:
         # 刚停过：看门狗从这一刻重新计时，否则切完模式立刻报一次「采样已停」
         self._last_ticks = self.monitor.stats.ticks
         self._stall_since = 0.0
+        self._stall_logged = False
         if note is not None:
             self._set_note(note, hold=6.0)
 
@@ -2535,32 +2518,6 @@ class MonitorApp:
             label.configure(text=text)
         else:
             label.configure(text=text, fg=fg)
-
-    def _set_warn(self, text: str, color=WARN) -> None:
-        """写告警行。**空文本就把这一行整个收起来**（看板批注要「尽量缩小」）。
-
-        为什么非要收：这一行平时是空的，但一个空 Label 照样占着字高（实测 30px，
-        加上这一行的上下 8px = 收起态高度的 10%）。真有告警（采样停了 / 校准没把握）
-        时再放出来 —— 那种事必须一眼看得见，占一条是值得的。
-
-        收起来要顺手把窗口也收回原高：`_fit_window` 只长不缩（怕文字忽长忽短时抖），
-        不主动重算的话告警消失后会剩一条 38px 的空档。只在「有 -> 无」这一下重算，
-        而且 0.25s 内最多一次 —— 告警在一秒里反复闪时不至于每 8ms 量一遍布局。
-        """
-        if text:
-            self._set_text('warn', self.lb_warn, text, color)
-            if not self.fr_warn.winfo_manager():
-                # before=fr_ctrl：pack 是**追加**到顺序末尾的，不指定锚点的话
-                # 这条告警会跑到控制行和提示行下面去。
-                self.fr_warn.pack(fill='x', padx=10, pady=4, before=self.fr_ctrl)
-            return
-        self._set_text('warn', self.lb_warn, '', color)
-        if self.fr_warn.winfo_manager():
-            self.fr_warn.pack_forget()
-            now = time.perf_counter()
-            if now - self._warn_at >= 0.25:
-                self._warn_at = now
-                self._refit()
 
     def _show_zero(self):
         """立刻把大数字 / 时间按回 0（不等下一拍采样）。"""
@@ -2704,8 +2661,9 @@ class MonitorApp:
         # 让看门狗从这一刻重新计时：否则刚重开就会被「之前停了 8 秒」立刻再报一次。
         self._last_ticks = self.monitor.stats.ticks
         self._stall_since = 0.0
+        self._stall_logged = False
         # monitor 那句结论（'重新校准完成…' / '没找到窗口'）不再往底部写（词表见
-        # NOTE_WORDS）；**没找到窗口时不许写「校准完成请开始」** —— 那件事由告警行说。
+        # NOTE_WORDS）；**没找到窗口时不许写「校准完成请开始」** —— 原因只印控制台。
         if self.monitor.window is not None:
             self._set_note('校准完成请开始', hold=6.0)
         return note
@@ -2934,6 +2892,7 @@ class MonitorApp:
         # 看门狗在这段时间不能计时：否则校准一完就会被「之前停了 8 秒」立刻报一次
         self._last_ticks = self.monitor.stats.ticks
         self._stall_since = 0.0
+        self._stall_logged = False
         return True
 
     def _adopt_window(self, src: WindowSource, win, note: str = ''):
@@ -2998,6 +2957,7 @@ class MonitorApp:
                     ' ｜ '.join(src.notes[-2:])), fg=UI_FG)
         self._last_ticks = mon.stats.ticks
         self._stall_since = 0.0
+        self._stall_logged = False
         if was_running:
             mon.start(reset_clock=False)     # 本来在数就接着数（时间基准不能倒退）
         # 顺序要放在起线程**之后**：_counting_started 是「用户点过开始」那一态，
@@ -3038,6 +2998,7 @@ class MonitorApp:
         self._counting_started = mon.alive
         self._last_ticks = mon.stats.ticks
         self._stall_since = 0.0
+        self._stall_logged = False
         self._update_start_btn()
 
     def _update_start_btn(self):
@@ -3249,31 +3210,28 @@ class MonitorApp:
                 hits.append(label)
         return hits
 
-    def _refresh_roi_warn(self):
-        """面板压住了 ROI 就报警（写进「告警：」那一行）。
+    def _log_roi_overlap(self):
+        """面板压住了 ROI 时只印控制台。
 
-        这一段原来写在窗口那一行的「教程」里（用户 2026-10-11：「下方的教程删除」）。
-        压住 ROI 不是教程 —— 压住的那块像素读到的是**面板自己**，计数会卡在那个帧号上，
-        而用户完全看不出为什么（冷启那段「莫名卡死」就是这么来的），所以搬进常驻区唯一
-        的告警位（fr_warn：平时整行收起来，有事才铺出来）。
-
-        为什么要记住上一次那条：这个函数**每拍**都会被调。不记的话「没有压住」那一支
-        每拍都会去 _set_warn('')，而它只要看到 fr_warn 铺着就 pack_forget —— 采样停了
-        的告警是每拍末尾重新铺的，两条一起就是「告警行每拍收一次铺一次」，看着就是闪。
-        所以状态没变直接 return；真要收的时候也只收「我们自己那条」。
+        压住的那块像素读到的是面板自己，计数会卡在那个帧号上；这条诊断仍然有用，
+        但界面中间不再铺告警条（用户要求删掉）。状态没变就不重复印，免得刷屏。
         """
-        hits = self._roi_hits()
-        text = ('⚠ 面板压住了「%s」—— 挪开它，压住的那块读到的是面板自己'
-                % '」「'.join(hits)) if hits else ''
-        if text == self._roi_warn:
-            return                          # 状态没变：一个 Tk 调用都不发
-        if text:
-            self._roi_warn = text
-            self._set_warn(text)
+        hits = tuple(self._roi_hits())
+        if hits == self._roi_hits_logged:
             return
-        if self.lb_warn.cget('text') == self._roi_warn:
-            self._set_warn('')              # 只收回我们这条；别的告警在说话就别碰
-        self._roi_warn = ''
+        self._roi_hits_logged = hits
+        if hits:
+            print('面板压住了「%s」—— 挪开它，压住的那块读到的是面板自己'
+                  % '」「'.join(hits), file=sys.stderr)
+
+    def _log_res_warn(self, warn: str) -> None:
+        """monitor 给的告警只印控制台；同一条连续出现时不重复印。"""
+        warn = warn or ''
+        if warn == self._res_warn_logged:
+            return
+        self._res_warn_logged = warn
+        if warn:
+            print('告警：' + warn, file=sys.stderr)
 
     # ---------- 框选费用条 ----------
 
@@ -3605,8 +3563,7 @@ class MonitorApp:
 
         两条改名 / 删除的理由：
         * 「采样已停」不再是状态 —— 它当初是为了把「数字不动」和「游戏暂停」分开，
-          那件事现在由**告警行**说完整（红字「采样已停 %.1fs（原因）→ 点「重新校
-          准」」），底部这一行不重复第二遍；
+          那件事现在只印控制台（界面中间的告警条已删），底部这一行不重复第二遍；
         * 「已暂停」改叫「暂停计数」：它指的是**你按了面板上那个暂停**（手动暂停计
           数），不是游戏自己暂停 —— 游戏里按暂停时这一行照旧写「正在计数」。
         """
@@ -3671,7 +3628,7 @@ class MonitorApp:
         if not dragging:
             self._keep_pin(now)
         if not dragging:
-            self._refresh_roi_warn()
+            self._log_roi_overlap()
         self._tick_times.append(now)
         if len(self._tick_times) > 30:
             self._tick_times.pop(0)
@@ -3738,8 +3695,8 @@ class MonitorApp:
                            '时间 %s' % _fmt_time(res.elapsed_f / 30.0))
             # 这里原来有一条十几行的「状态 …」文案链（运行中 / 已暂停 / 起锚 / 刚回费 /
             # 相位重锚 / 不在关卡里 …）。面板那一行 2026-10-09 按用户要求删掉了，文案的
-            # 去处：跑动细节看下面「费用条」那行的「通道=」和「模式=」，真出事看「告警：」
-            # 那行（res.warn 原样打在那里），采样线程死了看 _tick_body 末尾那条转红的。
+            # 去处：跑动细节看下面「费用条」那行的「通道=」和「模式=」，真出事看控制台
+            # （res.warn / 采样已停都只印 stderr），界面不再铺告警条。
             # 读数行 1：费用条 + 通道 + **本费**（照示意图把「本费」从展开区提到常驻区）
             counter = self.monitor.counter
             per = float(counter.frames_per_cost) if counter is not None else LOGICAL_FPS
@@ -3771,16 +3728,12 @@ class MonitorApp:
                    'ok' if res.corr_2x == res.corr_2x else 'low', res.digit_ratio,
                    '%.3f' % res.glyph if res.glyph == res.glyph else '—',
                    res.pause_solid))
-            self._set_warn('告警：' + res.warn if res.warn else '', WARN)
+            self._log_res_warn(res.warn)
             if not dragging:
                 self._update_cycle(res)
         else:
-            # 这一拍没读到画面（窗口不在 / 还没进关卡 / 被最小化）：把告警行清空。
-            # **必须清**：采样线程刚被「重新校准」救活、但还没读到画面时，告警行上还挂着
-            # 红色的「采样已停」，留着的话用户会以为没救活 —— 实测踩到
-            # （tools/check_recover.py 第 5 组就是这个场景）。真死了的话，
-            # 下面 sampling_dead 那段会把它盖回去。
-            self._set_warn('', WARN)
+            # 这一拍没读到画面：清掉「上一条 res.warn」的记账，下次同一句还能再印。
+            self._res_warn_logged = ''
         if not dragging:
             self._update_prompter(upd.result)
         # 「最大间隔」是漏帧的直接指标：采样间隔一旦超过一个逻辑帧的显示时长，
@@ -3813,18 +3766,16 @@ class MonitorApp:
         if self._src_kind == 'window':
             self._update_start_btn()      # 线程被停了/死了，按钮要跟着回到「开始计数」
 
-        # 放在最后：上面那一段会按「正常」把告警行和提示行刷一遍，这里再覆盖掉。
+        # 看门狗只在控制台报一次：界面中间的告警条已经删掉，底部那一行也只有七个
+        # 状态词。「数字不动」和「游戏暂停」仍然能区分 —— 看控制台这句。
         if sampling_dead:
-            # 「数字不动」和「游戏暂停」在面板上长得一模一样 —— 这一条就是把它们分开。
-            # 采样停了就得直说采样停了，并给出下一步动作。
-            # 原来写在「状态」那一行（2026-10-09 那一行删了），现在写「告警：」这一行：
-            # 它是常驻区里唯一的告警位置，转红 + 写到「采样线程停了…」。
-            why = st.last_error or '采样线程已退出'
-            self._set_warn('采样已停 %.1fs（%s）→ 点「重新校准」'
-                           % (stall_s, why), ERR)
-            # 底部那一行**不再**跟着说一遍（用户 2026-10-16：「只留下未开始，正在
-            # 计数，暂停计数，正在校准」）—— 「采样已停」这个状态已经删掉，红字 +
-            # 下一步动作都留在告警行这一条里。
+            if not self._stall_logged:
+                self._stall_logged = True
+                why = st.last_error or '采样线程已退出'
+                print('采样已停 %.1fs（%s）→ 点「重新校准」'
+                      % (stall_s, why), file=sys.stderr)
+        else:
+            self._stall_logged = False
 
     def _update_cycle(self, res):
         """更新「费用周期」那一行：一费几帧 + 本费走到第几帧。

@@ -211,18 +211,10 @@ def t_readouts(app, dm):
     check('收起态每一行都落进基准宽 470',
           app.root.winfo_reqwidth() <= app.COLLAPSED_W,
           '内容要 %dpx，基准 %dpx' % (app.root.winfo_reqwidth(), app.COLLAPSED_W))
-    # 空的告警行以前也占着 30px 字高，2026-10-11 起空着就整行收起来。
-    app._set_warn('')
-    check('空告警：整行收起来（空 Label 也占字高）',
-          app.fr_warn.winfo_manager() == '', app.fr_warn.winfo_manager())
-    app._set_warn('告警：测试')
-    order = list(app.root.pack_slaves())          # pack 顺序 = 从上往下的顺序
-    check('有告警：铺出来看得见，而且压在控制行上面',
-          app.fr_warn.winfo_manager() == 'pack'
-          and order.index(app.fr_warn) < order.index(app.fr_ctrl),
-          '%s 顺序=%d < %d' % (app.fr_warn.winfo_manager(),
-                              order.index(app.fr_warn), order.index(app.fr_ctrl)))
-    app._set_warn('')
+    # 2026-10-18：界面中间的告警条整个删掉（采样停 / 压住 ROI 只印控制台）。
+    check('界面里没有告警条了',
+          not hasattr(app, 'fr_warn') and not hasattr(app, 'lb_warn')
+          and not hasattr(app, '_set_warn'))
 
 
 def t_toggle_count(app, dm):
@@ -265,8 +257,8 @@ def t_toggle_count(app, dm):
     check('按钮翻回「暂停」',
           app.btn_start.cget('text') == '暂停', app.btn_start.cget('text'))
     app._tick_body()
-    check('用户主动暂停的不算故障（不报「采样已停」）',
-          '采样已停' not in app.lb_warn.cget('text'), app.lb_warn.cget('text'))
+    check('用户主动暂停的不算故障（控制台也不印「采样已停」）',
+          not app._stall_logged, app._stall_logged)
 
     # 用户 2026-10-11：「快捷键操作去掉（暂停（空格）改成暂停）不需要快捷键操作」。
     # 键**本身**还留着（见 _base_keys），但面板上一个键名都不许再出现。
@@ -705,37 +697,6 @@ def t_window_row(app):
          ui_mod.top_level, ui_mod.raise_window) = real2
         app._pinned_hwnd = None
     check('对话框关掉之后 _own_dialog_open() 又为假', not app._own_dialog_open())
-
-    # ---- 原来那段「教程」里唯一必须留的：面板压住了 ROI ----
-    class _R:
-        def __init__(self, x, y, w, h):
-            self.x, self.y, self.w, self.h = x, y, w, h
-
-    had = hasattr(app.monitor, "layout")
-    old_layout = getattr(app.monitor, "layout", None)
-    app.monitor.layout = _types.SimpleNamespace(
-        bar=_R(app.root.winfo_rootx() + 20, app.root.winfo_rooty() + 20, 200, 20))
-    app._refresh_roi_warn()
-    check('面板压住费用条 -> 写进「告警：」那一行（教程没了，这条不能丢）',
-          '压住了' in app.lb_warn.cget('text')
-          and app.fr_warn.winfo_manager() == 'pack', app.lb_warn.cget('text'))
-    app.monitor.layout = None
-    app._refresh_roi_warn()
-    check('没压住 -> 告警整行收起来',
-          app.lb_warn.cget('text') == '' and app.fr_warn.winfo_manager() == '')
-    app._set_warn('采样已停 1.0s（测试用）')          # 假装别的告警正占着那一行
-    app._refresh_roi_warn()
-    check('别的告警在说话时，ROI 这条不会把它收掉（否则告警行每拍一收一铺＝闪）',
-          app.fr_warn.winfo_manager() == 'pack'
-          and '采样已停' in app.lb_warn.cget('text'), app.lb_warn.cget('text'))
-    app._set_warn('')
-    if had:
-        app.monitor.layout = old_layout
-    else:
-        try:
-            del app.monitor.layout
-        except AttributeError:
-            pass
 
     app._src_kind = 'live'
     app._sync_ctrl_row()
@@ -1708,7 +1669,7 @@ def t_toggle_flicker(app):
           calls == [], len(calls))
 
     k0 = app._size_key()
-    note0, warn0 = app.lb_note.cget('text'), app.lb_warn.cget('text')
+    note0 = app.lb_note.cget('text')
     try:
         # 提示行是 NOTE_H(22px) 的定高 Frame + place，写多少个字都不占尺寸。把它算进
         # 指纹的代价是「每换一句提示，下一次展开就缓存没命中」，而没命中那条路得用
@@ -1725,15 +1686,8 @@ def t_toggle_flicker(app):
             root.update_idletasks = real
         check('提示换过之后展开 / 收起还是命中缓存（面板不会消失一瞬）',
               calls == [], len(calls))
-        app.lb_warn.configure(text='告警：采样停了')
-        k2 = app._size_key()
-        app.lb_warn.configure(text='')
-        k3 = app._size_key()
-        check('告警行进尺寸指纹（它是真会铺出来 / 收起来的整行）', k2 != k3, (k2, k3))
-        app.lb_warn.configure(text=warn0)
     finally:
         app.lb_note.configure(text=note0)
-        app.lb_warn.configure(text=warn0)
 
     win32.set_erase_brush(root, ui_mod.UI_BG)
     hwnd = win32.toplevel_hwnd(root)
