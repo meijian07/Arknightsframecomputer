@@ -586,9 +586,16 @@ class _Surface:
         self.w, self.h = w, h
 
     def free(self) -> None:
+        # 幂等：close() 和 __del__ 可能先后都走到这里，重复 DeleteObject 会踩坏
+        # 别的 GDI 对象（句柄回收后可能被系统复用）。
+        if getattr(self, '_freed', False):
+            return
+        self._freed = True
         _gdi32.SelectObject(self.dc, self._old)
         _gdi32.DeleteObject(self.bmp)
         _gdi32.DeleteDC(self.dc)
+        self.arr = None
+        self._buf = None
 
 
 class ScreenGrabber:
@@ -620,12 +627,23 @@ class ScreenGrabber:
         return s.arr.copy()
 
     def close(self) -> None:
-        for s in self._surfaces.values():
+        surfaces = getattr(self, '_surfaces', {})
+        self._surfaces = {}
+        for s in surfaces.values():
             s.free()
-        self._surfaces.clear()
-        if self._screen:
-            _user32.ReleaseDC(None, self._screen)
-            self._screen = None
+        screen = getattr(self, '_screen', None)
+        self._screen = None
+        if screen:
+            _user32.ReleaseDC(None, screen)
+
+    def __del__(self):
+        # 兜底：LiveMonitor.set_layout / _on_error 会把旧抓屏器直接换成 None。
+        # 以前没有这一步，那些 DIB（2560x1600 下约 2 MB）和 GDI 句柄就永久漏掉；
+        # 抓屏连续失败时每拍换一个，几十秒就能把 GDI 句柄吃光。
+        try:
+            self.close()
+        except Exception:                    # noqa: BLE001  解释器退出时 DLL 可能已卸载
+            pass
 
     def __enter__(self):
         return self

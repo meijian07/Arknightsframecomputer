@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import csv
+import ctypes
 import os
 import threading
 import time
@@ -52,6 +53,11 @@ SNAP_MIN_RUN = 6    # 白块短于这么多列当噪声
 SNAP_FRAMES = 6     # 一次吸附最多抓几拍等白块出现
 SNAP_EVERY = 8      # 采样循环里每隔多少拍试一次（没读到白块就下拍再来）
 
+# 采样线程优先级：低于正常。计数器是**旁路观察者**，游戏才是前台；两边同时要 CPU
+# 时让游戏先跑。实测 120Hz 抓屏约 28% 单核，降到 below-normal 不会减少总工作量，
+# 但能把「游戏掉帧」的体感压下去（Windows 的优先级只影响争抢时的排队顺序）。
+THREAD_PRIORITY_BELOW_NORMAL = -1
+
 
 @dataclass
 class LiveUpdate:
@@ -87,6 +93,18 @@ class LiveStats:
     errors: int = 0
     last_error: str = ''
     last_error_t: float = 0.0
+
+
+def _lower_current_thread_priority() -> None:
+    """把当前线程降到 below-normal；失败就算了（不是致命问题）。"""
+    try:
+        k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        k32.GetCurrentThread.restype = ctypes.c_void_p
+        k32.SetThreadPriority.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        k32.SetThreadPriority.restype = ctypes.c_int
+        k32.SetThreadPriority(k32.GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL)
+    except Exception:                        # noqa: BLE001
+        pass
 
 
 def _manual_cost_rate(spec):
@@ -198,8 +216,10 @@ class LiveMonitor:
         self.counter.set_manual_pause(self.manual_pause)
         self.counter.set_negative_override(negative_override(self.negative_mode))
         self._apply_cost_rate()
-        # 外接矩形变了，之前按尺寸缓存的 DIB 不再需要（ScreenGrabber 自己按尺寸复用）
-        self._grabber = None
+        # 外接矩形变了，之前按尺寸缓存的 DIB 不再需要（ScreenGrabber 自己按尺寸复用）。
+        # 必须 close，不能只把引用置 None：DIB / GDI 句柄不是 Python 管的，丢了引用
+        # 也不会自己还给系统（实测一个抓屏器漏 3 个 GDI + 约 2 MB）。
+        self._close_grabber()
         # 换 ROI = 旧结论作废（像素虽然会变，但形状/尺寸也可能变，直接清掉更稳）
         for memo in (getattr(self, '_pause_memo', None),
                      getattr(self, '_speed_memo', None)):
@@ -530,7 +550,7 @@ class LiveMonitor:
             # 而打包后本来就没有控制台，所以 stats.last_error 还要留给界面显示。
             traceback.print_exc()
         self.window = None
-        self._grabber = None
+        self._close_grabber()
         self._last_window_scan = 0.0
         if self.counter is not None:
             self.counter.resync()          # 相位不可信了，重新起锚，不猜
@@ -560,6 +580,7 @@ class LiveMonitor:
         连续失败时稍微让出 CPU，别把核心烧在必然失败的循环上。
         """
         stop = stop or self._stop
+        _lower_current_thread_priority()
         period = 1.0 / self.rate if self.rate > 0 else 0.0
         misses = 0
         while not stop.is_set():
@@ -605,6 +626,18 @@ class LiveMonitor:
         if self._thread:
             self._thread.join(timeout=2.0)
             self._thread = None
+        # 停计数时把 DIB / GDI 也还回去（2 MB 左右）；再点开始会重新建。
+        self._close_grabber()
+
+    def _close_grabber(self) -> None:
+        """关掉当前抓屏器并清空缓存。幂等，异常不外抛（关不掉也不能拦住退出）。"""
+        g = getattr(self, '_grabber', None)
+        self._grabber = None
+        if g is not None:
+            try:
+                g.close()
+            except Exception:                # noqa: BLE001
+                pass
 
     @property
     def alive(self) -> bool:
@@ -628,7 +661,7 @@ class LiveMonitor:
         before = self.counter.elapsed if self.counter is not None else 0
         # 1) 丢掉缓存，强制重新找窗口（理由同 _on_error）
         self.window = None
-        self._grabber = None
+        self._close_grabber()
         self._last_window_scan = 0.0
         win = self._resolve_window()
         if win is None:

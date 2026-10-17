@@ -577,6 +577,11 @@ class WindowSource(VideoSource):
 
     def _acquire(self, force: bool, cache_dir: str = None) -> None:
         """窗口没有「抽流」这一步：帧是抓的时候才有的，建个抓屏器就够。"""
+        if self._grabber is not None:
+            try:
+                self._grabber.close()
+            except Exception:                # noqa: BLE001
+                pass
         self._grabber = ScreenGrabber()
 
     def _strip(self, rect: Rect, stride: int = 1, frames: int = None,
