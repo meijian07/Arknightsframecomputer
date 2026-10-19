@@ -15,6 +15,15 @@
 费用条停了（满费）之后没有像素可量，这时改走 UI + 挂钟通道继续数 —— 这就是
 「费用条动的时候看费用条，不动的时候看 UI」。
 
+## 下载
+
+Windows 免安装版放在 **GitHub Releases**，仓库源码里不再提交压缩包：
+
+**https://github.com/meijian07/arknights-computer-/releases/latest**
+
+下载 `ArknightsFrameCounter-v*-win64.zip`，解压后双击 `ArknightsFrameCounter.exe`。
+推送 `v*` 标签时，GitHub Actions 会自动打包并把 zip 上传到对应 Release。
+
 ## 现在能做什么
 
 - **全局帧数计数**：读游戏窗口（PC 端）实时数帧，绝对帧号 + 时间，可清零
