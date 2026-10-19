@@ -18,6 +18,8 @@
 ## 现在能做什么
 
 - **全局帧数计数**：读游戏窗口（PC 端）实时数帧，绝对帧号 + 时间，可清零
+- **满费锚点**：每次费用条满（MAX）把累计帧号对齐到整数个回费周期，抑制长时间累计漂移
+- **回费周期计数**：记录条满 -> 条空次数 n；面板的「本费余量 x」按上一个条空位置算，条空时归零。只有全程同速（正费或负费）的周期才把帧号钉回整数周期；正费中途切负费的混合周期按实际长度记，不硬掰成 30
 - **打轴器（提词器）**：导入一份轴文件，走到对应帧号时滚动 + 放大显示该干什么
 - **窗口模式**：不认游戏也行 —— 把一段录屏用播放器打开、置顶，对播放器窗口校准后照样计数
 - **手动校准**：费用条 / 暂停键 / 倍速键三个 ROI 都能手动框选，带取景器局部放大 + 微调
@@ -113,6 +115,7 @@ powershell -ExecutionPolicy Bypass -File build_app.ps1
 $env:PYTHONPATH='src'
 .venv\Scripts\python.exe tools\check_ui_keys.py     # 界面交互（三态按钮、缓存、取景器）
 .venv\Scripts\python.exe tools\check_state_synth.py # 状态机合成用例
+.venv\Scripts\python.exe tools\check_start_anchor.py # 点「开始」时的起锚相位
 .venv\Scripts\python.exe tools\check_ui_window.py   # 读窗口链路
 ```
 

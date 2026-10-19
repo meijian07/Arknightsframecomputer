@@ -33,12 +33,16 @@ import os
 import sys
 import time
 
+import numpy as np
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'src'))
 
 from akframe.demo import DemoMonitor                      # noqa: E402
+from akframe.features import BarReading, PauseReading, SpeedReading  # noqa: E402
 from akframe.geometry import layout_for                   # noqa: E402
 from akframe.live import LiveMonitor                      # noqa: E402
+from akframe.synthesis import synthesized_width           # noqa: E402
 
 # 用实测校准表覆盖的那台机器尺寸，免得测试结果跟着当前机器的分辨率变
 LAY = layout_for(2558, 1494, 1.0)
@@ -132,6 +136,54 @@ def t_loop_survives():
               'window=%r grabber=%r' % (mon.window, mon._grabber))
     finally:
         mon.stop()
+
+
+def t_start_no_catchup():
+    """启动采样不许把「点开始之前」的费用条相位补进来。
+
+    用户 2026-10-18 实测：游戏暂停在费用周期第 2 帧时点开始，恢复后计数器直接
+    从 0 跳到 2。根因是起锚那一拍按当前条宽反推出「本费已经走了 2 帧」并补账。
+    begin_counting() 用 mark_zero_start(None) 把这一段关掉：第一拍只对相位，
+    delta = 0，之后条走一帧才 +1。
+    """
+    mon = LiveMonitor(LAY, exe=NO_WIN, rate=60.0)
+    mon.begin_counting()
+    c = mon.counter
+    run = PauseReading(ratio=0.30, running=True)
+    speed = SpeedReading(digit_ratio=0.30, corr_2x=1.0, has_digit=True, m=2.0,
+                         bullet=False, conf='ok')
+    row = np.zeros(LAY.bar.w, np.int16)
+
+    def step(phase, pause=None):
+        fill = synthesized_width(LAY.bar.w, float(LAY.bar.w), phase / 30.0)
+        return c.step(1, 1.0 / 60.0,
+                      BarReading(fill=fill, grey146=0, grey88=0, state='TRACK',
+                                 row=row), run if pause is None else pause, speed)
+
+    # 用户录像里的真实顺序：游戏暂停在本费第 2 帧 -> 点开始 -> 恢复运行。
+    paused = PauseReading(ratio=0.05, running=False)
+    r = step(2.0, paused)
+    check('暂停中启动：第一拍不补启动前的 2 帧', r.delta == 0 and c.elapsed == 0,
+          'delta=%s elapsed=%s' % (r.delta, c.elapsed))
+    r = step(2.0)
+    check('恢复运行的第一拍仍然不补', r.delta == 0 and c.elapsed == 0,
+          'delta=%s elapsed=%s' % (r.delta, c.elapsed))
+    r = step(3.0)
+    check('之后条走 1 帧才 +1', r.delta == 1 and c.elapsed == 1,
+          'delta=%s elapsed=%s' % (r.delta, c.elapsed))
+
+    # 「暂停计数 -> 继续」也是同一条语义：暂停期间条走过 5 帧，恢复时不许补。
+    c.set_manual_pause(True)
+    r = step(8.0)
+    check('手动暂停期间数字不动', r.delta == 0 and c.elapsed == 1,
+          'delta=%s elapsed=%s' % (r.delta, c.elapsed))
+    c.set_manual_pause(False)
+    r = step(8.0)
+    check('继续的第一拍不补暂停期间走过的帧', r.delta == 0 and c.elapsed == 1,
+          'delta=%s elapsed=%s' % (r.delta, c.elapsed))
+    r = step(9.0)
+    check('继续之后条走 1 帧才 +1', r.delta == 1 and c.elapsed == 2,
+          'delta=%s elapsed=%s' % (r.delta, c.elapsed))
 
 
 def t_heartbeat_when_unreadable():
@@ -281,13 +333,15 @@ def main():
     print()
     print('1. 采样循环兜异常')
     t_loop_survives()
-    print('2. 心跳语义')
+    print('2. 启动不补启动前的帧')
+    t_start_no_catchup()
+    print('3. 心跳语义')
     t_heartbeat_when_unreadable()
-    print('3. set_layout 保留帧数')
+    print('4. set_layout 保留帧数')
     t_set_layout_keeps_frames()
-    print('4. 重新校准')
+    print('5. 重新校准')
     t_recalibrate()
-    print('5. 面板看门狗')
+    print('6. 面板看门狗')
     t_watchdog_ui()
     print()
     if SKIPPED:

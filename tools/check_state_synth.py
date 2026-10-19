@@ -113,8 +113,9 @@ def cycle_lengths(frames=3000, fps=60.0, speed_m=2.0, frames_per_cost=30.0):
     """连续跑（全速、无暂停）时，逐费用周期各走了几个逻辑帧。
 
     这是「一费 = 几帧」唯一不依赖任何帧率/倍速假设的口径：
-    普通关卡应当是 30，偶尔 31 —— 定点累加器的取整误差每 11 个周期攒够一次，
-    所以第 11 费会多花一帧（见 fp24.py 的说明）。带上回费减速 tag 时是 60 / 39 / 45 / 120。
+    普通关卡应当是 30。定点累加器的取整误差本来会让第 11 费多花一帧，但 2026-10-18
+    加入周期边界锚点后，每次条满 -> 条空都把帧号钉回整数个周期，所以这里必须恒为 30。
+    带上回费减速 tag 时是 60 / 120。
     """
     c = Counter(BAR_W, fps=fps, frames_per_cost=frames_per_cost)
     dt = 1.0 / fps
@@ -598,7 +599,7 @@ def reduced_rate_accuracy(fps=60.0):
     「25% 到 119 帧只有 117 帧」。像素通道的规矩是不碰挂钟：条不动就不动。
 
     三段都验：
-      ① 逐周期长度只能是 per / per+1（定点累加器的边界周期，见 fp24）；
+      ① 逐周期长度必须恰好是 per（周期边界锚点会把 fp24 的 +1 边界拨回去）；
       ② 累计帧数 == 真值（±1：起锚那一帧）；
       ③ 1X（每拍 0.5 帧，条连着两拍一般宽）和 2X（每拍 1 帧）都要成立 —— 采样率
         一变就错说明在按挂钟猜。
@@ -631,8 +632,8 @@ def reduced_rate_accuracy(fps=60.0):
         # （adv = 2 时 samples // adv 会少算 1 帧 —— 末尾那一拍只走了半个逻辑帧）。
         truth = (samples - 1) // adv + 1
         tag = '%d 帧/费%s%s' % (per, ' + 负费' if neg else '', ' @1X' if adv == 2 else ' @2X')
-        if any(v < cycle or v > cycle + 1 for v in c.cycle_lengths):
-            bad.append((tag, '逐周期长度', c.cycle_lengths[:6], '%d / %d' % (cycle, cycle + 1)))
+        if any(v != cycle for v in c.cycle_lengths):
+            bad.append((tag, '逐周期长度', c.cycle_lengths[:6], '%d' % cycle))
         if abs(c.elapsed - truth) > 1:
             bad.append((tag, '累计帧数', (c.elapsed, truth)))
         if c.elapsed != c.pixel_frames + c.clock_frames:
@@ -645,14 +646,13 @@ def reduced_rate_fp24_exact(fps=60.0, cycles=6, tail=24):
     """减费档位 / 局内负费：条由 **fp24 模型自己**画出来，周期长度必须一帧不差。
 
     上一条（reduced_rate_accuracy）用的是「每周期恰好 per 帧」的简化编码，而游戏的
-    累加器有**边界周期** —— required 是「每逻辑帧增量」凑出来的，攒够误差的那一费会
-    多出 1 帧（fp24 的说明：30 帧/费是 `30*10, 31`）。简化编码在那种周期上画出来的
-    画面和游戏本身对不上，只能验到「±1 帧」。
+    累加器有边界周期 —— required 是「每逻辑帧增量」凑出来的，攒够误差的那一费本来会
+    多出 1 帧（fp24 的说明：30 帧/费是 `30*10, 31`）。
 
-    这一条把 CostTiming 的输出直接当画面喂回去 —— 它才是「游戏里到底走了几个逻辑帧」
-    的真值，所以**逐周期长度**要求严格相等（`[120, 121]`、`[240, 241]` 这种边界周期
-    也要一模一样）。用户 2026-10-15 报的「50% 一费 62 帧」「25% 到 119 帧只有 117 帧」
-    两条都能在这一条上现形：前者是垫帧垫多了，后者是回卷那一拍被物理上限误杀。
+    这一条把 CostTiming 的输出直接当画面喂回去。2026-10-18 起，周期边界锚点要求
+    **每个条满 -> 条空都恰好是 per 帧**：定点累加器给出的 61 / 121 / 241 边界也要被
+    拨回 60 / 120 / 240。用户 2026-10-15 报的「50% 一费 62 帧」「25% 到 119 帧只有
+    117 帧」两条仍然在这一条上现形：前者是垫帧垫多了，后者是回卷那一拍被物理上限误杀。
 
     累计帧数只要求「不吃掉超过开头读不出来的帧」：一费开头那几帧画出来是 0 宽，
     和「压根没画条」长得一样（`_unreadable_head_frames`），起锚时只能保守地少记
@@ -697,7 +697,8 @@ def reduced_rate_fp24_exact(fps=60.0, cycles=6, tail=24):
             if idx > 200000:
                 break
         tag = '%d 帧/费%s%s' % (per, ' + 负费' if neg else '', ' @1X' if adv == 2 else ' @2X')
-        want_cycles = [b - a for a, b in zip(ends, ends[1:])]
+        # 周期边界锚点：不管 fp24 边界那一费本来要 61 / 121 / 241，面板都钉回整数周期。
+        want_cycles = [int(round(per * (2 if neg else 1)))] * max(0, len(ends) - 1)
         head = c._unreadable_head_frames(speed_for_cost_state(neg))
         if list(c.cycle_lengths) != want_cycles:
             bad.append((tag, '逐周期长度', (list(c.cycle_lengths), want_cycles)))
@@ -799,24 +800,17 @@ def negative_cost_timing(fps=60.0):
         if abs(diff) > tol:
             bad.append((name, c.elapsed, truth))
 
-    # 长跑：负费期间的「61 帧那一费」也要和 fp24 算得一样。定点累加器每帧少攒
-    # 16/2^24（60 x SCALE//60 = SCALE - 16），攒够 EPSILON(167) 就要多花一帧，
-    # 所以第 11 费是 61 帧（16 x 11 = 176 > 167）；多花那一帧把残余一次顶高，
-    # 下一个 61 要等约 3.5 万个周期 —— 前人的 fp24 单测也是这么写的
-    # （lengths[34962] == 31）。起锚那一拍是从条宽反推的相位、不是累加器原点，
-    # 所以第一个 61 会提前一两格：只断言「前 12 个周期里出现一次」+「1800 拍里只出现 1 次」。
+    # 长跑：负费期间本来第 11 费会被 fp24 累加成 61 帧；周期边界锚点现在把它拨回 60。
     long_n = 1800
     cl = _negative_run(long_n, lambda i: True, fps)[0].cycle_lengths
     n61 = cl.count(61)
-    if sorted(set(cl)) != [60, 61]:
-        bad.append(('长跑逐周期长度', cl[:12], '只有 60 / 61'))
-    elif 61 not in cl[:12]:
-        bad.append(('前 12 个周期里应当出现一次 61 帧', cl[:12], '含 61'))
-    elif n61 != 1:
-        bad.append(('1800 拍（30 个周期）里 61 帧的周期数', n61, 1))
-    lines.append('  %-4s %-34s elapsed=%4d 真值=%4d  61 帧在第 %s 个周期，共 %d 个'
-                 % ('OK' if not bad else 'BAD', '全负费 1800 拍（第 11 费该多 1 帧）',
-                    long_n, long_n, [i + 1 for i, v in enumerate(cl) if v == 61], n61))
+    if sorted(set(cl)) != [60]:
+        bad.append(('长跑逐周期长度', cl[:12], '只有 60'))
+    elif n61 != 0:
+        bad.append(('61 帧周期应当被周期锚点拨回 60', n61, 0))
+    lines.append('  %-4s %-34s elapsed=%4d 真值=%4d  61 帧已拨回 60，共 %d 个'
+                 % ('OK' if not bad else 'BAD', '全负费 1800 拍（周期锚点）',
+                    long_n, long_n, n61))
 
     # 对照组：同一段信号，把画面里的减号抹掉（= 不认负费）
     ctrl, truth = _negative_run(300, lambda i: True, fps, show_sign=False)
@@ -940,8 +934,8 @@ def main():
     print('逐费用周期长度（连续 2X 跑 %d 个采样）：' % 3000)
     print('  完整周期 %d 个，中位 %d 帧，范围 %d..%d 帧' % (len(cl), med, lo, hi))
     print('  前 15 个：%s' % (cl[:15],))
-    ok2 = len(cl) >= 90 and lo >= 30 and hi <= 31
-    print('结论：%s' % ('✅ 通过（一费恒为 30 帧，偶尔 31 是定点取整的边界效应）'
+    ok2 = len(cl) >= 90 and lo == 30 and hi == 30
+    print('结论：%s' % ('✅ 通过（周期边界锚点让一费恒为 30 帧）'
                       if ok2 else '❌ 周期长度不对'))
 
     missed = frame_step_precision()
@@ -1026,7 +1020,7 @@ def main():
         for b in bad_rate:
             print('  ❌ ' + '：'.join(str(x) for x in b))
     else:
-        print('  ✅ 通过（60 帧/费、120 帧/费都逐周期稳定，偶尔 +1 是定点取整的边界效应）')
+        print('  ✅ 通过（60 帧/费、120 帧/费都逐周期严格等于周期长度）')
     ok8 = not bad_rate
 
     bad_head = reduced_rate_anchor_head()
@@ -1045,7 +1039,7 @@ def main():
     print('减费档位 / 局内负费的逐周期准确性（一拍走不到一帧时不许按挂钟猜）：')
     if bad_rate:
         for b in bad_rate:
-            print('  ❌ %s：实际 %s，期望 %s' % b)
+            print('  ❌ ' + '：'.join(str(x) for x in b))
     else:
         print('  ✅ 通过（30 / 60 / 120 帧/费、负费翻倍、1X 与 2X 采样：'
               '逐周期 per/per+1、累计帧数一帧不差）')
@@ -1059,7 +1053,7 @@ def main():
             print('  ❌ %s：实际 %s，期望 %s' % b)
     else:
         print('  ✅ 通过（累计帧数、逐周期长度都严格相等；'
-              '边界周期 120 -> [120, 121]、240 -> [240, 241] 都对得上）')
+              'fp24 的 121 / 241 边界也被周期锚点拨回 120 / 240）')
     ok16 = not bad_exact
 
     bad_switch = rate_switch_rescale()

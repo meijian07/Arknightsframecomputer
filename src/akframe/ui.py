@@ -2292,9 +2292,12 @@ class MonitorApp:
     def nudge(self, dx: int, dy: int) -> None:
         """微调一下当前 ROI：挪 (dx, dy) x 步长。"""
         d = self.deltas[self.target]
+        was = list(d)
         d[0] += dx * self.calib_step
         d[1] += dy * self.calib_step
-        self._apply_deltas()
+        if not self._apply_deltas():
+            # 应用失败就回滚这一下，别把无效偏移留在状态里、之后又被存进校准文件。
+            d[:] = was
         self._sync_calib_pos()
 
     def _sync_calib_buttons(self) -> None:
@@ -2345,14 +2348,19 @@ class MonitorApp:
             return ROI_ORDER
         return tuple(n for n in ROI_ORDER if getattr(lay, n, None) is not None)
 
-    def _apply_deltas(self):
+    def _apply_deltas(self) -> bool:
         base = self._base_layout()
         if base is None:
-            return
+            # 还没有可叠加的基准布局（例如演示链路）：偏移先记下，等有画面了再应用。
+            # 这不是「偏移无效」，不能回滚，否则按钮在没窗口时完全挪不动。
+            return True
         try:
-            self.monitor.set_layout(apply_deltas(base, self.deltas, self.calib_scale))
-        except ValueError:
-            pass                            # ROI 越界：忽略这一下（底部那行不说话）
+            lay = apply_deltas(base, self.deltas, self.calib_scale)
+        except ValueError as exc:
+            print('校准偏移无法应用：%s' % exc, file=sys.stderr)
+            return False
+        self.monitor.set_layout(lay)
+        return True
 
     def _base_layout(self):
         """方向键的 delta 加在谁身上。
@@ -2377,11 +2385,19 @@ class MonitorApp:
             return None
 
     def save_calib(self):
+        current = self.monitor.layout
+        if current is None:
+            return                          # 还没读到画面，没什么可存的
+        try:
+            current.validate()
+        except ValueError as exc:
+            print('当前布局越界，未保存校准：%s' % exc, file=sys.stderr)
+            return
         if self._src_kind == 'window':
             src = self.monitor.src
             what = '窗口'
             try:
-                src.save_current(layout=self.monitor.layout, source='面板校准',
+                src.save_current(layout=current, source='面板校准',
                                 note='面板上挪过 / 确认过的 ROI')
             except OSError as exc:
                 print('%s存盘失败：%s' % (what, exc), file=sys.stderr)
@@ -2391,9 +2407,15 @@ class MonitorApp:
         base = self._base_layout()
         if base is None:
             return                          # 没找到窗口，没什么可存的
+        try:
+            final = apply_deltas(base, self.deltas, self.calib_scale)
+            final.validate()
+        except ValueError as exc:
+            print('校准偏移越界，未保存：%s' % exc, file=sys.stderr)
+            return
         data = {'client': [base.width, base.height], 'scale': base.scale,
                 'deltas': self.deltas,
-                'abs': self.monitor.layout.to_dict() if self.monitor.layout else base.to_dict()}
+                'abs': final.to_dict()}
         with open(self.calib_path, 'w', encoding='utf-8') as fh:
             json.dump(data, fh, ensure_ascii=False, indent=2)
         self._set_note('应用完成')
@@ -2524,6 +2546,7 @@ class MonitorApp:
         self._set_text('frames', self.lb_frames, '0')
         self._sync_rule()
         self._set_text('time', self.lb_time, '时间 00:00.00')
+        self._set_text('hint', self.lb_frames_hint, '满条 0 ｜ +0 帧')
 
     def toggle_manual_pause(self):
         """手动「暂停计数」：数字按住不动，方便对着游戏/录像逐段核对。
@@ -2992,9 +3015,9 @@ class MonitorApp:
             mon.stop()
         else:
             # reset_clock=True：停止这一段挂钟不算进来（t 从头来，dt<=0 只当一拍）。
+            # resync / mark_zero_start 已经在 mon.start() 里做了：启动前的费用条相位
+            # 不补帧（见 LiveMonitor.start）。
             mon.start()
-            if mon.counter is not None:
-                mon.counter.resync()
         self._counting_started = mon.alive
         self._last_ticks = mon.stats.ticks
         self._stall_since = 0.0
@@ -3701,6 +3724,19 @@ class MonitorApp:
             counter = self.monitor.counter
             per = float(counter.frames_per_cost) if counter is not None else LOGICAL_FPS
             into = int(round(res.phase * per))
+            # 面板上的绝对帧号现在由「上一个条空位置 + 本费余量 x」组成。
+            # x 直接用累计帧号减去 bar_fill_frames（条空那一刻的累计帧号），
+            # 条空时它一定回到 0 —— 不再假设每一费都是 30 帧：负费的周期是 60，
+            # 正费中途切负费的周期是 30+n/2，乘 n 会把它们硬改成 30。
+            n_fill = int(res.bar_fill_count)
+            x_fill = res.elapsed_f - int(res.bar_fill_frames)
+            if res.bar_state in FULL_COST_STATES:
+                x_text = ('+%.1f' if x_fill >= 0 else '%.1f') % x_fill
+            else:
+                x_int = int(round(x_fill))
+                x_text = ('+%d' if x_int >= 0 else '%d') % x_int
+            hint = '满条 %d ｜ %s 帧' % (n_fill, x_text)
+            self._set_text('hint', self.lb_frames_hint, hint)
             self._set_text(
                 'bar', self.lb_bar,
                 '费用条 fill=%d/%d  %s  通道=%s ｜ 本费 %d/%d 帧'

@@ -229,6 +229,9 @@ def t_toggle_count(app, dm):
 
     def fake_start(reset_clock=True):
         starts.append(reset_clock)
+        # 真 start() 里 resync / mark_zero_start 就在这（见 LiveMonitor.begin_counting）；
+        # 这里不真起线程，但要照做，否则测不到「恢复时不补停止期间的帧」。
+        dm.begin_counting()
         dm._thread = AliveThread()
 
     dm.start = fake_start                       # 不真起线程：演示监视器没有真屏幕

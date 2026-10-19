@@ -131,7 +131,12 @@ def build_monitor(args, cost_rate=DEFAULT_FRAMES_PER_COST, negative='auto') -> L
         # ROI 只和窗口尺寸 + 游戏内「UI 缩放」有关（后者只乘在距右/距底上）
         base = layout_for(w, h, ui_scaler)
         if deltas:
-            return apply_deltas(base, deltas, calib_scale)
+            try:
+                return apply_deltas(base, deltas, calib_scale)
+            except ValueError as exc:
+                # apply_deltas 已经会夹取边界，这里只兜住「校准文件内容本身坏了」这类
+                # 意外：宁可先用未叠加偏移的默认布局把程序拉起来，也不能让启动直接崩。
+                print('校准文件无法应用，已退回默认布局：%s' % exc, file=sys.stderr)
         return base
 
     win = find_window(exe=args.exe, title=args.title, pid=args.pid)

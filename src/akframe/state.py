@@ -120,6 +120,28 @@ ANCHOR_MAX_CATCHUP = 2
 # 它自己有关卡滞回兜底，不经过这里）。
 REJECT_RESYNC_SECONDS = 0.2
 
+# ---- 满费锚点（长期漂移校正）----
+# 满费（MAX）是画面里唯一一个「与像素推进无关、但时间位置确定」的事件：
+# 正常回费时它每隔 frames_per_cost 个逻辑帧出现一次（负费再翻倍）。
+# 像素通道每拍只走整数帧，满费挂钟通道还会把不足一帧的余量四舍五入，
+# 几十秒下来会攒出 1 帧的偏差。这里把每次 MAX 的**上升沿**记成锚点：
+# 如果这一拍离上次锚点接近 n 个完整周期，就把累计帧号轻轻拨回 n 个周期，
+# 让误差不跨周期累积。
+#
+# 只在 |偏差| <= FULL_ANCHOR_TOL 时才拨：玩家在满费时用费后重新满费、
+# 或者靠技能提前回满，间隔本来就不是完整周期；差得远说明这不是「同一段
+# 连续回费」，只重新起锚，绝不硬改成 +30 —— 那会把真实操作算错。
+FULL_ANCHOR_TOL = 2.0
+
+# ---- 费用周期边界锚点（每一条满/空都对齐）----
+# 满费锚点只在 MAX 出现时生效；玩家一直在 99 以下用费时可能很久都碰不到 MAX。
+# 费用条每走完一个周期必然回卷（条满 -> 条空），这个边界的帧位置是确定的：
+# 上一个边界 + frames_per_cost（负费再翻倍）。每次回卷都把累计帧号钉回这个值，
+# 误差就不会跨费用周期累积（用户 2026-10-18 实测 40 秒漂 3 帧就是跨周期攒出来的）。
+# 只修「离整数周期不超过几帧」的偏差：中途被第 15 章机制停条、切场景漏采时，
+# 周期长度本来就不是标准值，这时只重新起锚，不硬改。
+CYCLE_ANCHOR_TOL = 4.0
+
 # ---- 局内负费（费用条上出现减号）----
 # 负费期间**每逻辑帧只攒一半**（1/60 费/帧），一费从 30 逻辑帧变成 60 逻辑帧。
 # 照抄前人：fp24 的 NEGATIVE_SPEED = SCALE/60、engine.rs 的 speed_for_cost_state。
@@ -195,6 +217,8 @@ class FrameResult:
     sign_run: int = 0          # 减号扫框里实测的最长纯白连续段（调框用，不进 CSV）
     sign_thr: int = 0          # 上面那条的判定阈值（调框用，不进 CSV）
     glyph: float = float('nan')   # 「三个三角」形状分（面板显示，方便对着调阈值）
+    bar_fill_count: int = 0       # 从清零/开始算起，费用条「满 -> 空」回卷过几次
+    bar_fill_frames: int = 0      # 上一个回卷边界所在的累计帧号（面板算本费余量用）
 
     def as_row(self) -> list:
         return [self.idx, '%.4f' % self.t, self.fill, self.bar_state,
@@ -286,6 +310,10 @@ class Counter:
         # 所以还要记住清零那一刻条已经画到第几帧：见 _zero_phase / mark_zero_start。
         self._no_catchup = False
         self._zero_phase = None
+        # 第一次条空是否可以直接当成一个完整周期：正常起锚补过头的算 clean；
+        # 清零时如果条已经走了几帧，则只允许在“离整周期很近”时补平（见 _pixel）。
+        self._cycle_origin_clean = False
+        self._snap_first_cycle = False
         self._prev_t = None
         self._prev_mode = None
         # 「暂停计数」开关（手动，给测试用）：按住时数字一动不动，其它读数照常刷新。
@@ -311,6 +339,30 @@ class Counter:
         self.cycle_lengths = []
         self._cycle_seen = 0     # 已经认过的回费次数（timing.cycles）
         self._cycle_ref = None   # 上一个周期结束时的累计帧号
+        # ---- 满费锚点 ----
+        # full_anchor 是上一次「MAX 上升沿」时的累计帧号（带小数）；
+        # _full_active 让连续的 MAX 只算一次事件，MAX_FADE 也不会重复触发。
+        self.full_anchor = None
+        self._full_active = False
+        self.full_anchor_events = 0       # 认过几次满费上升沿（调试用）
+        self.full_anchor_corrections = 0  # 其中真正拨过帧号的次数（调试用）
+        self.full_anchor_last_diff = 0.0  # 最近一次拨了多少帧（调试用）
+        # 费用条「满 -> 空」回卷过多少次（从开始计数 / 清零算起）。
+        # 面板的绝对帧号每跨一个周期就以它为整数周期基准。
+        self.bar_fill_count = 0
+        # 上一个回卷边界所在的累计帧号。和 _cycle_ref 的区别：_cycle_ref 会在
+        # 重新起锚 / 满费之后清空，这里**不清**，专门给面板算「本费已走 x 帧」。
+        self.bar_fill_frames = 0
+        # 本费周期里出现过哪几种回费速度。负费每帧只攒一半，一费本身就是
+        # 30 + n/2 帧；正负混合的周期再做「整数周期」补偿会把真实帧数硬掰回
+        # 30 / 60。用户 2026-10-18 实测：正费中途切负费，8 帧负费的那个周期
+        # 真值 34 帧，被边界锚点强制成 30。只有**单一速度**的周期才允许补偿
+        # （全程正费 -> 30，全程负费 -> 60）。
+        self._cycle_had_neg = False
+        self._cycle_had_pos = False
+        # 上一次满费锚点之后出现过哪几种速度；正负混合就跳过满费锚点的校正。
+        self._anchor_had_neg = False
+        self._anchor_had_pos = False
 
     # ---------- 对外 ----------
 
@@ -394,6 +446,8 @@ class Counter:
                 glyph=speed.glyph,
                 mode='manual-pause', delta=0, elapsed=self.elapsed,
                 elapsed_f=self.elapsed_f, warn='',
+                bar_fill_count=self.bar_fill_count,
+                bar_fill_frames=self.bar_fill_frames,
                 phase=(self.timing.phase() if self.timing else 0.0), err=0,
                 pause_drawn=pause.drawn, pause_solid=pause.solid,
                 negative=neg, sign_run=sign_run, sign_thr=sign_thr)
@@ -418,11 +472,22 @@ class Counter:
         elif self._battle_hold > 0:
             self._battle_hold -= 1
         in_battle = self._battle_hold > 0
+        if in_battle:
+            # 记下这一费里出现过哪几种回费速度。正负混合的周期不做
+            # 「整数周期」补偿（见 _cycle_had_neg / _anchor_had_neg）。
+            if neg:
+                self._cycle_had_neg = True
+                self._anchor_had_neg = True
+            else:
+                self._cycle_had_pos = True
+                self._anchor_had_pos = True
 
         if not in_battle:
             # 关卡外：不计数，并且重新锚定，等真进关卡时干净起锚（不把两段接起来）
             if self._prev_mode != 'idle':
                 self.resync()
+            # 出了关卡，上一局的满费锚点就没有意义了（下一局可能从任意费用开始）。
+            self._reset_full_anchor()
             mode, delta = 'idle', 0
             if bar.state in BAR_PRESENT_STATES:
                 # 画面里「有东西」但不是关卡（菜单 / 仓库 / 切场景压到高亮 UI）。
@@ -508,6 +573,17 @@ class Counter:
         # 带小数的累计值：像素通道数出来的永远是整数，小数只可能来自满费挂钟那点余量。
         # 面板在满费时印这个（用户要「精确到小数点后一到两位」），打轴器/CSV 用整数。
         self.elapsed_f = self.pixel_frames + self.clock_frames + self._clock_frac
+        # ---- 满费锚点 ----
+        # 只在「MAX 上升沿」记一次；MAX 连续亮很多拍、以及 MAX -> MAX_FADE 都不算新事件。
+        # 暂停中的 MAX 不记锚点：暂停那段本来就不走逻辑帧，等恢复运行后再记。
+        full_now = bar.state == 'MAX'
+        if in_battle and bar.state in ('MAX', 'MAX_FADE') and self._full_active:
+            pass                      # 同一次满费还在继续（或正在淡出）
+        elif in_battle and full_now and not paused:
+            self._full_anchor_event(self.frames_per_cost * (2.0 if neg else 1.0))
+            self._full_active = True
+        else:
+            self._full_active = False
         # 探针只统计「游戏确实在跑」的样本：帧操时条会动但游戏是暂停的，
         # 那种样本会把实测帧率拉低，不代表真实逻辑帧率。
         if mode == 'pixel' and not self._bullet and not paused:
@@ -536,7 +612,9 @@ class Counter:
             warn=warn,
             phase=(self.timing.phase() if self.timing else 0.0),
             err=self.last_k, pause_drawn=pause.drawn, pause_solid=pause.solid,
-            negative=neg, sign_run=sign_run, sign_thr=sign_thr)
+            negative=neg, sign_run=sign_run, sign_thr=sign_thr,
+            bar_fill_count=self.bar_fill_count,
+            bar_fill_frames=self.bar_fill_frames)
 
     def probe(self) -> tuple:
         """实测逻辑帧率探针。
@@ -562,6 +640,17 @@ class Counter:
         s = sorted(self.cycle_lengths)
         return (n, float(s[n // 2]), float(s[0]), float(s[-1]))
 
+    def reset_cycle_stats(self) -> None:
+        """把「满条次数 / 上一个条空位置」清零。
+
+        清零计数、换回费速率时用。面板的「满条 n ｜ +x 帧」靠这两个数算：
+        x = 累计帧号 - bar_fill_frames，所以条空时 x 一定是 0。
+        """
+        self.bar_fill_count = 0
+        self.bar_fill_frames = 0
+        self._cycle_had_neg = False
+        self._cycle_had_pos = False
+
     def set_frames_per_cost(self, frames: float, rescale: bool = True) -> None:
         """换回费速率：一费几个逻辑帧。
 
@@ -584,11 +673,19 @@ class Counter:
         ratio = (frames / old) if old > 0 else 1.0
         self.frames_per_cost = frames
         self.required = required_from_frames(frames)
+        self._cycle_origin_clean = False
+        self._snap_first_cycle = False
+        if abs(ratio - 1.0) > 1e-9:
+            # 换周期后旧的「满条次数 n」不能再和新周期相乘；周期基准也在
+            # resync() 里作废了，下一次条空重新从 n = 1 开始对齐。
+            self.reset_cycle_stats()
         if rescale and abs(ratio - 1.0) > 1e-9:
             self.pixel_frames = int(round(self.pixel_frames * ratio))
             self.cycle_lengths = [int(round(v * ratio)) for v in self.cycle_lengths]
         self.elapsed = self.pixel_frames + self.clock_frames
         self.resync(keep_battle=True)
+        # 周期长度变了，旧锚点对应的「+30 / +60」已经不成立，重新建立。
+        self._reset_full_anchor()
 
     def set_negative_override(self, value) -> None:
         """手动指定「局内负费」：True 强开 / False 强关 / None 按画面判（默认）。
@@ -615,8 +712,11 @@ class Counter:
         self.manual_pause = on
         if not on:
             # keep_battle=True：只是手动按住，不代表「人从游戏里切出去了」，
-            # 不该把关卡判定一起清掉（否则恢复后要等费用条再出现一次才开始计数）
+            # 不该把关卡判定一起清掉（否则恢复后要等费用条再出现一次才开始计数）。
+            # mark_zero_start(None)：恢复时只对相位、不补暂停期间条走过的帧 ——
+            # 否则条恢复时正好在本费第 2 帧，数字会从 0 直接跳到 2。
             self.resync(keep_battle=True)
+            self.mark_zero_start(None)
 
     def adopt(self, other: 'Counter') -> None:
         """把另一个 Counter 已经数出来的帧数接过来（换布局 / 重新校准时用）。
@@ -640,6 +740,17 @@ class Counter:
         self._cycle_seen = other._cycle_seen
         self.last_m = other.last_m
         self._digit_seen = other._digit_seen
+        self.full_anchor = other.full_anchor
+        self._full_active = other._full_active
+        self.full_anchor_events = other.full_anchor_events
+        self.full_anchor_corrections = other.full_anchor_corrections
+        self.full_anchor_last_diff = other.full_anchor_last_diff
+        self.bar_fill_count = other.bar_fill_count
+        self.bar_fill_frames = other.bar_fill_frames
+        self._cycle_had_neg = other._cycle_had_neg
+        self._cycle_had_pos = other._cycle_had_pos
+        self._anchor_had_neg = other._anchor_had_neg
+        self._anchor_had_pos = other._anchor_had_pos
 
     def resync(self, keep_battle: bool = False) -> None:
         """重新锚定。
@@ -672,6 +783,9 @@ class Counter:
         self._digit_seen = False
         # 负费状态也**故意不动**：它记的是「画面里有没有减号」这个事实，和「相位模型
         # 可不可信」无关；重新起锚后的第一拍会按新读数重新判（且不判转场，见 _transition）。
+        # 满费锚点这里也**故意不动**：重新校准 / 换布局 / 手动暂停都不代表
+        # 中间真的走过了新的一段逻辑时间；下一次 MAX 仍可以拿它做小偏差校正。
+        # 真正的重置只有三处：出关卡、清零、换回费速率（见 _reset_full_anchor）。
         # 注意：清零那对状态（_no_catchup / _zero_phase）这里**故意不动**。
         # set_layout / set_frames_per_cost 都会走一遍 resync，而真正的清零是在
         # set_layout 之后才调 mark_zero_start —— 清了的话标志就活不到下一拍起锚。
@@ -756,8 +870,79 @@ class Counter:
           - 条已经有像素   -> 补帧只能从清零时的相位往后算，不能倒回去补。
         bar_fill=None（界面没读到画面）时保守处理：一律不补（宁可少记也不猜）。
         """
+        already = self._no_catchup
         self._no_catchup = True
-        self._zero_phase = self._phase_index(bar_fill) if bar_fill is not None else None
+        if bar_fill is not None:
+            self._zero_phase = self._phase_index(bar_fill)
+            # 清零是从本费中间开始的：第一次条空只差几帧时补平，别把它记成
+            # “满条 1 次”又留下 -2（用户 2026-10-18 看到的第一费 28 帧）。
+            self._snap_first_cycle = True
+        elif not already:
+            # begin_counting() 会在 resync() 后再调一次 mark_zero_start(None)；
+            # 如果前面 reset() 已经记下清零相位，这次不能把它擦掉。
+            self._zero_phase = None
+            self._snap_first_cycle = False
+        # 清零后帧号从 0 重新起算，旧锚点必须作废，否则第一次满费会把帧号拨回去。
+        self._reset_full_anchor()
+
+    # ---------- 满费锚点 ----------
+
+    def _reset_full_anchor(self) -> None:
+        """作废满费锚点（出关卡 / 清零 / 换回费速率时）。"""
+        self.full_anchor = None
+        self._full_active = False
+        self._anchor_had_neg = False
+        self._anchor_had_pos = False
+
+    def _full_anchor_event(self, period: float) -> None:
+        """MAX 上升沿：把累计帧号对齐到「上次满费 + n 个完整周期」。
+
+        为什么要锚在满费：像素通道一费固定走 30 / 60 / 120 个逻辑帧，
+        正常回费时相邻两次满费之间就应当是整数个周期。逐拍取整、满费挂钟
+        余量的四舍五入都会留下不到 1 帧的误差，采样几十分钟后才显形；
+        每次满费把误差拨回去，误差就不会跨周期累积。
+
+        只拨「离某个整数周期不超过 FULL_ANCHOR_TOL 帧」的偏差：
+        差得远说明满费间隔本来就不是完整周期（中途用费 / 技能提前回满），
+        这时只重新起锚，不能硬算成 +30 —— 那会把真实操作算错。
+        """
+        period = float(period)
+        if not (period > 0):
+            return
+        cur = self.elapsed_f
+        self.full_anchor_events += 1
+        # 上一次满费之后只要正负费混合过，这段间隔就不是整数个同速周期，
+        # 不能拿它做帧数校正（同 _pixel 里的 _cycle_had_neg）。
+        mixed = self._anchor_had_pos and self._anchor_had_neg
+        if self.full_anchor is not None and not mixed:
+            gap = cur - self.full_anchor
+            ratio = gap / period
+            cycles = int(ratio + 0.5) if ratio >= 0 else int(ratio - 0.5)
+            if cycles >= 1:
+                target = self.full_anchor + cycles * period
+                diff = target - cur
+                if 1e-9 < abs(diff) <= FULL_ANCHOR_TOL:
+                    # 整数部分记进挂钟通道（漂移正是它产生的），小数部分放回余量；
+                    # 这样 elapsed / elapsed_f / 下一拍时钟推进三者保持一致。
+                    whole = int(round(diff))
+                    self.clock_frames += whole
+                    self._clock_frac += diff - whole
+                    # 余量保持在 [0, 1)，和 _clock 的不变量一致：面板上的整数帧
+                    # 永远等于 elapsed_f 的整数部分，不会出现「.4 却跳了两帧」。
+                    carry = int(self._clock_frac // 1.0)
+                    if carry:
+                        self.clock_frames += carry
+                        self._clock_frac -= carry
+                    self.elapsed = self.pixel_frames + self.clock_frames
+                    self.elapsed_f = self.elapsed + self._clock_frac
+                    if self._cycle_ref is not None:
+                        self._cycle_ref += whole + carry
+                    self.full_anchor_corrections += 1
+                    self.full_anchor_last_diff = diff
+                    cur = self.elapsed_f
+        self.full_anchor = cur
+        self._anchor_had_neg = False
+        self._anchor_had_pos = False
 
     def _unreadable_head_frames(self, speed: int = None) -> int:
         """费用周期开头「读不出来」的帧数：这几帧画出来太窄，read_bar 只会给 EMPTY。
@@ -818,6 +1003,7 @@ class Counter:
         周期第 16 帧（fill=129 -> k=16），两者分得很开。补不上的标 anchor-late，
         面板 / CSV 里能直接看出来。
         """
+        self._cycle_origin_clean = False
         blind = self._unreadable_head_frames(speed)
         first_visible = blind + 1    # 条第一次读得出来，最早落在本费第几帧
         cap = max(ANCHOR_MAX_CATCHUP, first_visible + 1)
@@ -842,6 +1028,7 @@ class Counter:
                 return 'anchor', 0, ('anchor-late' if head > cap else '')
             head = int(k) - int(base_k)
         if 0 < head <= cap:
+            self._cycle_origin_clean = True
             return 'anchor-head', head, ''
         if head > cap:
             return 'anchor', 0, 'anchor-late'
@@ -1060,11 +1247,55 @@ class Counter:
             # 这一步跨过了回费边界（可能还不止一次，但正常推进时只会跨一次）。
             # 边界在这 k 帧里的位置由 frames_since_cycle_start 反推 —— 它回卷时清零，
             # 所以「边界落在哪一帧」是精确的，周期长度不会一帧一帧地漂。
+            crossed = timing.cycles - self._cycle_seen
             end = self.elapsed + k - timing.frames_since_cycle_start
-            if self._cycle_ref is not None and timing.cycles == self._cycle_seen + 1:
+            period = int(round(self.frames_per_cost * (2.0 if neg else 1.0)))
+            # 这一费里只要正负费混合过，周期长度就不是整数个同速周期
+            # （负费每帧只攒一半），任何「钉回 30 / 60」的补偿都会把真实帧数改错。
+            mixed = self._cycle_had_pos and self._cycle_had_neg
+            counted = 0
+            if self._cycle_ref is None:
+                # 清零 / 点开始之后的**第一个**边界有两种可能：
+                #   a) 从条空开始（或起锚时已把开头几帧补回来）：这就是一个完整周期；
+                #   b) 从本费中间开始（录像里从第 2 帧清零）：到条空只剩 28 帧。
+                # 以前 b 也被算成「满条 1 次」，面板就出现 `满条 1 ｜ -2`，看起来
+                # 像第一费只有 28 帧。只有起锚确实补过头、或清零后离整周期只差
+                # 几帧时才认第一费；差得远就只把它当周期基准，n 保持 0。
+                near_full = (period > 0
+                             and abs(period - end) <= CYCLE_ANCHOR_TOL)
+                if near_full and (self._cycle_origin_clean
+                                  or self._snap_first_cycle):
+                    if self._snap_first_cycle and not mixed:
+                        diff = period - end
+                        self.pixel_frames += int(diff)
+                        if self.full_anchor is not None:
+                            self.full_anchor += diff
+                        end = period
+                    counted = 1
+                self._cycle_origin_clean = False
+                self._snap_first_cycle = False
+            elif crossed >= 1 and period > 0:
+                expected = self._cycle_ref + crossed * period
+                diff = expected - end
+                if not mixed and abs(diff) <= CYCLE_ANCHOR_TOL * crossed:
+                    # 把「这一周期多算/少算的几帧」从这里拨回去。像素通道的余量
+                    # 不用动：diff 是整数帧，直接改累计像素帧数即可；elapsed /
+                    # elapsed_f 会在 step 末尾按 pixel_frames + clock_frames 重算。
+                    self.pixel_frames += int(diff)
+                    if self.full_anchor is not None:
+                        self.full_anchor += diff
+                    end = expected
+                counted = crossed
+            if self._cycle_ref is not None and crossed == 1:
                 self.cycle_lengths.append(end - self._cycle_ref)
+            self.bar_fill_count += counted
+            # 面板「满条 n ｜ +x 帧」里的 x 直接由它算：条空时 x 一定是 0，
+            # 不管这一费是 30、60 还是中途切过负费的 34 帧。
+            self.bar_fill_frames = end
             self._cycle_ref = end
             self._cycle_seen = timing.cycles
+            self._cycle_had_neg = False
+            self._cycle_had_pos = False
         return 'pixel', k, ('phase-resync' if stale else '')
 
     def _transition(self, neg: bool, had_phase: bool) -> str:
