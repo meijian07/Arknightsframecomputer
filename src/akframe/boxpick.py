@@ -10,11 +10,10 @@
 
 1. **刻度尺**（guide_image）：费用条的设计是「条槽宽 = 30 个逻辑帧」。把预测的条槽
    位置画成一个被 30 等分的尺子，用户框的时候是**对着刻度**对两端，而不是对着空气；
-2. **放大镜**（magnify）：把框那一块放大（横向 x 倍、纵向可以拉得更狠），并把**框的
-   四条边都画出来**（左 / 右 = 红 / 绿竖线，上 / 下 = 品红横线），read_bar 真正取样的
-   行画成蓝线 —— 白块的左端压没压在红线上、白条在上下两条品红线之间居没居中，一眼就能
-   看出来；放大镜还能**按住平移**（pan）把框周围一起拉进来对、**滚轮局部放大**（zoom）
-   只看框里的一小块（2026-10-11 追加）。
+2. **放大镜**（magnify）：把框那一块放大，并把**手动框的四条边都画成红色实线**；
+   自动校准推测出来的框画成**白色虚线**，read_bar 真正取样的行画成蓝线 —— 手动框和
+   自动框一眼就能分开；放大镜还能**按住平移**（pan）把框周围一起拉进来对、
+   **滚轮局部放大**（zoom）只看框里的一小块（2026-10-11 追加）。
 
 这个模块里全是纯函数 / 只依赖 numpy + PIL + 已有的 features / align，不碰 Tk：
 界面（ui.BoxPicker）只负责把这里画出来的图贴到画布上。
@@ -28,14 +27,17 @@ from PIL import Image, ImageDraw
 from .features import fill_run
 from .geometry import BAR_BAND_BOTTOM, BAR_BAND_TOP, BAR_ROI_H, Layout, Rect
 
-# 参照图的配色：条槽用橙色（和游戏 HUD 的蓝白都不撞），按钮用蓝色。
+# 参照图的配色：橙色刻度尺仍然是「按分辨率推测的位置」；**自动框统一白色虚线**，
+# **手动框统一红色实线**（用户 2026-10-19 要求，窗口模式手动校准时两种框要一眼分开）。
 GUIDE_BAR = (255, 150, 30)
 GUIDE_BTN = (60, 170, 255)
 GUIDE_TEXT = (255, 235, 180)
-EDGE_LEFT = (255, 70, 70)      # 放大镜里框的左边缘
-EDGE_RIGHT = (70, 230, 110)    # 框的右边缘
-EDGE_TOP = (255, 90, 220)      # 框的上边缘
-EDGE_BOTTOM = (255, 90, 220)   # 框的下边缘（上下同色：它们是一对，只有左右要分开认）
+GUIDE_AUTO = (255, 255, 255)   # 自动校准推测框：白色虚线
+MANUAL_BOX = (255, 70, 70)     # 用户手动框：红色实线
+EDGE_LEFT = MANUAL_BOX
+EDGE_RIGHT = MANUAL_BOX
+EDGE_TOP = MANUAL_BOX
+EDGE_BOTTOM = MANUAL_BOX
 BAND_LINE = (90, 190, 255)     # read_bar 真正取样的那条带
 BAND_FILL = (40, 90, 140)      # 条带整条填的一层淡色（比两条细线好认，见 magnify）
 BAND_FILL_ALPHA = 120          # 0..255
@@ -72,6 +74,48 @@ ZOOM_MAX = 16.0
 
 
 
+def _dashed_line(draw: ImageDraw.ImageDraw, x0, y0, x1, y1, fill,
+                 dash=6, gap=4, width=1) -> None:
+    """画一条水平 / 垂直虚线（自动框只用到这两种方向）。"""
+    if y0 == y1:
+        lo, hi = sorted((int(x0), int(x1)))
+        step = max(1, int(dash) + int(gap))
+        x = lo
+        while x <= hi:
+            draw.line([(x, int(y0)), (min(hi, x + int(dash) - 1), int(y0))],
+                      fill=fill, width=width)
+            x += step
+    elif x0 == x1:
+        lo, hi = sorted((int(y0), int(y1)))
+        step = max(1, int(dash) + int(gap))
+        y = lo
+        while y <= hi:
+            draw.line([(int(x0), y), (int(x0), min(hi, y + int(dash) - 1))],
+                      fill=fill, width=width)
+            y += step
+
+
+def _dashed_rect(draw: ImageDraw.ImageDraw, bounds, fill,
+                 dash=6, gap=4, width=1) -> None:
+    """矩形虚线框：四条边都按同一段长 / 间隔画。"""
+    x0, y0, x1, y1 = [int(v) for v in bounds]
+    _dashed_line(draw, x0, y0, x1, y0, fill, dash, gap, width)
+    _dashed_line(draw, x0, y1, x1, y1, fill, dash, gap, width)
+    _dashed_line(draw, x0, y0, x0, y1, fill, dash, gap, width)
+    _dashed_line(draw, x1, y0, x1, y1, fill, dash, gap, width)
+
+
+def _guide_rects(layout: Layout):
+    """自动校准给出的三个 ROI（费用条 / 暂停 / 倍速）。"""
+    out = [layout.bar]
+    if layout.buttons_visible:
+        for name in ('pause', 'speed'):
+            r = getattr(layout, name)
+            if r.w > 2 and r.h > 2:
+                out.append(r)
+    return tuple(out)
+
+
 def guide_image(frame: np.ndarray, layout: Layout) -> Image.Image:
     """参照图：原始画面 + 预测的条槽刻度尺 + 右上角两个按钮的框。
 
@@ -85,7 +129,7 @@ def guide_image(frame: np.ndarray, layout: Layout) -> Image.Image:
     bar = layout.bar
     top = max(0, bar.y - 5)
     bot = min(h - 1, bar.y2 + 5)
-    d.rectangle([bar.x, top, bar.x2, bot], outline=GUIDE_BAR)
+    _dashed_rect(d, [bar.x, top, bar.x2, bot], GUIDE_AUTO, dash=7, gap=5)
     for k in range(TICKS + 1):
         x = bar.x + int(round(bar.w * k / float(TICKS)))
         x = max(0, min(w - 1, x))
@@ -100,7 +144,7 @@ def guide_image(frame: np.ndarray, layout: Layout) -> Image.Image:
         for name, label in (('pause', '暂停'), ('speed', '倍速')):
             r = getattr(layout, name)
             if r.w > 2 and r.h > 2:
-                d.rectangle([r.x, r.y, r.x2, r.y2], outline=GUIDE_BTN)
+                _dashed_rect(d, [r.x, r.y, r.x2, r.y2], GUIDE_AUTO, dash=7, gap=5)
                 d.text((r.x + 2, max(0, r.y - 13)), label, fill=GUIDE_BTN)
     return img
 
@@ -300,7 +344,10 @@ def _translucent(img: Image.Image, polys, color, alpha: int) -> Image.Image:
 
 def magnify(frame: np.ndarray, box: Rect, panel=(520, 170), layout: Layout = None,
             band=(0, 0), pan=(0, 0), zoom=1.0, ghost=(), band_fill=False) -> Image.Image:
-    """把框那一块放大，并把**框的四条边**画在上面：红 / 绿 = 左右，品红 = 上下。
+    """把框那一块放大，并把**手动框的四条边**统一画成红色实线。
+
+    传入 layout 时，自动校准推测出来的费用条 / 暂停 / 倍速框会画成**白色虚线**，
+    和用户手里的红色手动框分开；两者叠在一起时，以红色手动框为准。
 
     pan = 视窗相对**框的中心**的偏移（画面像素，正 = 往右下看），(0,0) = 框摆在正中。
     为什么要有它（用户 2026-10-11：「手动校准界面右边的放大图要可以自己移动，不然很难
@@ -370,25 +417,30 @@ def magnify(frame: np.ndarray, box: Rect, panel=(520, 170), layout: Layout = Non
             d = ImageDraw.Draw(img)
             for pts in polys:
                 d.polygon(pts, outline=GHOST_EDGE)
-    # 框的四条边（左 / 右画在框的**第一列 / 最后一列**，上 / 下画在第一行 / 最后一行）。
+    # 自动校准框先画在底下：白色虚线只是参考，红色手动框必须压在它上面。
+    if layout is not None:
+        for r in _guide_rects(layout):
+            x0, x1 = sx(int(r.x)), sx(int(r.x) + int(r.w)) - 1
+            y0, y1 = rowtop(int(r.y)), rowtop(int(r.y) + int(r.h)) - 1
+            if x1 < 0 or y1 < 0 or x0 >= iw or y0 >= ih:
+                continue
+            _dashed_rect(d, [x0, y0, x1, y1], GUIDE_AUTO, dash=5, gap=4, width=1)
+    # 手动框的四条边（左 / 右画在框的**第一列 / 最后一列**，上 / 下画在第一行 / 最后一行）。
     # 口径统一成「左闭」，和 boxpick.edge_lines 用的是同一份（界面照着它判「抓住哪条边」）。
     el, er, et, eb = edge_lines(box, panel, pan, zoom, (w, h))
+    y0, y1 = max(0, et), min(ih - 1, eb)
+    x0, x1 = max(0, el), min(iw - 1, er)
     for xx, col in ((el, EDGE_LEFT), (er, EDGE_RIGHT)):
-        if 0 <= xx < iw:
-            d.line([(xx, 0), (xx, ih - 1)], fill=col, width=2)
+        if 0 <= xx < iw and y1 >= y0:
+            d.line([(xx, y0), (xx, y1)], fill=col, width=2)
     for yy, col in ((et, EDGE_TOP), (eb, EDGE_BOTTOM)):
-        if 0 <= yy < ih:
-            d.line([(0, yy), (iw - 1, yy)], fill=col, width=2)
+        if 0 <= yy < ih and x1 >= x0:
+            d.line([(x0, yy), (x1, yy)], fill=col, width=2)
     if r1 > r0:
         for r in (r0, r1):
             yy = rowmid(r)
             if 0 <= yy < ih:
                 d.line([(0, yy), (iw - 1, yy)], fill=BAND_LINE)
-    if layout is not None:
-        for x in (layout.bar.x, layout.bar.x2):
-            xx = int((x - vx + 0.5) * kx)
-            if 0 <= xx < iw:
-                d.line([(xx, 0), (xx, ih - 1)], fill=GUIDE_BAR, width=1)
     return img
 
 

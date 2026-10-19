@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from PIL import Image, ImageDraw, ImageFont
 
-from .scale import Theme, clip, one_line
+from .scale import Theme, one_line
 
 # 数字用 Bahnschrift（Windows 自带的窄体，和游戏 HUD 的观感接近），中文用微软雅黑。
 FONT_NUM = r'C:\Windows\Fonts\bahnschrift.ttf'
@@ -48,13 +48,39 @@ def _font(path: str, size: int):
 def font_sizes(scale: float = 1.0) -> tuple:
     """三档字号（数字 / 轴动作 / 轴说明），随放大倍数走。
 
-    2026-10-11 按用户要求整体放大一档（9/11/12 -> 11/13/13）：面板上刻度表的字
-    原来是照着「尽量缩小」定的，缩到 9px 之后帧号已经要凑近才看得清。刻度条宽
-    (ruler_w=50) 不变，把刻度线往里收 2px、给「120」这种三位数腾出位置就够了。
+    2026-10-11 整体放大一档（9/11/12 -> 11/13/13）。
+    2026-10-16 再放大到**主面板「时间」那一号的字**（用户：『打轴器上的字体太小，
+    操作字体和帧号放大到主面板的时间大小』）。26 是量出来的，不是拍的：本机 150%
+    缩放、进程开着 DPI 感知时 `tkinter.font.Font(font=('Microsoft YaHei UI', 13))
+    .measure('时间')` = 52 —— 一个汉字 26px；PIL 的 truetype size 本身就是像素，
+    所以这里直接写 26。
+
+    刻度条宽 / 行高 / 间距跟着这一档走，见 scale.ScaleGeom（26px 的字配 78 / 34 / 34）。
     """
-    return (max(8, int(round(11 * scale))),
-            max(9, int(round(13 * scale))),
-            max(9, int(round(13 * scale))))
+    return (max(8, int(round(26 * scale))),
+            max(9, int(round(26 * scale))),
+            max(9, int(round(26 * scale))))
+
+
+def _clip_px(dr, text: str, font, room: float) -> str:
+    """按**像素宽度**截断一行文字，超了用 … 结尾（放不下就是空串）。
+
+    2026-10-16 加这一条：原来两处截断是按**字数**写的（动作 6 个字、说明 26 个字），
+    那在 13px 的字下就已经不是「一行放得下」的意思了（26 个字要 338px，而说明那一列
+    只有两百多像素，多出来的直接画到图外），放大到 26px 之后更离谱 —— 26 个字要 676px。
+    改成按宽度算之后，右边那列帧号才不会被顶掉、也不会被文字压住。
+    """
+    if not text:
+        return ''
+    if dr.textlength(text, font=font) <= room:
+        return text
+    ell = '…'
+    keep, ell_w = '', dr.textlength(ell, font=font)
+    for ch in text:
+        if dr.textlength(keep + ch, font=font) + ell_w > room:
+            break
+        keep += ch
+    return keep + ell if keep else ''
 
 
 def render(lay, theme: Theme = None, scale: float = 1, flash: bool = False) -> Image.Image:
@@ -83,8 +109,13 @@ def render(lay, theme: Theme = None, scale: float = 1, flash: bool = False) -> I
     dr.rectangle([0, 0, max(0, S(g.ruler_w) - 1), H - 1], fill=th.ruler_bg)
 
     # ---- 小/大刻度线与帧号 ----
+    # 刻度线**从哪儿起画**要跟着字号走：数字变宽（26px 的四位数有 60px）之后，
+    # 原来写死的 26 / 32 会正好压在数字上。两档都先夹在刻度条里面，保证线一定看得见。
+    _num_w = dr.textlength('8888', font=f_num)
+    tick_x_major = min(S(g.ruler_w) - S(4), S(3) + _num_w + S(3))
+    tick_x_minor = min(S(g.ruler_w) - S(2), tick_x_major + S(7))
     for f, y, major in lay.ticks:
-        dr.line([S(26 if major else 32), S(y), S(g.ruler_w), S(y)],
+        dr.line([tick_x_major if major else tick_x_minor, S(y), S(g.ruler_w), S(y)],
                 fill=th.tick_major if major else th.tick)
         if major:
             dr.text((S(3), S(y)), str(f), font=f_num, fill=th.num, anchor='lm')
@@ -111,12 +142,15 @@ def render(lay, theme: Theme = None, scale: float = 1, flash: bool = False) -> I
         # 说明按第一个空格切成「动作 + 内容」两段，动作上色，扫起来更快；
         # 没空格的（比如「开银灰技能」）就整条当动作，也不出错。
         head, _, rest = one_line(m.cue.text).partition(' ')
-        head = clip(head, 6)
+        # 一行文字的右边界：左边先让给帧号那一列（最多四位数），再留 12px 间距。
+        room_right = W - S(g.pad_right) - _num_w - S(12)
+        head = _clip_px(dr, head, f_act, max(0.0, (room_right - S(x_act)) * 0.42))
         txt = th.bg if hit else col
         dr.text((S(x_act), S(m.label_y)), head, font=f_act, fill=txt, anchor='lm')
-        if rest:
-            dr.text((S(x_act) + dr.textlength(head, font=f_act) + S(6), S(m.label_y)),
-                    clip(rest, 26), font=f_nm, anchor='lm',
+        if rest and head:
+            x_rest = S(x_act) + dr.textlength(head, font=f_act) + S(6)
+            dr.text((x_rest, S(m.label_y)),
+                    _clip_px(dr, rest, f_nm, room_right - x_rest), font=f_nm, anchor='lm',
                     fill=txt if hit else (th.faint if m.state == 'past'
                                           else (th.text if m.state == 'next' else th.dim)))
         # 右边印**绝对帧号**（2026-10-11 照用户看板批注：不再是「+40」这种带符号的

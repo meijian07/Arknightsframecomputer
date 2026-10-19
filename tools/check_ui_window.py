@@ -126,7 +126,8 @@ def main() -> int:
         app._tick_body()
         app._tick_body()
         check('没点开始也不算「采样已停」（那是正常待命，不是故障）',
-              '采样已停' not in app.lb_warn.cget('text'), app.lb_warn.cget('text'))
+              not app._stall_logged, app._stall_logged)
+        check('界面里没有告警条（采样停只印控制台）', not hasattr(app, 'lb_warn'))
 
         # ---- 2b. 清零：**没在采样**时也得立刻归 0 ----
         # 面板大数字读的是 monitor.latest.result.elapsed，而那一份只在「这一拍真读到
@@ -209,6 +210,12 @@ def main() -> int:
               mon2.counter.elapsed >= elapsed,
               '重校准前 %d -> 之后 %d' % (elapsed, mon2.counter.elapsed))
         check('刚才在数，重校准完自己接着数', mon2.alive)
+        # 2026-10-17：_counting_started 是「用户点过开始」那一态（底部那一行 + 主按钮都
+        # 看它）。它以前写在 mon.start() 前面 —— 半路重新校准这一下会留下 False 而线程
+        # 已经在跑，于是面板写着「未开始」、数字却在涨（那一轮把底部词表收紧到七个词，
+        # 不再有「已校准（帧数接着数）」盖着它，当场露出来了）。
+        check('半路重新校准：_counting_started 跟着线程一起是 True（否则底下写「未开始」）',
+              app._counting_started is True, '%r' % app._counting_started)
 
         # ---- 4b. 手框按钮：用户指的位置直接钉上，**不再**跑那道几十秒的网格搜索 ----
         # 用户 2026-10-11：「暂停键倍速键也会截取不到，需要手动校准」。自动搜按钮只认
@@ -340,62 +347,19 @@ def main() -> int:
                   len(calls) == n and lifted == [4242],
                   'calls=%d lifted=%s' % (len(calls), lifted))
             ui.is_above = lambda a, b: False
-            # 句柄失效 = 窗口被关掉 / 播放器换了一个 —— 放开置顶并当面说清楚，
-            # 不能闷着（闷着就是用户看到的「说好的置顶没了」）
+            # 句柄失效 = 窗口被关掉 / 播放器换了一个 —— 放开置顶。用户 2026-10-18
+            # 把界面提示也删了：这里只印控制台，底下仍然是七个状态词之一。
             ui.is_window = lambda hwnd: False
             app._keep_pin(t_now + 10.0)
-            check('目标窗口句柄失效：放开置顶 + 提示重新选一个窗口',
-                  app._pinned_hwnd is None and '重新选一个' in app.lb_note.cget('text'),
+            check('目标窗口句柄失效：放开置顶，界面不写消息（只印控制台）',
+                  app._pinned_hwnd is None
+                  and app.lb_note.cget('text') in ui.NOTE_WORDS,
                   'pinned=%s ｜ %s' % (app._pinned_hwnd, app.lb_note.cget('text')))
         finally:
             ui.set_topmost, ui.is_window = real_topmost, real_iswin
             ui.top_level, ui.raise_window = real_top, real_raise
             ui.is_above = real_above
             ui.is_topmost = real_topmost_flag
-
-        # ---- 5c. 面板压住**被读的 ROI**：那块抓到的是面板自己，必须当面告警 ----
-        # 判据是三个 ROI，不是整个客户区 —— 全屏播放器的客户区覆盖整块屏幕，按客户区判
-        # 会天天误报（实测 Desktop 2026.10.09 20.13.34：媒体播放器客户区 2560x1539）。
-        # 面板的真实位置这里改不了（面板是 withdraw 的），所以直接替掉那四个取值函数。
-        # 2026-10-11 起这条写进常驻的「告警：」那一行（lb_warn），不再是窗口那一行的
-        # 「教程」（那一段用户让删了）—— 见 MonitorApp._refresh_roi_warn。
-        lay = app.monitor.layout
-        cx, cy = app._window_win.client[0], app._window_win.client[1]
-        rrx, rry = app.root.winfo_rootx, app.root.winfo_rooty
-        rrw, rrh = app.root.winfo_width, app.root.winfo_height
-        try:
-            app.root.winfo_rootx = lambda: cx + lay.bar.x + 8      # 正好盖住费用条
-            app.root.winfo_rooty = lambda: cy + lay.bar.y + 2
-            app.root.winfo_width = lambda: 60
-            app.root.winfo_height = lambda: 12
-            app._refresh_roi_warn()
-            check('面板压住费用条时当面告警（点名是哪一个 ROI）',
-                  '面板压住了「费用条」' in app.lb_warn.cget('text'),
-                  app.lb_warn.cget('text').replace('\n', ' ｜ '))
-            # 人在客户区里、但**没压住任何一个 ROI** —— 全屏播放器就是这个样子，
-            # 这种时候不该报警（报警刷屏等于没报警）。
-            app.root.winfo_rootx = lambda: cx + 5
-            app.root.winfo_rooty = lambda: cy + 5
-            app.root.winfo_width = lambda: 400
-            app.root.winfo_height = lambda: 300
-            app._refresh_roi_warn()
-            check('在客户区里但没压住 ROI：不误报',
-                  '压住' not in app.lb_warn.cget('text'),
-                  app.lb_warn.cget('text').replace('\n', ' ｜ '))
-            app.root.winfo_rootx = lambda: cx + app._window_win.client[2] + 50
-            app.root.winfo_rooty = lambda: cy
-            app.root.winfo_width = lambda: 10
-            app.root.winfo_height = lambda: 10
-            app._refresh_roi_warn()
-            check('整个挪出客户区：也不报警',
-                  '压住' not in app.lb_warn.cget('text'),
-                  app.lb_warn.cget('text').replace('\n', ' ｜ '))
-        finally:
-            app.root.winfo_rootx, app.root.winfo_rooty = rrx, rry
-            app.root.winfo_width, app.root.winfo_height = rrw, rrh
-            app._refresh_roi_warn()
-        check('没压住之后那条告警的状态位也清回去了（下次压住才会再报）',
-              app._roi_warn == '', repr(app._roi_warn))
 
         # ---- 5d. 我们自己开着对话框时：置顶照样复核，而且把我们自己的窗全抬回来 ----
         # 「框选费用条」那个取景器就是要盖在目标窗口上面让用户对着参照图圈的，所以钉完

@@ -38,7 +38,14 @@ WS_EX_TOPMOST = 0x00000008              # 这个窗口现在是不是「置顶�
 # SetWindowPos：只改 Z 序那三个标志（见 set_topmost）
 SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
+SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
+SWP_FRAMECHANGED = 0x0020             # 改完样式要让系统重算一次非客户区（见 add_taskbar_button）
+
+WS_EX_APPWINDOW = 0x00040000          # 有这一位的顶层窗口才会出现在任务栏
+SW_MINIMIZE = 6                       # ShowWindow（见 minimize_window）
+GCLP_HBRBACKGROUND = -10            # 窗口类的背景画刷（SetClassLongPtr 的 index）
+_ERASE_BRUSHES = {}                 # color -> 刷子句柄（见 set_erase_brush）
 GA_ROOT = 2                           # GetAncestor：一直往上找到所在的那个顶层窗口
 GW_HWNDNEXT = 2                       # GetWindow：Z 序里的下一个窗（见 is_above）
 
@@ -88,6 +95,235 @@ def client_rect(hwnd: int) -> tuple:
 
 def is_minimized(hwnd: int) -> bool:
     return bool(_user32.IsIconic(hwnd))
+
+
+def toplevel_hwnd(widget_root) -> int:
+    """Tk 根窗口对应的那个**顶层窗口句柄**。
+
+    为什么不用 winfo_id()：它给的是里面那个 TkChild，改 WS_EX_* 样式要改在外层窗口上
+    才生效。主面板现在走 overrideredirect（没有系统标题栏），frame() 返回的就是顶层
+    窗口自己，所以这一条够用（有 wrapper 的普通窗口返回 wrapper，同样是对的）。
+    """
+    return int(str(widget_root.frame()), 16)
+
+
+def _get_long_ptr():
+    '''拿 GetWindowLongPtrW，并把 ctypes 原型设成「指针宽度」的整数。
+
+    为什么非要设：64 位下这两个 API 收发的是 LONG_PTR（跟指针一样宽）。不设原型
+    ctypes 会按 C 的 int（32 位）解析，样式里高位的标记会被截掉 —— 而
+    WS_EX_APPWINDOW / WS_EX_TOPMOST / WS_EX_LAYERED 恰好全在高位。
+    设置是幂等的，抄几遍没有副作用，抽出来只为少抄几遍。
+    '''
+    fn = _user32.GetWindowLongPtrW
+    fn.restype = ctypes.c_ssize_t
+    fn.argtypes = [wt.HWND, ctypes.c_int]
+    return fn
+
+
+def _set_long_ptr():
+    '''拿 SetWindowLongPtrW 并设好 ctypes 原型（理由同 _get_long_ptr）。'''
+    fn = _user32.SetWindowLongPtrW
+    fn.restype = ctypes.c_ssize_t
+    fn.argtypes = [wt.HWND, ctypes.c_int, ctypes.c_ssize_t]
+    return fn
+
+
+def add_taskbar_button(widget_root) -> bool:
+    """给顶层窗口补上「出现在任务栏」这一位，返回最后是不是真的带上了。
+
+    背景（2026-10-16 主面板去掉系统标题栏那一条）：overrideredirect 的窗口 Tk 会给它
+    打上 WS_EX_TOOLWINDOW —— 代号是「工具窗口」，**不进任务栏**。于是「−」（最小化）
+    就成了一条不归路：缩下去之后屏幕上没有任何东西可以点回来。补上 APPWINDOW 之后
+    任务栏里有按钮，点一下就能恢复。
+
+    每拍调也没关系：这一位已经在就一个系统调用都不发（Tk 重新映射窗口时可能把它清掉，
+    所以调用方会反复核）。
+    """
+    try:
+        hwnd = toplevel_hwnd(widget_root)
+        get = _get_long_ptr()
+        setl = _set_long_ptr()
+        ex = get(hwnd, GWL_EXSTYLE)
+        if ex & WS_EX_APPWINDOW:
+            return True
+        setl(hwnd, GWL_EXSTYLE, ex | WS_EX_APPWINDOW)
+        _user32.SetWindowPos(ctypes.c_void_p(hwnd), None, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED)
+        return bool(get(hwnd, GWL_EXSTYLE) & WS_EX_APPWINDOW)
+    except Exception:                      # noqa: BLE001  窗口还没建出来 / 已经被销毁
+        return False
+
+
+# 用户 2026-10-17：「把所有面板的直角换成经典的圆角」。
+# 走 DWM 的 DWMWA_WINDOW_CORNER_PREFERENCE（Win11 / build 22000+），不走
+# SetWindowRgn —— 理由见 set_round_corners 的说明。
+DWMWA_WINDOW_CORNER_PREFERENCE = 33
+DWMWCP_DEFAULT = 0        # 跟着系统「圆角 / 直角」那项设置
+DWMWCP_DONOTROUND = 1
+DWMWCP_ROUND = 2          # 大圆角（资源管理器 / 设置那一档，默认用它）
+DWMWCP_ROUNDSMALL = 3     # 小圆角
+_dwmapi = ctypes.WinDLL('dwmapi', use_last_error=True)
+_dwmapi.DwmSetWindowAttribute.argtypes = [wt.HWND, wt.DWORD, ctypes.c_void_p,
+                                          wt.DWORD]
+_dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
+_dwmapi.DwmGetWindowAttribute.argtypes = [wt.HWND, wt.DWORD, ctypes.c_void_p,
+                                          wt.DWORD]
+_dwmapi.DwmGetWindowAttribute.restype = ctypes.c_long
+
+
+def get_round_corners(widget_root):
+    """读回系统**真的**记在这个窗口上的圆角偏好（读不到返回 None）。
+
+    为什么要有这一条：`set_round_corners` 只按 DwmSetWindowAttribute 的返回值记账 ——
+    万一属性号写错、或系统悄悄不认，自己这边一点异常都看不出来。读回来才是真凭据
+    （自检第 22 组就是这么钉的）。
+    窗口还 withdraw 着 / 已经销毁时系统不认这个句柄（E_HANDLE 0x80070006），
+    Win10 上没有这个属性 —— 两种都算「读不到」，返回 None，不当失败。
+    """
+    try:
+        hwnd = toplevel_hwnd(widget_root)
+        if not hwnd:
+            return None
+        out = ctypes.c_int(-1)
+        hr = _dwmapi.DwmGetWindowAttribute(ctypes.c_void_p(hwnd),
+                                           DWMWA_WINDOW_CORNER_PREFERENCE,
+                                           ctypes.byref(out), ctypes.sizeof(out))
+        if hr != 0:
+            return None
+        return out.value
+    except Exception:                      # noqa: BLE001  Win10 / 窗口还没建出来
+        return None
+
+
+def set_round_corners(widget_root, pref: int = DWMWCP_ROUND) -> bool:
+    """把顶层窗口换成 Win11 的 DWM 圆角，返回系统接没接受。
+
+    为什么不走 SetWindowRgn + CreateRoundRectRgn（更老、更常见的做法）：那是按区域
+    **裁剪**，边缘不抗锯齿。同一块左上角实测（本机 150% DPI，把角裁下来放大 12 倍）：
+        DWM  圆角 -> 86 个过渡像素（平滑）
+        区域裁剪  -> 0 个（一格一格的台阶，肉眼能看出锯齿）
+    所以圆角用 DWM，锯齿那套只留作参考 —— 见 docs 第 57 节。
+
+    **得等窗口映射出来再设**（实测踩到的坑）：窗口还没映射时调用会返回成功，可
+    DwmGetWindowAttribute 读回来还是 0 —— 系统把这一次设的偏好丢了（映射前后
+    toplevel_hwnd() 给的句柄也确实不是同一个：本机实测 2233758 -> 映射后 1709512）。
+    所以除了建窗那一拍设一次，还要 set_round_corners_on_map() 挂个钩子在映射之后再补
+    一次；已经映射着的窗口随时设都行（换尺寸不用重设，这点和 SetWindowRgn 正相反）。
+
+    为什么不像 add_taskbar_button 那样记「设过了」的账：句柄会被系统回收再发出去，按
+    句柄记账迟早把「刚建好、复用了老句柄」的新窗口漏掉（DWM 属性跟着窗口走，老窗口
+    销毁时一起没了）。一次 DwmSetWindowAttribute 是微秒级的、反复设幂等，不记账更省心。
+
+    实测过：进程用过 -alpha / -transparentcolor 之后窗口是分层的（WS_EX_LAYERED），
+    DWM 圆角照样有效（主面板就是这么用的）。
+    Win10 上没有这个属性：调用会失败，这里返回 False —— 调用方忽略即可，退回直角，
+    其余一切不变。
+    """
+    try:
+        hwnd = toplevel_hwnd(widget_root)
+        if not hwnd:
+            return False
+        want = ctypes.c_int(pref)
+        hr = _dwmapi.DwmSetWindowAttribute(ctypes.c_void_p(hwnd),
+                                          DWMWA_WINDOW_CORNER_PREFERENCE,
+                                          ctypes.byref(want), ctypes.sizeof(want))
+        return hr == 0
+    except Exception:                      # noqa: BLE001  Win10 / 窗口还没建出来
+        return False
+
+
+def set_round_corners_on_map(widget_root, pref: int = DWMWCP_ROUND):
+    """挂一个 <Map> 钩子：窗口每被映射出来一次就补设一次圆角（理由见上）。
+
+    Tk 的 <Map> 事件连子控件的那些也会冒到顶层窗口的绑定上（本机实测建一个二级窗口会
+    来 6 次），所以只认「事件源就是顶层窗口自己」那一拍 —— 不然一次白白多好几个系统
+    调用。
+    """
+    def _on_map(ev):
+        if ev.widget is widget_root:
+            set_round_corners(widget_root, pref)
+    try:
+        widget_root.bind('<Map>', _on_map, add='+')
+    except Exception:                      # noqa: BLE001  窗口已经没了
+        pass
+
+
+def set_erase_brush(widget_root, color: str) -> bool:
+    """把顶层窗口的**类背景画刷**换成面板底色，返回系统接没接受。
+
+    为什么需要这一条（2026-10-16 用户第二次报「展开收起还是会闪」，连拍 300 帧/秒
+    抓出来的）：展开 / 收起要改窗口尺寸，系统会先把整块客户区按**类背景画刷**擦一遍、
+    再让子控件各自重画。Tk 给窗口类配的那把刷子在建窗时就定成黑色了（实测擦完那一帧
+    是 #000000，而面板底色是 #151517），于是中间这一帧是一整块**纯黑** —— 面板越暗
+    越扎眼。换成同色刷子之后，那一帧变成「底色在、字晚一帧」，肉眼基本看不出来。
+
+    每色只建一把刷子、且**类上已经是它就不发系统调用**（_place 每次换尺寸都会调到这里，
+    无条件重建就是拿 GDI 对象换内存，一个进程只有 1 万个额度）。
+
+    CreateSolidBrush 收的是 COLORREF = 0x00BBGGRR（**BGR**，不是 RGB），传反了会变成
+    另一种颜色。刷子按类共享、系统可能不拷贝它，所以建出来就**不能删**。
+    """
+    try:
+        hwnd = int(widget_root.frame() and toplevel_hwnd(widget_root))
+    except Exception:                      # noqa: BLE001  窗口还没建出来 / 已经被销毁
+        return False
+    brush = _ERASE_BRUSHES.get(color)
+    if brush is None:
+        try:
+            r = int(color[1:3], 16)
+            g = int(color[3:5], 16)
+            b = int(color[5:7], 16)
+            brush = _gdi32.CreateSolidBrush((b << 16) | (g << 8) | r)
+        except (ValueError, AttributeError):
+            return False
+        if not brush:
+            return False
+        _ERASE_BRUSHES[color] = brush
+    try:
+        if _get_class_long(hwnd, GCLP_HBRBACKGROUND) == brush:
+            return True                    # 已经是它了
+        _set_class_long(hwnd, GCLP_HBRBACKGROUND, brush)
+        return _get_class_long(hwnd, GCLP_HBRBACKGROUND) == brush
+    except Exception:                      # noqa: BLE001
+        return False
+
+
+def _class_long_fn(name_ptr: str, name32: str):
+    """取 Set/GetClassLongPtrW（32 位 Python 上这两个 API 不存在，退回 ...LongW）。"""
+    fn = getattr(_user32, name_ptr, None) or getattr(_user32, name32)
+    fn.restype = ctypes.c_ssize_t
+    fn.argtypes = [wt.HWND, ctypes.c_int, ctypes.c_ssize_t]
+    return fn
+
+
+def _get_class_long(hwnd: int, index: int):
+    """读窗口**类**的一个 LONG_PTR（返回值可能是画刷句柄，所以按有符号量返回）。"""
+    fn = _class_long_fn('GetClassLongPtrW', 'GetClassLongW')
+    if fn is _user32.GetClassLongW:        # 32 位版没有第三个参数
+        fn.argtypes = [wt.HWND, ctypes.c_int]
+        return fn(ctypes.c_void_p(int(hwnd)), index)
+    return fn(ctypes.c_void_p(int(hwnd)), index, 0)
+
+
+def _set_class_long(hwnd: int, index: int, value: int) -> None:
+    """写窗口**类**的一个 LONG_PTR。"""
+    fn = _class_long_fn('SetClassLongPtrW', 'SetClassLongW')
+    fn(ctypes.c_void_p(int(hwnd)), index, value)
+
+
+def minimize_window(widget_root) -> bool:
+    """把一个 Tk 顶层窗最小化（走 Win32 的 SW_MINIMIZE，不走 Tk 的 iconify）。
+
+    为什么不能用 Tk 的 iconify()：无边框（overrideredirect）的窗口 Tk 直接拒绝 ——
+    `TclError: can't iconify ".": override-redirect flag is set`，按钮会变成死的。
+    Win32 的 SW_MINIMIZE 照样好使，配合 add_taskbar_button 就能从任务栏点回来。
+    """
+    try:
+        hwnd = toplevel_hwnd(widget_root)
+    except Exception:                      # noqa: BLE001
+        return False
+    return bool(_user32.ShowWindow(ctypes.c_void_p(hwnd), SW_MINIMIZE))
 
 
 def _exe_name(pid: int) -> str:
@@ -194,12 +430,8 @@ def work_area() -> tuple:
 
 def set_click_through(hwnd: int) -> None:
     """给窗口加上「鼠标穿透 + 分层」样式，让它只显示不挡鼠标。"""
-    get = _user32.GetWindowLongPtrW
-    get.restype = ctypes.c_ssize_t
-    get.argtypes = [wt.HWND, ctypes.c_int]
-    setl = _user32.SetWindowLongPtrW
-    setl.restype = ctypes.c_ssize_t
-    setl.argtypes = [wt.HWND, ctypes.c_int, ctypes.c_ssize_t]
+    get = _get_long_ptr()
+    setl = _set_long_ptr()
     ex = get(hwnd, GWL_EXSTYLE)
     setl(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW)
 
@@ -223,9 +455,7 @@ def is_topmost(hwnd: int) -> bool:
     先问一句：标记还在就一个系统调用都不发（稳态零闪烁）；只有播放器切全屏 / 换视频
     **重建了窗口**（新窗口不带这个标记）才真去钉一次。
     """
-    get = _user32.GetWindowLongPtrW
-    get.restype = ctypes.c_ssize_t
-    get.argtypes = [wt.HWND, ctypes.c_int]
+    get = _get_long_ptr()
     return bool(get(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST)
 
 
@@ -356,9 +586,16 @@ class _Surface:
         self.w, self.h = w, h
 
     def free(self) -> None:
+        # 幂等：close() 和 __del__ 可能先后都走到这里，重复 DeleteObject 会踩坏
+        # 别的 GDI 对象（句柄回收后可能被系统复用）。
+        if getattr(self, '_freed', False):
+            return
+        self._freed = True
         _gdi32.SelectObject(self.dc, self._old)
         _gdi32.DeleteObject(self.bmp)
         _gdi32.DeleteDC(self.dc)
+        self.arr = None
+        self._buf = None
 
 
 class ScreenGrabber:
@@ -390,12 +627,23 @@ class ScreenGrabber:
         return s.arr.copy()
 
     def close(self) -> None:
-        for s in self._surfaces.values():
+        surfaces = getattr(self, '_surfaces', {})
+        self._surfaces = {}
+        for s in surfaces.values():
             s.free()
-        self._surfaces.clear()
-        if self._screen:
-            _user32.ReleaseDC(None, self._screen)
-            self._screen = None
+        screen = getattr(self, '_screen', None)
+        self._screen = None
+        if screen:
+            _user32.ReleaseDC(None, screen)
+
+    def __del__(self):
+        # 兜底：LiveMonitor.set_layout / _on_error 会把旧抓屏器直接换成 None。
+        # 以前没有这一步，那些 DIB（2560x1600 下约 2 MB）和 GDI 句柄就永久漏掉；
+        # 抓屏连续失败时每拍换一个，几十秒就能把 GDI 句柄吃光。
+        try:
+            self.close()
+        except Exception:                    # noqa: BLE001  解释器退出时 DLL 可能已卸载
+            pass
 
     def __enter__(self):
         return self

@@ -34,7 +34,16 @@
         行在面板压住 ROI 时说话。
     12. 第五轮：模式名换成「PC端 / 窗口」；「手动校准」**两种模式都有**（PC端开二级
         窗口、窗口走参照图取景器，按模式分派 manual_calib）；底部那一行平时写**短状态**
-        （未开始 / 正在计数… / 已暂停 / 正在校准…），动作反馈说完自己让位。
+        （未开始 / 正在计数 / 暂停计数 / 正在校准），动作反馈说完自己让位。
+    2026-10-16：这四个词**收敛成只剩这四个**（用户：「不需要这么多，只留下未开始，
+    正在计数，暂停计数，正在校准」）—— 「采样已停」不再写底下一行（那件事归告警
+    行）、「已暂停」改名「暂停计数」。
+    2026-10-17：词表**钉死成七个**（用户：「只留下未开始，正在计数，暂停计数，正在
+    校准，校准完成请开始，应用完成，导入失败请重试这几种状态，其他状态全删掉」）——
+    四十来句动作反馈（已清零 / 已保存校准 / 已切换到 X / 回费速率 = … / 已导入 N 条轴 …）
+    全删，_set_note 从此**卡表**（不在表里的字一个都不写）。
+    2026-10-18：用户把报备过的六条例外也删了 —— _set_alert / _note_pin 两条通道整个
+    拆掉，出错只印控制台；这一组把 ui.py 扫一遍，确认词表外的写字通道**不存在**。
     15. 第八轮（44）：取景器右边那块放大图能**按住拖动**（看框外面），平移不改倍数；
         框自己微调时视窗反向补，看的还是同一块画面。
     16. 第九轮（46）：放大图能**滚轮局部放大**（盯着鼠标那一点缩，双击复位）；
@@ -69,6 +78,11 @@
         一律夹在工作区里（本机工作区到 y=1528，不然最下面那排键压在任务栏底下）。
     18. 第八轮（53）：取景器顶部从 12 行 / 681 字的总说明换成「一行提示（跟着目标走）+
         ? 展开全文」，界面上不再漏 markdown 星号；左图从屏幕 0.55 倍收到 0.40 倍。
+    22. 2026-10-17（用户：「把所有面板的直角换成经典的圆角」）：主面板 + 四个二级窗口
+        都换成 Win11 的 DWM 圆角（DWMWCP_ROUND），不用 SetWindowRgn（那是按区域裁剪，
+        边缘不抗锯齿：实测过渡像素 0 vs 86）。这一组钉住「系统真的记下了」（读回来）、
+        「二级窗口是映射之后才生效的」（建窗那一拍设会被系统丢掉）、「重新映射还在」、
+        「Win10 上安静退回直角」。
 
 用法：python tools/check_ui_keys.py
 """
@@ -197,18 +211,10 @@ def t_readouts(app, dm):
     check('收起态每一行都落进基准宽 470',
           app.root.winfo_reqwidth() <= app.COLLAPSED_W,
           '内容要 %dpx，基准 %dpx' % (app.root.winfo_reqwidth(), app.COLLAPSED_W))
-    # 空的告警行以前也占着 30px 字高，2026-10-11 起空着就整行收起来。
-    app._set_warn('')
-    check('空告警：整行收起来（空 Label 也占字高）',
-          app.fr_warn.winfo_manager() == '', app.fr_warn.winfo_manager())
-    app._set_warn('告警：测试')
-    order = list(app.root.pack_slaves())          # pack 顺序 = 从上往下的顺序
-    check('有告警：铺出来看得见，而且压在控制行上面',
-          app.fr_warn.winfo_manager() == 'pack'
-          and order.index(app.fr_warn) < order.index(app.fr_ctrl),
-          '%s 顺序=%d < %d' % (app.fr_warn.winfo_manager(),
-                              order.index(app.fr_warn), order.index(app.fr_ctrl)))
-    app._set_warn('')
+    # 2026-10-18：界面中间的告警条整个删掉（采样停 / 压住 ROI 只印控制台）。
+    check('界面里没有告警条了',
+          not hasattr(app, 'fr_warn') and not hasattr(app, 'lb_warn')
+          and not hasattr(app, '_set_warn'))
 
 
 def t_toggle_count(app, dm):
@@ -223,6 +229,9 @@ def t_toggle_count(app, dm):
 
     def fake_start(reset_clock=True):
         starts.append(reset_clock)
+        # 真 start() 里 resync / mark_zero_start 就在这（见 LiveMonitor.begin_counting）；
+        # 这里不真起线程，但要照做，否则测不到「恢复时不补停止期间的帧」。
+        dm.begin_counting()
         dm._thread = AliveThread()
 
     dm.start = fake_start                       # 不真起线程：演示监视器没有真屏幕
@@ -251,8 +260,8 @@ def t_toggle_count(app, dm):
     check('按钮翻回「暂停」',
           app.btn_start.cget('text') == '暂停', app.btn_start.cget('text'))
     app._tick_body()
-    check('用户主动暂停的不算故障（不报「采样已停」）',
-          '采样已停' not in app.lb_warn.cget('text'), app.lb_warn.cget('text'))
+    check('用户主动暂停的不算故障（控制台也不印「采样已停」）',
+          not app._stall_logged, app._stall_logged)
 
     # 用户 2026-10-11：「快捷键操作去掉（暂停（空格）改成暂停）不需要快捷键操作」。
     # 键**本身**还留着（见 _base_keys），但面板上一个键名都不许再出现。
@@ -280,7 +289,8 @@ def t_no_keys(app):
     """
     from akframe import ui as ui_mod
 
-    seqs = [s for s in app.root.bind() if s not in ('<Motion>',)]
+    # <Map> 是窗口级事件（圆角那个钩子挂在它上面），跟 <Motion> 一样收不到按键
+    seqs = [s for s in app.root.bind() if s not in ('<Motion>', '<Map>')]
     keys = [s for s in seqs if not s.startswith('<Button') and not s.startswith('<B1')
             and not s.startswith('<Double') and not s.startswith('<Enter')
             and not s.startswith('<Leave')]
@@ -589,6 +599,18 @@ def t_window_row(app):
           req()[1] == live_h, '%d vs %d' % (req()[1], live_h))
     check('并进控制行之后宽度仍然落进基准宽 470（没把面板顶宽）',
           req()[0] <= app.COLLAPSED_W, req()[0])
+    app._src_kind = 'live'
+    app._sync_ctrl_row()
+    app._src_pending = 'window'
+    app._sync_ctrl_row()
+    check('刚选「窗口」、校准还没完：按钮已经写「校准：窗口▾」',
+          app.btn_src.cget('text') == '校准：窗口▾', app.btn_src.cget('text'))
+    app._src_pending = None
+    app._sync_ctrl_row()
+    check('取消选窗口后按钮恢复当前输入源（PC端）',
+          app.btn_src.cget('text') == '校准：PC端▾', app.btn_src.cget('text'))
+    app._src_kind = 'window'
+    app._sync_ctrl_row()
 
     # ---- 默认置顶：选完窗口就该顺手 SetWindowPos(TOPMOST) + 把面板抢回来 ----
     calls = []
@@ -646,8 +668,9 @@ def t_window_row(app):
         ui_mod.is_window = lambda h: False
         app._pin_at = 0.0
         app._keep_pin(1002.0)
-        check('窗口没了：放开置顶、提示换一个窗口（不再乱钉）',
-              app._pinned_hwnd is None and '不见了' in app.lb_note.cget('text'),
+        check('窗口没了：放开置顶，底部那一行不写消息（只许七个状态词）',
+              app._pinned_hwnd is None
+              and app.lb_note.cget('text') in ui_mod.NOTE_WORDS,
               app.lb_note.cget('text'))
     finally:
         (ui_mod.set_topmost, ui_mod.is_window, ui_mod.is_topmost,
@@ -690,37 +713,6 @@ def t_window_row(app):
         app._pinned_hwnd = None
     check('对话框关掉之后 _own_dialog_open() 又为假', not app._own_dialog_open())
 
-    # ---- 原来那段「教程」里唯一必须留的：面板压住了 ROI ----
-    class _R:
-        def __init__(self, x, y, w, h):
-            self.x, self.y, self.w, self.h = x, y, w, h
-
-    had = hasattr(app.monitor, "layout")
-    old_layout = getattr(app.monitor, "layout", None)
-    app.monitor.layout = _types.SimpleNamespace(
-        bar=_R(app.root.winfo_rootx() + 20, app.root.winfo_rooty() + 20, 200, 20))
-    app._refresh_roi_warn()
-    check('面板压住费用条 -> 写进「告警：」那一行（教程没了，这条不能丢）',
-          '压住了' in app.lb_warn.cget('text')
-          and app.fr_warn.winfo_manager() == 'pack', app.lb_warn.cget('text'))
-    app.monitor.layout = None
-    app._refresh_roi_warn()
-    check('没压住 -> 告警整行收起来',
-          app.lb_warn.cget('text') == '' and app.fr_warn.winfo_manager() == '')
-    app._set_warn('采样已停 1.0s（测试用）')          # 假装别的告警正占着那一行
-    app._refresh_roi_warn()
-    check('别的告警在说话时，ROI 这条不会把它收掉（否则告警行每拍一收一铺＝闪）',
-          app.fr_warn.winfo_manager() == 'pack'
-          and '采样已停' in app.lb_warn.cget('text'), app.lb_warn.cget('text'))
-    app._set_warn('')
-    if had:
-        app.monitor.layout = old_layout
-    else:
-        try:
-            del app.monitor.layout
-        except AttributeError:
-            pass
-
     app._src_kind = 'live'
     app._sync_ctrl_row()
     check('切回 PC端：「手动校准」留着（两种模式都有），尺寸不变',
@@ -729,11 +721,19 @@ def t_window_row(app):
 
 
 def t_status_row(app):
-    """12：模式名 -> PC端 / 窗口；PC端也手动校准；底部那一行写短状态。
+    """12：模式名 -> PC端 / 窗口；PC端也手动校准；底部那一行**只有七个词**。
 
     用户 2026-10-11 第五轮：「把模式切换文本改成 pc端和窗口，pc端也加入手动校准功能，
     下方的状态描述用一行简短的文字，比如正在校准。。。；正在计数。。。」
+
+    2026-10-17 用户把这一行的词表钉死成七个（未开始 / 正在计数 / 暂停计数 / 正在校准 /
+    校准完成请开始 / 应用完成 / 导入失败请重试），其余**全删**。
+    2026-10-18 连报备过的六条例外也删了（_set_alert / _note_pin 整个拆掉，出错只印
+    控制台）。所以这一组除了四个状态各读一次，还要：① 词表外的字**写不进去**（运行时
+    卡表）；② 把 ui.py 里写底部那一行的调用点扫一遍 —— 只许有 _set_note，而且字面量
+    必须在词表里。
     """
+    from akframe import ui as ui_mod
     # 11 组把校准线程 stub 掉了，那道工序的状态会一直挂着（_window_busy=True）——
     # 那样 _tick_body 每拍提前 return，底下一行永远写不到状态。
     app._window_busy = False
@@ -772,46 +772,75 @@ def t_status_row(app):
         app._tick_body()
         return app.lb_note.cget('text')
 
+    # 四个状态各读一次，顺便把「词表就只有这四个」钉住（用户 2026-10-16）
+    seen = []
     app._counting_started = False
-    check('没在数 -> 底下写「未开始」', status() == '未开始',
-          repr(app.lb_note.cget('text')))
+    seen.append(status())
+    check('没在数 -> 底下写「未开始」', seen[-1] == '未开始', repr(seen[-1]))
     app.monitor.start()
     app._counting_started = True
-    check('在数 -> 底下写「正在计数…」', status() == '正在计数…',
-          repr(app.lb_note.cget('text')))
+    seen.append(status())
+    check('在数 -> 底下写「正在计数」', seen[-1] == '正在计数', repr(seen[-1]))
     app.toggle_manual_pause()
-    check('暂停 -> 底下写「已暂停」', status() == '已暂停',
-          repr(app.lb_note.cget('text')))
+    seen.append(status())
+    check('暂停 -> 底下写「暂停计数」', seen[-1] == '暂停计数', repr(seen[-1]))
     app.toggle_manual_pause()
     app._calib = True
-    check('在微调 ROI -> 底下写「正在校准…」', status() == '正在校准…',
-          repr(app.lb_note.cget('text')))
+    seen.append(status())
+    check('在微调 ROI -> 底下写「正在校准」', seen[-1] == '正在校准', repr(seen[-1]))
     app._calib = False
+    check('底部状态就只有这四个词', set(seen) == {'未开始', '正在计数', '暂停计数', '正在校准'},
+          seen)
+
+    # 词表外的字**一个都写不进去**（用户 2026-10-17：「其他状态全删掉」）
+    was = app.lb_note.cget('text')
+    app._set_note('已清零')
+    check('词表外的字写不进去（「已清零」这类反馈全删了）',
+          app.lb_note.cget('text') == was, repr(app.lb_note.cget('text')))
+    app._set_note('随便编一句提示')
+    check('现编一句也写不进去（_set_note 卡着 NOTE_WORDS）',
+          app.lb_note.cget('text') == was, repr(app.lb_note.cget('text')))
 
     # 动作反馈说完要让位（不让位的话底下一行又变成甩不掉的一句旧话）
-    app._set_note('已清零')
-    check('动作反馈先顶上来', app.lb_note.cget('text') == '已清零')
+    app._set_note('应用完成')
+    check('词表里的反馈顶得上来', app.lb_note.cget('text') == '应用完成',
+          repr(app.lb_note.cget('text')))
     status(reset=False)
     check('反馈还没到点：仍然是它（不许被状态抢掉）',
-          app.lb_note.cget('text') == '已清零', repr(app.lb_note.cget('text')))
+          app.lb_note.cget('text') == '应用完成', repr(app.lb_note.cget('text')))
     status()
-    check('反馈到点：自己让位给状态', app.lb_note.cget('text') == '正在计数…',
+    check('反馈到点：自己让位给状态', app.lb_note.cget('text') == '正在计数',
           repr(app.lb_note.cget('text')))
 
-    # 「一行简短的文字」查得住：所有写底下的字面量都不超 28 字、不换行
-    bad = []
+    # 词表这一条**查得住**：把 ui.py 里写死的那些字扫一遍 —— 只许有 _set_note，而且
+    # 每条字面量都必须在 NOTE_WORDS 里（删掉的通道不许再长回来）。
     src = io.open(os.path.join(ROOT, 'src', 'akframe', 'ui.py'), encoding='utf-8').read()
-    for node in ast.walk(ast.parse(src)):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
-                and node.func.attr in ('_set_note', '_note_pin') and node.args:
-            try:
-                val = ast.literal_eval(node.args[0])
-            except Exception:                  # noqa: BLE001  拼接 / f-string，跳过
-                continue
-            if isinstance(val, str) and (len(val) > 28 or '\n' in val):
-                bad.append('%d: %r' % (node.lineno, val))
-    check('写底部那一行的字面量全长在 28 字以内、没有换行（用户要「一行简短的文字」）',
-          not bad, bad[:3])
+    tree = ast.parse(src)
+    words, long_bad = set(), []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == '_set_note'
+                and node.args):
+            continue
+        arg = node.args[0]
+        if isinstance(arg, ast.BinOp) and isinstance(arg.left, ast.Constant):
+            arg = arg.left                 # '读窗口失败：%s' % exc -> 收那个模板串
+        try:
+            val = ast.literal_eval(arg)
+        except Exception:                  # noqa: BLE001  拼接 / f-string，跳过
+            continue
+        if not isinstance(val, str):
+            continue
+        if len(val) > 28 or '\n' in val:
+            long_bad.append('%d: %r' % (node.lineno, val))
+        words.add(val)
+    check('ui.py 里写底部那一行的只有 _set_note，字面量全在那七个词里',
+          words <= set(ui_mod.NOTE_WORDS), sorted(words - set(ui_mod.NOTE_WORDS)))
+    gone = [n.lineno for n in ast.walk(tree)
+            if isinstance(n, ast.Attribute) and n.attr in ('_set_alert', '_note_pin')]
+    check('词表外的两条通道已经拆掉（没有 _set_alert / _note_pin 了）', not gone, gone)
+    check('底部那一行的字面量全长在 28 字以内、没有换行（用户要「一行简短的文字」）',
+          not long_bad, long_bad[:3])
 
     t_switch_clears(app)
     t_rate_switch_clears(app)
@@ -827,6 +856,8 @@ def t_switch_clears(app):
     为什么是待命而不是接着跑：读窗口那条链路本来就是「校准完等你点开始」，切回去两边
     一个规矩 —— 一眼看得出没在数，也不会把「切模式」偷偷变成「开始」。
     '''
+    from akframe import ui as ui_mod
+
     if not app.monitor.alive:              # 上一组可能刚把它停了
         app.monitor.start()
     app._counting_started = True
@@ -839,8 +870,8 @@ def t_switch_clears(app):
           '%s / %s / %s / %r / %s' % (app._src_kind, app._counting_started,
                                       app.monitor.alive, app.lb_frames.cget('text'),
                                       app.btn_start.cget('text')))
-    check('切模式也给一句话（提示切过去是待命、点「开始」才数）',
-          '已清零' in app.lb_note.cget('text'), repr(app.lb_note.cget('text')))
+    check('切模式之后底下那行只有一个词表里的词（不再有「已切到 PC端…已清零」那串）',
+          app.lb_note.cget('text') in ui_mod.NOTE_WORDS, repr(app.lb_note.cget('text')))
 
 
 def t_rate_switch_clears(app):
@@ -862,10 +893,9 @@ def t_rate_switch_clears(app):
           '%s / %s / %r / %s' % (app._counting_started, app.monitor.alive,
                                  app.lb_frames.cget('text'),
                                  app.btn_start.cget('text')))
-    check('切档位刷成新档 + 说一句（回费速率 = …，已清零）',
+    check('切档位刷成新档 + 底下说「应用完成」',
           app.rate_var.get().startswith('120')
-          and '回费速率' in app.lb_note.cget('text')
-          and '已清零' in app.lb_note.cget('text'),
+          and app.lb_note.cget('text') == '应用完成',
           '%r / %r' % (app.rate_var.get(), app.lb_note.cget('text')))
     app.apply_cost_rate(30.0)          # 复位成默认档，别影响后面几组
 
@@ -1091,14 +1121,14 @@ def t_picker_pan(app):
         pk.guide = None
         pk.redraw()
         iz, jz = zsize()
-        jy = jz * 3 // 4            # 避开两条蓝线（取样条带）占的那两行
         el, er, et, eb = zm.edge_lines(pk.box, ui_mod.BoxPicker.ZOOM_PANEL, pk.pan,
                                        pk.zoom, pk._frame_size())
-        check('费用条目标的放大图：左红 / 右绿压在画布左右两边（条槽宽正好铺满面板）',
+        jy = (et + eb) // 2         # 左右边只画在框的高度范围内，别拿框外的行量
+        check('费用条目标的放大图：左右两条红边压在画布左右两边（条槽宽正好铺满面板）',
               px(0, jy) == zm.EDGE_LEFT and px(iz - 1, jy) == zm.EDGE_RIGHT
               and el == 0 and er >= iz - 2,
               '%s %s el=%d er=%d iz=%d' % (px(0, jy), px(iz - 1, jy), el, er, iz))
-        check('费用条目标的放大图：上下两条品红画在框的顶边 / 底边上（不在画布边上）',
+        check('费用条目标的放大图：上下两条红边画在框的顶边 / 底边上（不在画布边上）',
               px(iz // 2, et) == zm.EDGE_TOP and px(iz // 2, eb) == zm.EDGE_BOTTOM
               and 0 < et < eb < jz - 1,
               '%s %s et=%d eb=%d jz=%d' % (px(iz // 2, et), px(iz // 2, eb), et, eb, jz))
@@ -1139,9 +1169,9 @@ def t_picker_pan(app):
         pk.redraw()
         # 平移（右移 9px）之后：绿线不再贴在画布最右列，而是跟着框挪到 (w-9)*kx-1 列。
         iz2, jz2 = zsize()
-        jy2 = jz2 * 3 // 4
-        er3 = zm.edge_lines(pk.box, ui_mod.BoxPicker.ZOOM_PANEL, pk.pan, pk.zoom,
-                            pk._frame_size())[1]
+        _el3, er3, et3, eb3 = zm.edge_lines(pk.box, ui_mod.BoxPicker.ZOOM_PANEL, pk.pan,
+                                            pk.zoom, pk._frame_size())
+        jy2 = (et3 + eb3) // 2
         check('平移后四条边跟着框走（右边从画布最右列挪到第 %d 列）' % er3,
               px(er3, jy2) == zm.EDGE_RIGHT and px(iz2 - 1, jy2) != zm.EDGE_RIGHT
               and er3 < iz2 - 1,
@@ -1526,6 +1556,167 @@ def _hdr_btn(top, prefix):
     return None
 
 
+def t_panel_titlebar_fonts(app):
+    """20：去掉系统标题栏 / 打轴器字号放大到「时间」那一号 / 展开收起不闪（2026-10-16）。
+
+    三条用户原话：
+        「面板上方的『明日方舟 全局帧数计数器』那行白色的能不能删掉」
+        「打轴器上的字体太小，操作字体和帧号放大到主面板的『时间大小』」
+        「展开收起面板时 ui 会闪动一下」
+    """
+    from PIL import Image, ImageDraw, ImageFont
+
+    from akframe import scale_render, win32
+
+    root = app.root
+    root.deiconify()
+    root.update()
+
+    check('主面板也没有系统标题栏了（那条白字就是它）',
+          bool(root.overrideredirect()))
+
+    # 无边框窗口 Tk 的 iconify() 会直接拒绝（TclError: override-redirect flag is set），
+    # 「−」必须改走 Win32 的 SW_MINIMIZE —— 这一条按源码钉，不真去最小化面板
+    # （最小化之后自检进程自己还得把它弄回来，反而更容易把后面几组弄乱）。
+    src = io.open(os.path.join(ROOT, 'src', 'akframe', 'ui.py'), encoding='utf-8').read()
+    fn = [n for n in ast.walk(ast.parse(src))
+          if isinstance(n, ast.FunctionDef) and n.name == '_minimize']
+    calls = set()
+    for node in (ast.walk(fn[0]) if fn else []):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            calls.add(node.func.id)
+    check('「−」改走 Win32 的 minimize_window（Tk 的 iconify 对无边框窗口会报错）',
+          calls == {'minimize_window'}, calls)
+    check('无边框面板在任务栏里有按钮（不然最小化就点不回来）',
+          win32.add_taskbar_button(root) is True)
+
+    # 展开 / 收起：**真要现量**的那一小段窗口应该是全透明的 —— 否则 Tk 会先按旧尺寸
+    # 把新布局画一拍。缓存命中的路（平时那条）根本不进这里，所以把缓存清掉，逼出一条
+    # 真·现量路径来验。2026-10-16 之前这里靠「换过提示文字」来制造没命中，提示行不进
+    # 指纹之后就造不出来了 —— 换成清缓存，验的还是同一件事（_relayout 的契约）。
+    seen = []
+    real_attr = root.attributes
+
+    def spy(*a, **kw):
+        if a and a[0] == '-alpha':
+            seen.append(a[1])
+        return real_attr(*a, **kw)
+
+    app._fit_cache.clear()
+    root.attributes = spy
+    try:
+        app.toggle_more()
+        root.update_idletasks()
+        app.toggle_more()
+        root.update_idletasks()
+    finally:
+        root.attributes = real_attr
+    check('真要现量时那一拍窗口是全透明的（画在看不见的窗口上）',
+          seen.count(0.0) == 2 and seen[-1] == 1.0, seen)
+    check('换完布局透明度一定回到 1（否则面板一直是半透明的）',
+          float(root.attributes('-alpha')) == 1.0)
+
+    # 打轴器字号：26 = 150% 缩放下 Tk 13pt 的「时间」（一个汉字 26px）。
+    sizes = scale_render.font_sizes()
+    check('刻度表的字放大到主面板「时间」那一号（26px）',
+          sizes == (26, 26, 26), sizes)
+    g = app.scale_geom
+    dr = ImageDraw.Draw(Image.new('RGB', (8, 8)))
+    num_w = dr.textlength('8888', font=ImageFont.truetype(scale_render.FONT_NUM, sizes[0]))
+    check('刻度条装得下最宽的四位帧号、还留得下刻度线',
+          num_w + 12 <= g.ruler_w, '四位帧号 %.0fpx -> 刻度条 %dpx' % (num_w, g.ruler_w))
+    check('行高 / 行距够放这一号字（上下两行叠不到一起）',
+          g.label_gap >= g.label_h >= sizes[0], '%s / %s / %s'
+          % (g.label_h, g.label_gap, sizes[0]))
+
+
+def t_toggle_flicker(app):
+    """21：展开 / 收起那一拍的闪烁（2026-10-16 第二轮：「现在还是会闪」）。
+
+    连拍 300 帧/秒量出来的账（探针见 out/p74_* 那批图）：
+      - 老做法每次换布局都要**现量**尺寸，而量只能在 update_idletasks 里量 —— 那一拍
+        会按**旧**尺寸把新布局画一遍（展开时 = 打轴器已经插好、窗口还是收起的，大数字
+        被挤出窗口）。整段异常实测 26~47ms，等于 2~3 个屏幕刷新；
+      - 之后尺寸变化还自带一次整窗擦除 + 重画，而且系统擦的是窗口类的刷子 ——
+        Tk 那把在建窗时就定成黑色了（实测擦完那一帧是 #000000，面板底色是 #151517），
+        于是中间这一帧是一整块**纯黑**。
+
+    修法三条：尺寸按内容指纹缓存（命中就一次测量都不做、中间那一拍不存在）；
+    类擦除刷子换成面板底色（那一帧从「整块纯黑」降成「底色在、字晚一帧」）；
+    提示行的文字从指纹里去掉（它是定高行 —— 不去掉的话每换一句提示，下一次展开就
+    缓存没命中，而没命中那条路要 _relayout，用户看到的是面板整块消失一瞬）。
+
+    高帧率连拍（300 帧/秒，探针 probe24）实测这一次的账：
+      - 上一轮那版（每次换布局 _relayout 全透明 + 现量）：面板**整个消失 20ms**，
+        接着还有 27ms 的半成品，一共约 47ms = 3 个屏幕刷新；
+      - 现在这一版：整段只剩 1~2 帧「和两态都差一点点」的中间帧（差 2.7~2.9 /
+        量程 0~26），面板不消失、也不出现纯黑。
+    剩下那一帧是改窗口尺寸的固有代价（Tk 的擦除 + 重画不是一次成型的），要彻底消掉
+    得让面板在展开 / 收起时**根本不改尺寸**（另一套架构），这里不碰。
+    """
+    from akframe import ui as ui_mod, win32
+
+    root = app.root
+    root.deiconify()
+    root.update()
+
+    keys = list(app._fit_cache)
+    check('开机就把展开 / 收起两态尺寸都量好了（第一次点展开不用现量）',
+          {k[0] for k in keys} == {True, False} and len(keys) >= 2, keys)
+
+    app.toggle_more()
+    root.update_idletasks()
+    app.toggle_more()
+    root.update_idletasks()
+    calls = []
+    real = root.update_idletasks
+
+    def spy(*a, **kw):
+        calls.append(1)
+        return real(*a, **kw)
+
+    root.update_idletasks = spy
+    try:
+        app.toggle_more()
+    finally:
+        root.update_idletasks = real
+    check('命中缓存时展开 / 收起一次都不测量（没有「按旧尺寸画新布局」那一拍）',
+          calls == [], len(calls))
+
+    k0 = app._size_key()
+    note0 = app.lb_note.cget('text')
+    try:
+        # 提示行是 NOTE_H(22px) 的定高 Frame + place，写多少个字都不占尺寸。把它算进
+        # 指纹的代价是「每换一句提示，下一次展开就缓存没命中」，而没命中那条路得用
+        # _relayout 遮中间那一拍 —— 用户看到的是面板**整块消失**一瞬（实测过）。
+        app.lb_note.configure(text='一句会换行的长提示' * 3)
+        k1 = app._size_key()
+        check('提示行的文字不进尺寸指纹（定高行，字多了也不占位）', k1 == k0, (k0, k1))
+        calls[:] = []
+        root.update_idletasks = spy
+        try:
+            app.toggle_more()
+            app.toggle_more()
+        finally:
+            root.update_idletasks = real
+        check('提示换过之后展开 / 收起还是命中缓存（面板不会消失一瞬）',
+              calls == [], len(calls))
+    finally:
+        app.lb_note.configure(text=note0)
+
+    win32.set_erase_brush(root, ui_mod.UI_BG)
+    hwnd = win32.toplevel_hwnd(root)
+    check('类擦除刷子换成了面板底色（展开那一帧不再是一整块纯黑）',
+          win32._get_class_long(hwnd, win32.GCLP_HBRBACKGROUND)
+          == win32._ERASE_BRUSHES[ui_mod.UI_BG]
+          and win32._ERASE_BRUSHES[ui_mod.UI_BG] != 0)
+    n = len(win32._ERASE_BRUSHES)
+    win32.set_erase_brush(root, ui_mod.UI_BG)
+    win32.set_erase_brush(root, ui_mod.UI_BG)
+    check('擦除刷子每色只建一把（_place 每次换尺寸都调它，不许每次新建拿 GDI 换内存）',
+          len(win32._ERASE_BRUSHES) == n)
+
+
 def t_dialog_shell(app):
     """17：二级窗口统一外壳（2026-10-13 第八轮，用户看完设计图：「都改成这一版吧」）。
 
@@ -1552,7 +1743,9 @@ def t_dialog_shell(app):
             t = str(b.cget('text'))
             if t in ('保存校准', 'ROI 框', '恢复默认', '重新选窗口…'):
                 acts[t] = b
-        check('手动校准：四个动作键都在', len(acts) == 4, sorted(acts))
+        check('手动校准：三个动作键都在（PC端的「重新选窗口…」已删）',
+              len(acts) == 3 and '重新选窗口…' not in acts, sorted(acts))
+        check('PC端手动校准不再挂「重新选窗口」入口', not hasattr(app, 'pick_window'))
         check('手动校准：保存校准 = 主键（白底深字）',
               acts['保存校准'].cget('bg') == ui_mod.PRIMARY
               and acts['保存校准'].cget('fg') == ui_mod.UI_BG,
@@ -1562,10 +1755,6 @@ def t_dialog_shell(app):
         check('手动校准：ROI 框 = 次键（底色同背景 + 1px 描边）',
               acts['ROI 框'].cget('bg') == ui_mod.UI_BG
               and int(acts['ROI 框'].cget('highlightthickness')) == 1)
-        check('手动校准：重新选窗口 = 幽灵键（纯文字）',
-              acts['重新选窗口…'].cget('bg') == ui_mod.UI_BG
-              and acts['重新选窗口…'].cget('fg') == ui_mod.UI_DIM
-              and int(acts['重新选窗口…'].cget('highlightthickness')) == 0)
         check('手动校准：header 上有 ×', _hdr_btn(top, '×') is not None)
         check('手动校准：窗口夹在工作区里（下缘不钻到任务栏底下）',
               top.winfo_y() + top.winfo_reqheight() <= ui_mod.work_area()[1]
@@ -1873,6 +2062,111 @@ def t_panel_skin(app):
           '%r %r' % (app.lb_note.winfo_manager(), app.lb_note.place_info().get('relwidth')))
 
 
+def t_round_corners(app):
+    """22：圆角（2026-10-17 用户：「把所有面板的直角换成经典的圆角」）。
+
+    走的是 Win11 的 DWM（DWMWA_WINDOW_CORNER_PREFERENCE = ROUND），不是
+    SetWindowRgn：后者按区域裁剪、边缘不抗锯齿（实测同一块角：过渡像素 86 vs 0）。
+
+    这里钉四件看一眼看不出来的事：
+      - 系统**真的**记下了 —— 读 DwmGetWindowAttribute 回来，不光看自己那个返回值
+        （属性号写错、系统把偏好丢掉，DwmSetWindowAttribute 照样返回 0）；
+      - 二级窗口**映射出来之后**才是 ROUND：建窗那一拍窗口还没映射，toplevel_hwnd()
+        拿到的是另一个句柄，设进去的会被系统丢掉（本机实测踩到过），真正生效的是
+        win32.set_round_corners_on_map 那个 <Map> 钩子；
+      - 重新映射（withdraw / deiconify）之后还在；
+      - 系统不支持这个属性（Win10）/ 拿不到句柄时安静退回直角，不抛异常。
+    """
+    import tkinter as tk
+    from akframe import ui as ui_mod, win32
+
+    root = app.root
+    root.deiconify()
+    root.update()
+
+    check('主面板设得进去（set_round_corners 返回 True）',
+          win32.set_round_corners(root, win32.DWMWCP_ROUND) is True)
+    got = win32.get_round_corners(root)
+    if got is None:
+        skip('系统读回圆角偏好', '系统不支持这个属性（Win10）/ 窗口读不到句柄')
+    else:
+        check('系统读回来就是 ROUND(2) —— 不是我们自己在记账',
+              got == win32.DWMWCP_ROUND, got)
+
+    # 主面板抖过 -alpha（_place 里那一下），窗口是分层的；实测圆角照样在
+    root.attributes('-alpha', 0.0)
+    root.update()
+    root.attributes('-alpha', 1.0)
+    root.update()
+    check('抖过 -alpha（分层窗口）之后圆角还在',
+          win32.get_round_corners(root) in (None, win32.DWMWCP_ROUND),
+          win32.get_round_corners(root))
+
+    # 二级窗口：四个都经过 _dialog_header（框选 ROI / 手动校准 / 读取窗口 / 导入编辑轴）
+    top = tk.Toplevel(root)
+    top.overrideredirect(True)
+    top.geometry('240x160+300+300')
+    ui_mod._dialog_header(top, '自检用二级窗口', top.destroy)
+    top.update()
+    root.update()
+    check('二级窗口映射出来之后就是 ROUND',
+          win32.get_round_corners(top) in (None, win32.DWMWCP_ROUND),
+          win32.get_round_corners(top))
+    # 读回是活的（设成直角就该读回直角）—— 不然上面那几条等于在测一个常量
+    win32.set_round_corners(top, win32.DWMWCP_DONOTROUND)
+    check('设成 DONOTROUND 之后读回来就是 1（读回这条链是通的）',
+          win32.get_round_corners(top) in (None, win32.DWMWCP_DONOTROUND),
+          win32.get_round_corners(top))
+    top.withdraw()
+    top.update()
+    top.deiconify()
+    top.update()
+    check('偏好被抹掉之后重新映射会补回 ROUND —— <Map> 钩子那一次真的干活了',
+          win32.get_round_corners(top) in (None, win32.DWMWCP_ROUND),
+          win32.get_round_corners(top))
+    top.destroy()
+
+    # 真的开一次「手动校准」（用户看得见的那个二级窗口）
+    app.open_calib_dialog()
+    try:
+        top = app._calib_win
+        for _ in range(3):
+            root.update()
+        hwnd = win32.toplevel_hwnd(top)
+        check('真开一次「手动校准」：窗口句柄认得到、偏好是 ROUND',
+              bool(hwnd) and win32.get_round_corners(top) in (None, win32.DWMWCP_ROUND),
+              win32.get_round_corners(top))
+    finally:
+        app.close_calib_dialog()
+        root.update()
+
+    # `_place` 每次换尺寸都调它 —— 一次 DwmSetWindowAttribute 是微秒级的，
+    # 不记账（句柄会被系统回收再发，记账迟早漏窗口），这里只钉「不发疯」。
+    calls = []
+    real = win32._dwmapi.DwmSetWindowAttribute
+
+    def spy(*a, **kw):
+        calls.append(1)
+        return real(*a, **kw)
+
+    win32._dwmapi.DwmSetWindowAttribute = spy
+    try:
+        app.toggle_more()
+        root.update()
+        app.toggle_more()
+        root.update()
+    finally:
+        win32._dwmapi.DwmSetWindowAttribute = real
+    check('展开 / 收起走一次只发一两次系统调用（不是每帧都在发）',
+          0 < len(calls) <= 4, len(calls))
+
+    # Win10 / 窗口还没建出来：安静退回直角
+    check('拿不到窗口句柄时返回 False（Win10 就是这么退回直角的）',
+          win32.set_round_corners(None) is False
+          and win32.set_round_corners(root.winfo_toplevel().winfo_children()[0]
+                                      if root.winfo_children() else None) is False)
+
+
 def main():
     print('面板键位 / 折叠自检（2026-10-10 示意图那批 + 2026-10-11 看板批注）')
 
@@ -1939,6 +2233,12 @@ def main():
             try:
                 print('19. 面板头一段：标题行 / 分隔线 / 按钮分档 / 回费行按需')
                 t_panel_skin(app3)
+                print('20. 去掉系统标题栏 / 打轴器字号放大 / 展开收起不闪')
+                t_panel_titlebar_fonts(app3)
+                print('21. 展开/收起那一拍：尺寸缓存 + 擦除刷子')
+                t_toggle_flicker(app3)
+                print('22. 圆角（Win11 的 DWM）')
+                t_round_corners(app3)
             finally:
                 kill_afters(app3)
                 try:

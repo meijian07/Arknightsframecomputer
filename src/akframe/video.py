@@ -66,7 +66,7 @@ from .settings import DEFAULT_FRAMES_PER_COST
 ROI_NAMES = ('bar', 'pause', 'speed')
 
 # 抽流时每个 ROI 往外扩多少像素。费用条扩得少（只要挡住「预测差一两像素」）；
-# 右上角两个按钮扩得多，是为了**手动**微调留余量（面板上按 Tab + 方向键挪），
+# 右上角两个按钮扩得多，是为了**手动**微调留余量（手动校准里挪框即可），
 # 不用重新解码整段录像。真正的粗对位在抽流**之前**做，见 _fit_buttons_coarse。
 PAD_BAR = 16
 PAD_BTN = 48
@@ -603,7 +603,7 @@ class VideoSource:
         self.verified = ok is not False
         if ok is False:
             self.notes.append('⚠ 框可能没贴住条槽：%s —— 可以重新框一次，'
-                              '或在面板上按 Tab + 方向键微调' % why2)
+                              '或在「手动校准」窗口里用方向键按钮微调' % why2)
         else:
             self.notes.append('框选校准自检：%s' % why2)
         if self.save_manual:
@@ -780,7 +780,7 @@ class VideoSource:
         """按钮没对上：关掉暂停 / 倍速两条通道，并记一条说明。"""
         self.buttons_ok = False
         self.notes.append('⚠ 右上角按钮没对上：%s —— 暂停 / 倍速两条通道已关掉，不猜。'
-                          '费用条计数不受影响；要修就在面板上按 Tab + 方向键手动挪，'
+                          '费用条计数不受影响；要修就在「手动校准」里挪框，'
                           '或用「设置客户区」改客户区尺寸 / 位置' % why)
         return replace(layout, buttons_visible=False)
 
@@ -1119,7 +1119,7 @@ class VideoMonitor(LiveMonitor):
         self._play_base = 0
         self._play_t0 = 0.0
         self._roi_warn = ''              # 「手动挪 ROI 顶到抽流框边了」这类提示
-        # 喂帧跑在采样线程里，而播放控制（空格 / 拖滑块 / 回到开头）跑在界面主线程里，
+        # 喂帧跑在采样线程里，而 play / seek 这些播放控制是从别的线程调进来的，
         # 两边都会动状态机的相位。加一把锁把它们串起来 —— 不加的话「一边喂一边 seek」
         # 会让 _fed 和 Counter 的相位对不上（表现是帧号突然跳或倒退）。
         self._lock = threading.RLock()

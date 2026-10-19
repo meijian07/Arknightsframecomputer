@@ -65,7 +65,7 @@ class ScaleGeom:
 
     width: int = 300
     height: int = 250
-    ruler_w: int = 46              # 左边刻度条的宽度
+    ruler_w: int = 84              # 左边刻度条的宽度（2026-10-16：26px 的四位帧号 60px + 刻度线）
     pad_right: int = 6
     # 「现在 N」那个读数的右边距（2026-10-13 用户：「把打轴器现在的帧数往左移」）。
     # 单开一个字段而不是直接加大 pad_right：pad_right 还管着**轴帧号**那一列（右边那串
@@ -74,10 +74,12 @@ class ScaleGeom:
     now_pad_right: int = 44
     pointer_ratio: float = 0.50    # 「现在」线在刻度区的相对高度（0.5 = 正中）
     px_per_frame: float = 1.5      # 1 帧画多少像素（缩放档）
-    # 2026-10-11 字号放大一档（见 scale_render.font_sizes），行高和最小间距跟着长：
-    # 18/20 是按 11/12px 的字定的，13px 的字塞进去上下会顶到。
-    label_h: int = 22              # 轴标签的高度
-    label_gap: float = 22.0        # 相邻标签的最小间距（防重叠用）
+    # 行高 / 最小间距跟着字号走（见 scale_render.font_sizes）：
+    #   2026-10-11 11/12px 的字配 18/20；
+    #   2026-10-16 放大到 26px（= 主面板「时间」那一号）之后按 34/34 —— 26px 的字
+    #   连行距将近 35px，间距给 22 的话上下两行会叠在一起。
+    label_h: int = 36              # 轴标签的高度（「下一条」那条高亮行也用它）
+    label_gap: float = 40.0        # 相邻标签的最小间距（防重叠用）
 
     @property
     def pointer_y(self) -> float:
@@ -129,12 +131,6 @@ class Layout:
 def one_line(text: str) -> str:
     """轴说明里可能有换行；刻度表一行只画得下一条，换行折叠成 ·。"""
     return ' · '.join(x.strip() for x in (text or '').split('\n') if x.strip())
-
-
-def clip(text: str, n: int) -> str:
-    """按字符数截断（中文一个字算一个），超了用 … 结尾。"""
-    s = one_line(text)
-    return s if len(s) <= n else s[:n - 1] + '…'
 
 
 def _tick_steps(px_per_frame: float):

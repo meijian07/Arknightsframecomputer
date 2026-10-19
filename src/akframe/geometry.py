@@ -151,6 +151,21 @@ def _clamp_box(left: int, top: int, right: int, bottom: int,
     return Rect(left, top, right - left, bottom - top)
 
 
+def fit_rect(rect: Rect, width: int, height: int, min_size: int = 1) -> Rect:
+    """把任意 ROI 收进画面：优先保留宽高，只平移；实在装不下才缩小。
+
+    人工校准的偏移是**相对默认布局**累加的，换分辨率 / 连续按方向键之后很容易把框
+    推到画面外。以前 apply_deltas 直接 validate() 抛异常 —— 坏校准文件又会在下次启动
+    时被自动读回来，于是「挪多了 → 闪退 → 重启也打不开」。启动路径不能因为一份
+    越界的人工偏移就活不下来，所以这里统一夹取。
+    """
+    w = min(max(int(min_size), int(rect.w)), max(1, int(width)))
+    h = min(max(int(min_size), int(rect.h)), max(1, int(height)))
+    x = min(max(0, int(rect.x)), max(0, int(width) - w))
+    y = min(max(0, int(rect.y)), max(0, int(height) - h))
+    return Rect(x, y, w, h)
+
+
 def sign_rect(width: int, height: int, scale: float, edge: float = 1.0) -> Rect:
     """局内负费减号的扫描框（右下角，费用数字那一行）—— 锚在**客户区**右下角。
 
@@ -626,22 +641,24 @@ def apply_deltas(base: Layout, deltas: dict, src_scale: float | None = None) -> 
     src_scale 是记录这些偏移时的 scale：换窗口尺寸后按比例换算，这样校准结果
     在大窗口上量、小窗口上依然大致可用（UI 是按比例缩放的）。
 
-    dw/dh 允许为负（缩小 ROI），最小保留 4 像素。
+    dw/dh 允许为负（缩小 ROI），最小保留 4 像素。偏移把 ROI 推出画面时按 fit_rect
+    夹回来（先保宽高、平移；只有 ROI 比画面还大才缩），绝不把越界布局交给抓屏器。
     """
     k = 1.0 if not src_scale or src_scale <= 0 else base.scale / src_scale
 
     def adj(r: Rect, d) -> Rect:
         dx, dy, dw, dh = [int(round(v * k)) for v in d]
-        return Rect(r.x + dx, r.y + dy, max(4, r.w + dw), max(4, r.h + dh))
+        moved = Rect(r.x + dx, r.y + dy, max(4, r.w + dw), max(4, r.h + dh))
+        return fit_rect(moved, base.width, base.height, min_size=4)
 
     zero = (0, 0, 0, 0)
     bar = adj(base.bar, deltas.get('bar', zero))
     # 面板上按方向键把费用条挪几像素时，减号框跟着挪同样的量 —— 两个元素在同一块 HUD 上，
     # 条挪了框不挪就等于把「框对准」这件事又交回给用户。
     dxb, dyb = [int(round(v * k)) for v in deltas.get('bar', zero)][:2]
-    sign = _clamp_box(base.sign.x + dxb, base.sign.y + dyb,
-                      base.sign.x + dxb + base.sign.w, base.sign.y + dyb + base.sign.h,
-                      base.width, base.height)
+    sign = fit_rect(Rect(base.sign.x + dxb, base.sign.y + dyb,
+                         base.sign.w, base.sign.h),
+                    base.width, base.height)
     # ROI 被人工改小时，真实条槽宽按同样比例跟着变（纯平移 dw=0 时不变）
     frac = base.bar_width_frac
     if frac > 0 and base.bar.w > 0:

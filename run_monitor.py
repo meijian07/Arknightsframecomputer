@@ -72,7 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--no-ui', action='store_true', help='不开图形界面，控制台打印')
     p.add_argument('--duration', type=float, default=0.0, help='运行多少秒后自动退出（0=不限）')
     p.add_argument('--timeline', default=None,
-                   help='打轴器：启动时直接导入的 md 轴文件（界面里也能按 T 换）')
+                   help='打轴器：启动时直接导入的 md 轴文件（界面里也能用「导入轴…」换）')
     # ---- 演示模式：没有游戏画面也能把面板跑起来（刻度表预览 / 调界面用）----
     p.add_argument('--demo-axis', action='store_true',
                    help='演示模式：不找游戏窗口，用合成的费用条推着面板跑。'
@@ -131,7 +131,12 @@ def build_monitor(args, cost_rate=DEFAULT_FRAMES_PER_COST, negative='auto') -> L
         # ROI 只和窗口尺寸 + 游戏内「UI 缩放」有关（后者只乘在距右/距底上）
         base = layout_for(w, h, ui_scaler)
         if deltas:
-            return apply_deltas(base, deltas, calib_scale)
+            try:
+                return apply_deltas(base, deltas, calib_scale)
+            except ValueError as exc:
+                # apply_deltas 已经会夹取边界，这里只兜住「校准文件内容本身坏了」这类
+                # 意外：宁可先用未叠加偏移的默认布局把程序拉起来，也不能让启动直接崩。
+                print('校准文件无法应用，已退回默认布局：%s' % exc, file=sys.stderr)
         return base
 
     win = find_window(exe=args.exe, title=args.title, pid=args.pid)

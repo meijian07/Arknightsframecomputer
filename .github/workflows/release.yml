@@ -1,0 +1,48 @@
+name: Build Windows Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: Build executable
+        run: python -m PyInstaller --noconfirm --clean akframe.spec
+
+      - name: Package Windows build
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $asset = "ArknightsFrameCounter-$tag-win64.zip"
+          Compress-Archive -Path "dist\ArknightsFrameCounter\*" -DestinationPath $asset -CompressionLevel Optimal
+          "ASSET=$asset" >> $env:GITHUB_ENV
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $notes = "Windows 免安装版：下载 zip，解压后双击 ArknightsFrameCounter.exe。实时计数不需要 ffmpeg。"
+          gh release create "$tag" "$env:ASSET" --title "明日方舟全局帧数计数器 $tag" --notes $notes

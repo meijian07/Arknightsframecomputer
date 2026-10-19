@@ -172,11 +172,20 @@ check('一费 30 帧（实测周期中位）', n_cyc >= 10 and med == 30,
       '周期 %d 个，中位 %g，范围 %g..%g' % (n_cyc, med, lo, hi))
 check('10 秒 60fps 的录像喂到第 600 帧（0 起）', mon.position == 599,
       '实得 %d' % mon.position)
-# 画面是 synthesized_width(phase = ((i % per) + 1) / per) 喂进来的：第 i 帧就是
-# 本费的**第 (i % 30) + 1 帧**，所以第 599 帧（相位 30/30）时本费已经走过 600 帧。
-# 起锚落在第 2 帧上、补 2 帧，之后每拍 +1，累计正好 600 —— 帧号 = 游戏里本费的帧号。
-check('像素通道数出来 600 帧（帧号 = 本费已经走的帧数）',
-      mon.counter.elapsed == 600, '实得 %d' % mon.counter.elapsed)
+# 画面是 synthesized_width(phase = ((i % per) + 1) / per) 喂进来的：第 599 帧
+# （相位 30/30）是这一费的最后一根满条，**还没有走到条空边界**；周期锚点只在
+# 条空时把帧号钉到整数周期，所以这一拍是 599。再喂一拍到第 600 帧，条变空，
+# 应当正好等于第 20 个周期的起点 20 x 30。旧实现偶尔会把某个周期算成 31 帧，
+# 累计到这里会多 1 帧；周期锚点就是用来消掉那种跨周期漂移的，别把期望改回 600。
+check('条满的最后一帧不跨周期：先到 599', mon.counter.elapsed == 599,
+      '实得 %d' % mon.counter.elapsed)
+run_to(mon, clock, 600)
+check('条空那一拍正好落在整数周期：20 x 30 = 600',
+      mon.counter.elapsed == 600 and mon.counter.bar_fill_count == 20,
+      'elapsed=%d n=%d' % (mon.counter.elapsed, mon.counter.bar_fill_count))
+check('条空时 n x 回费周期 = 累计帧号',
+      mon.counter.elapsed == mon.counter.bar_fill_count * 30,
+      '%d vs %d' % (mon.counter.elapsed, mon.counter.bar_fill_count * 30))
 e0 = mon.counter.elapsed
 advance(mon, clock, 1.0)
 check('再跑 1 秒不多不少 +60 帧', mon.counter.elapsed - e0 == 60,

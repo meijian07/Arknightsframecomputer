@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import csv
+import ctypes
 import os
 import threading
 import time
@@ -24,7 +25,8 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from .features import fill_run, read_bar, read_pause, read_sign, read_speed
+from .features import (RoiMemo, fill_run, read_bar, read_pause, read_sign,
+                       read_speed)
 from .geometry import UI_SCALER_DEFAULT, Layout, Rect, layout_for, union_rect
 from .cost_rate import RateEstimator
 from .settings import DEFAULT_FRAMES_PER_COST, negative_override, parse_negative
@@ -50,6 +52,11 @@ SNAP_MAX = 24       # 偏移超过这么多像素就不敢吸（多半框错地�
 SNAP_MIN_RUN = 6    # 白块短于这么多列当噪声
 SNAP_FRAMES = 6     # 一次吸附最多抓几拍等白块出现
 SNAP_EVERY = 8      # 采样循环里每隔多少拍试一次（没读到白块就下拍再来）
+
+# 采样线程优先级：低于正常。计数器是**旁路观察者**，游戏才是前台；两边同时要 CPU
+# 时让游戏先跑。实测 120Hz 抓屏约 28% 单核，降到 below-normal 不会减少总工作量，
+# 但能把「游戏掉帧」的体感压下去（Windows 的优先级只影响争抢时的排队顺序）。
+THREAD_PRIORITY_BELOW_NORMAL = -1
 
 
 @dataclass
@@ -86,6 +93,18 @@ class LiveStats:
     errors: int = 0
     last_error: str = ''
     last_error_t: float = 0.0
+
+
+def _lower_current_thread_priority() -> None:
+    """把当前线程降到 below-normal；失败就算了（不是致命问题）。"""
+    try:
+        k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        k32.GetCurrentThread.restype = ctypes.c_void_p
+        k32.SetThreadPriority.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        k32.SetThreadPriority.restype = ctypes.c_int
+        k32.SetThreadPriority(k32.GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL)
+    except Exception:                        # noqa: BLE001
+        pass
 
 
 def _manual_cost_rate(spec):
@@ -169,6 +188,10 @@ class LiveMonitor:
         self._snap_pending = True
         self._snap_try = 0
         self.snap_note = ''
+        # 暂停键 / 倍速键是**离散分类**：同一块像素没变就沿用上一拍结论（见
+        # features.RoiMemo）。费用条不缓存 —— 它的 fill 是连续量。
+        self._pause_memo = RoiMemo()
+        self._speed_memo = RoiMemo()
         for lay in ([layout] if layout is not None else []):
             self.set_layout(lay)
 
@@ -193,8 +216,15 @@ class LiveMonitor:
         self.counter.set_manual_pause(self.manual_pause)
         self.counter.set_negative_override(negative_override(self.negative_mode))
         self._apply_cost_rate()
-        # 外接矩形变了，之前按尺寸缓存的 DIB 不再需要（ScreenGrabber 自己按尺寸复用）
-        self._grabber = None
+        # 外接矩形变了，之前按尺寸缓存的 DIB 不再需要（ScreenGrabber 自己按尺寸复用）。
+        # 必须 close，不能只把引用置 None：DIB / GDI 句柄不是 Python 管的，丢了引用
+        # 也不会自己还给系统（实测一个抓屏器漏 3 个 GDI + 约 2 MB）。
+        self._close_grabber()
+        # 换 ROI = 旧结论作废（像素虽然会变，但形状/尺寸也可能变，直接清掉更稳）
+        for memo in (getattr(self, '_pause_memo', None),
+                     getattr(self, '_speed_memo', None)):
+            if memo is not None:
+                memo.clear()
 
     def snap_bar_left(self, layout: Layout, win: WindowInfo,
                       tries: int = SNAP_FRAMES) -> tuple:
@@ -325,6 +355,8 @@ class LiveMonitor:
             last = self.latest.result
             fill = int(last.fill) if last is not None else None
             self.counter.mark_zero_start(fill)
+            # 清零后「满条次数 / 上一个条空位置」也从 0 重新算。
+            self.counter.reset_cycle_stats()
         self.rezero_latest()
 
     def rezero_latest(self) -> None:
@@ -428,8 +460,10 @@ class LiveMonitor:
         sign_img = to_gray(cut(lay.sign))
 
         bar = read_bar(bar_img, lay)
-        pause = read_pause(pause_img, lay)
-        speed = read_speed(speed_img, lay, self.templates)
+        # 这两行是「像素没变就复用」：静止画面 / 重复采样时不再重算，也避免
+        # 阈值边上的某一拍翻结论（见 features.RoiMemo）。
+        pause = self._pause_memo.read(pause_img, read_pause, lay)
+        speed = self._speed_memo.read(speed_img, read_speed, lay, self.templates)
         # 局内负费：费用数字左边的减号。负费期间每逻辑帧只攒一半（一费 30 -> 60 帧），
         # 不认出来这一段会被数成一半，见 features.read_sign / state._pixel。
         sign = read_sign(sign_img, lay)
@@ -518,7 +552,7 @@ class LiveMonitor:
             # 而打包后本来就没有控制台，所以 stats.last_error 还要留给界面显示。
             traceback.print_exc()
         self.window = None
-        self._grabber = None
+        self._close_grabber()
         self._last_window_scan = 0.0
         if self.counter is not None:
             self.counter.resync()          # 相位不可信了，重新起锚，不猜
@@ -548,6 +582,7 @@ class LiveMonitor:
         连续失败时稍微让出 CPU，别把核心烧在必然失败的循环上。
         """
         stop = stop or self._stop
+        _lower_current_thread_priority()
         period = 1.0 / self.rate if self.rate > 0 else 0.0
         misses = 0
         while not stop.is_set():
@@ -573,15 +608,72 @@ class LiveMonitor:
                 time.sleep(0.001)      # rate=0（不限速）时才需要，正常配速自带等待
         self._close_csv()
 
-    def start(self, reset_clock: bool = True) -> None:
+    def _probe_bar_fill(self) -> int | None:
+        """同步读一次「此刻」的费用条宽度，给启动起锚当相位基线。
+
+        为什么启动非读不可：条在费用周期第 0 帧和第 1 帧都是 0 像素宽，光看第一拍
+        画面分不出「刚归零」和「已经走过 1 帧」。如果启动时不留下基线，起锚只能
+        保守地记 0 帧 —— 点开始后条从空走到第一个像素的那一帧就被吞掉，整局从
+        第一次计数起就少 1 帧（用户 2026-10-19 反复报的「启动后第一次计数少一帧」）。
+
+        读失败（窗口没找到、正在最小化、尺寸刚变、抓屏异常）返回 None：
+        语义退回「不猜」，由 Counter.mark_zero_start(None) 保守处理。
+        """
+        try:
+            win = self._resolve_window()
+            if win is None or win.minimized:
+                return None
+            x, y, w, h = win.client
+            if w < 320 or h < 240:
+                return None
+            if self.layout is None or (w, h) != (self.layout.width, self.layout.height):
+                self.set_layout(self.build_layout(w, h))
+                self._snap_pending = True
+            lay = self.layout
+            if lay is None:
+                return None
+            if self._grabber is None:
+                self._grabber = ScreenGrabber()
+            bgra = self._grabber.grab_bgra(x + lay.bar.x, y + lay.bar.y,
+                                           lay.bar.w, lay.bar.h)
+            bar = read_bar(to_gray(bgra), lay)
+            # EMPTY 也要把 fill 交出去：fill=0 是第 0 帧；fill=1 仍是早期帧（模型
+            # 反推会落到相位 0）。MAX / MAX_FADE 时条上没有相位信息，按 0 起算。
+            return int(bar.fill) if bar.state == 'TRACK' else 0
+        except Exception:                    # noqa: BLE001
+            return None
+
+    def begin_counting(self, bar_fill: int = None) -> None:
+        """把「现在」定成计数起点：重新起锚，并禁止把启动前的费用条相位补进来。
+
+        bar_fill 是启动这一刻读到的条宽。None 时这里会自己同步读一次
+        （见 _probe_bar_fill）；仍然读不到才退回「不补帧」。
+        单独抽出来是为了测试 / 以后别的启动入口也能复用（见 start 的说明）。
+        """
+        if self.counter is None:
+            return
+        if bar_fill is None:
+            bar_fill = self._probe_bar_fill()
+        self.counter.resync()
+        self.counter.mark_zero_start(bar_fill)
+
+    def start(self, reset_clock: bool = True, bar_fill: int = None) -> None:
         """启动采样线程。
 
         reset_clock=False 时**保留原来的时间基准 _t0**：重新校准会把一个已经死掉的线程
         拉起来，那时候 t 已经走到几百秒了，重置 _t0 会让 t 倒退回 0 —— Counter 的挂钟
         通道拿到一个倒退的时间戳，会算出一个负的 dt。
+
+        启动采样 = 「从这一刻开始数」：先 resync，再用 mark_zero_start(bar_fill) 把
+        起锚基线钉在**点开始这一刻**的条宽上。否则第一拍会把点开始之前已经走过的那一段
+        费用条相位补进来（条正好走到本费第 2 帧就多记 2 帧，用户 2026-10-18 实测报的
+        就是这个）；反过来，bar_fill=None 又会把启动后第一帧吞掉（2026-10-19 报的
+        「第一次计数少一帧」）。已经数出来的帧数不受影响；停止期间画面走过的帧则不会
+        事后补进来。
         """
         if self._thread and self._thread.is_alive():
             return
+        self.begin_counting(bar_fill)
         self._stop.clear()
         if reset_clock:
             self._t0 = time.perf_counter()
@@ -593,6 +685,18 @@ class LiveMonitor:
         if self._thread:
             self._thread.join(timeout=2.0)
             self._thread = None
+        # 停计数时把 DIB / GDI 也还回去（2 MB 左右）；再点开始会重新建。
+        self._close_grabber()
+
+    def _close_grabber(self) -> None:
+        """关掉当前抓屏器并清空缓存。幂等，异常不外抛（关不掉也不能拦住退出）。"""
+        g = getattr(self, '_grabber', None)
+        self._grabber = None
+        if g is not None:
+            try:
+                g.close()
+            except Exception:                # noqa: BLE001
+                pass
 
     @property
     def alive(self) -> bool:
@@ -616,7 +720,7 @@ class LiveMonitor:
         before = self.counter.elapsed if self.counter is not None else 0
         # 1) 丢掉缓存，强制重新找窗口（理由同 _on_error）
         self.window = None
-        self._grabber = None
+        self._close_grabber()
         self._last_window_scan = 0.0
         win = self._resolve_window()
         if win is None:

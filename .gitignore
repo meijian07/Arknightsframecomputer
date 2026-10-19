@@ -29,3 +29,7 @@ tools/*.png
 .venv/
 build/
 dist/
+
+# ---- Release 资产 ----
+# Windows 包由 GitHub Actions 构建后直接上传到 Releases，不提交进源码树。
+*.zip
