@@ -16,7 +16,7 @@ Tab / 方向键 / Shift+方向键 / S / R / K。
 
 每个动作都在界面上有按钮，功能一个没少：
     开始 / 暂停 / 继续 = 主按钮三态        暂停计数        清零 + 停
-    手动校准（二级窗口里：目标 / ←↑↓→ / 步长 / ROI 框 / 保存校准 / 恢复默认 / 重新选窗口）
+    手动校准（二级窗口里：目标 / ←↑↓→ / 步长 / ROI 框 / 保存校准 / 恢复默认）
     打轴器（导入轴… / 重载）
     展开 / 收起 = 标题栏那个 ▸ / ▾        重新校准 = 「校准」那行的键        退出 = 右上角 ×
 
@@ -187,9 +187,9 @@ PICKER_HELP = (
     '在框外面拖 = 重新拉一个框。③ 剩下那 1~2 个像素在右边放大图里看'
     '（左键拖 = 挪视窗看框外面，滚轮 / ctrl+滚轮 = 放大缩小，双击 = 复位），\n'
     '微调用放大图下面那两行按钮：左 / 右 / 上 / 下 各 ±1 个像素、整框 ←→↑↓（一次 1px）。\n'
-    '四条彩线就是框的四条边（红 / 绿 = 左右，品红 = 上下），它们跟着框走，'
+    '红色实线就是手动框的四条边，它们跟着框走；白色虚线是自动校准推测的框，'
     '所以「框相对条 / 按钮偏了多少」四个方向一起看得见。\n'
-    '橙色 = 按画面尺寸推测的位置（只是参考）。\n'
+    '红色 = 你正在调的手动框；白色虚线 = 自动校准推测的位置（只是参考）。\n'
     '费用条：左右两条边贴住条槽的两头，上下让白条居中'
     '（读的只是框正中间那条带，框高矮不影响读数）。\n'
     '暂停键 / 倍速键：两个框联动（一样大、一起挪），可以随便拉大拉小。\n'
@@ -421,8 +421,8 @@ class BoxPicker:
 
         * 刻度尺：费用条的设计是「条槽宽 = 30 个逻辑帧」，参照图上把预测的条槽画成
           30 等分的橙尺 —— 对的是刻度，不是空气；
-        * 放大镜：框那一块放大，四条彩线就是框的四条边（红 / 绿 = 左右，
-          品红 = 上下），白块的左端压没压在红线上、白条在上下两条品红线之间
+        * 放大镜：框那一块放大，红色实线是手动框的四条边，白色虚线是自动
+          校准推测框；白块的左端压没压在红线上、白条在上下两条红线之间
           居没居中，一眼就能看出来；能按住拖动（看框外面）、滚轮局部放大、
           双击复位；
         * 最满的一帧：「跳到最满的一帧」让用户拿到白块右端 = 条槽右端的那
@@ -756,15 +756,15 @@ class BoxPicker:
             on = name == self.target
             x0, y0 = int(r.x * self.scale), int(r.y * self.scale)
             x1, y1 = int((r.x + r.w) * self.scale), int((r.y + r.h) * self.scale)
-            # 当前目标：白框 + 红 / 绿两条边 + 八个手柄（拖它就能放大缩小，见 _hit）；
-            # 另一个按钮画成灰虚线，让人看见「联动的那一个现在在哪儿」。
-            style = {'outline': '#ffffff', 'width': 2}
+            # 三个手动框统一红色：当前目标实线 + 八个手柄，其余目标用暗红虚线，
+            # 既看得出「都是手动框」，又分得清正在调哪一个。
+            style = {'outline': '#ff4646', 'width': 2}
             if not on:
-                style = {'outline': '#9a9a9a', 'width': 1, 'dash': (4, 3)}
+                style = {'outline': '#b83232', 'width': 1, 'dash': (4, 3)}
             self.cv.create_rectangle(x0, y0, x1, y1, tags='box', **style)
             if on:
                 self.cv.create_line(x0, y0, x0, y1, fill='#ff4646', width=2, tags='box')
-                self.cv.create_line(x1, y0, x1, y1, fill='#46e66e', width=2, tags='box')
+                self.cv.create_line(x1, y0, x1, y1, fill='#ff4646', width=2, tags='box')
                 for hx, hy in self._live_handles(r).values():
                     self.cv.create_rectangle(hx - self.HANDLE_PX, hy - self.HANDLE_PX,
                                              hx + self.HANDLE_PX, hy + self.HANDLE_PX,
@@ -808,7 +808,7 @@ class BoxPicker:
         # 白块上。
         pause = self.target == 'pause'
         img = boxpick.magnify(self.frame, r, panel=self.ZOOM_PANEL,
-                              layout=self.guide if self.target == 'bar' else None,
+                              layout=self.guide,
                               band=self._band_rows(r), pan=self.pan, zoom=self.zoom,
                               ghost=boxpick.pause_ghost(r) if pause else (),
                               band_fill=pause)
@@ -1088,7 +1088,7 @@ class BoxPicker:
     # 框能拉到多小。为什么非要有像素级微调（而不是光靠拖）：参照图按窗口大小缩过
     # （2560 宽的录屏放进 1280 的窗口只有 0.5 倍），鼠标拖出来天生差 1~2 个画面像素，
     # 而「一费 30 帧」的相位对 1px 都敏感（6px = 1 帧）—— 所以拖完还要能在放大图下面
-    # 一个像素一个像素地抠，抠的时候红 / 绿线在白块的哪一侧看得清清楚楚。
+    # 一个像素一个像素地抠，抠的时候红色框线在白块的哪一侧看得清清楚楚。
     MIN_W = 20                      # 费用条的框：条槽 30 帧、每帧 6px，20px 以下没意义
     MIN_H = 3
     BTN_MIN = 8                     # 按钮小得多，能拉到的下限也小
@@ -1161,6 +1161,9 @@ class MonitorApp:
         # （LiveMonitor.start 会重新起线程，窗口由它自己每拍重新找，不用重建对象）。
         self.live_monitor = monitor
         self._src_kind = 'live'                 # 'live' / 'window'
+        # 用户已经选了「窗口」但后台还在校准时，按钮先显示目标模式（窗口）。
+        # 校准失败 / 取消选择时清掉，回到真正在用的那一侧（见 _sync_ctrl_row）。
+        self._src_pending = None                # None / 'window'
         # ---- 读窗口（window.py 那条链路）----
         self._window_win = None                 # 选中的目标窗口（win32.WindowInfo）
         self._window_src = None                 # 校准好的 WindowSource（关掉要 close）
@@ -1574,7 +1577,7 @@ class MonitorApp:
     def _set_wraps(self, wrap: int) -> None:
         """按可用宽度给会换行的那些行设换行宽度。
 
-        右列那两行（逻辑帧 / 时间）平时只有几个字，但它们**不在**下面这一组里 ——
+        右列那一行（时间）平时只有几个字，但它**不在**下面这一组里 ——
         单独给一个 420 的上限：大数字卡片本身就占掉 186~366px（跟着位数走），
         再宽收起态就不「小」了。
         """
@@ -1588,8 +1591,7 @@ class MonitorApp:
         # 打轴器标题那一行右边还挂着两个按钮（重载 / 导入轴…），标题能用的宽度要
         # 扣掉它们 —— 不扣的话整行 453px，把展开态顶到 473（实测）。
         self.lb_prom_title.configure(wraplength=max(120, wrap - 185))
-        for lb in (self.lb_frames_hint, self.lb_time):
-            lb.configure(wraplength=max(240, min(wrap, 420)))
+        self.lb_time.configure(wraplength=max(240, min(wrap, 420)))
 
     def _place(self, w, h):
         """把窗口摆到屏幕上：尺寸一变（展开 / 收起）就按「想放的位置」重算一次。
@@ -1746,7 +1748,7 @@ class MonitorApp:
 
         只在这两个控件上写字，所以每拍调用一次也不心疼（内容没变就不 configure）。
         """
-        kind = self._src_kind
+        kind = self._src_pending or self._src_kind
         want_src = {'live': '校准：PC端▾', 'window': '校准：窗口▾'}[kind]
         if self.btn_src.cget('text') != want_src:
             self.btn_src.configure(text=want_src)
@@ -1920,19 +1922,14 @@ class MonitorApp:
 
         right = tk.Frame(self.fr_nums, bg=UI_BG)
         right.pack(side='left', padx=4, pady=6)
-        # 两行都 anchor='w'（左对齐）：tk 默认 anchor='center'，文字比分到的宽度长时
-        # 会**两头一起切**（实测切出来第一个字就没了）。左对齐至少从头开始读。
+        # 时间这一行 anchor='w'（左对齐）：tk 默认 anchor='center'，文字比分到的
+        # 宽度长时会**两头一起切**（实测切出来第一个字就没了）。左对齐至少从头开始读。
         # 原来这里还有第三行「状态 …」：文案太长（满费那条 330px、右列只有 292px）总是被
         # 窗口右边切掉，用户 2026-10-09 说「状态栏可以删掉」，于是整行去掉 —— 它的内容
         # 分两类，都没有丢：跑动细节在下面「费用条」那行的「通道=」里，真出事的告警在
         # 「告警：」那行（采样已停会转红写在那里，见 _tick_body 末尾）。
-        # 这两行的文案**短**是量出来的：右列宽度 = 两行的最大者，而右列又是「大数字卡 +
-        # 右列」这一行的宽度瓶颈（大数字卡片本身按位数要 186~366px）。原来那两句是
-        # 218px / 240px，收起态 3 位数就要 550 宽；收成 135px / 162px 之后 3 位数是
-        # 470 —— 而且一个字的信息都没少（'1X 30/秒' 和 '1 倍速 30 帧/秒' 是同一件事）。
-        self.lb_frames_hint = self._label(right, '逻辑帧 1X 30/秒', 9, UI_DIM,
-                                          anchor='w')
-        self.lb_frames_hint.pack(anchor='w')
+        # 「时间」上方原来还有一行额外计数（逻辑帧 1X 30/秒 / 满条 n ｜ +x 帧）。
+        # 2026-10-19 按用户要求删掉：常驻区只保留大数字和时间，不再重复计数。
         self.lb_time = self._label(right, '时间 00:00.00', 13, anchor='w')
         self.lb_time.pack(anchor='w')
 
@@ -2245,8 +2242,7 @@ class MonitorApp:
         # 是「保存校准」，给它主键的白底深字；「恢复默认」会把手调过的框全丢掉 —— 危险键。
         for text, cmd, style in (('保存校准', self.save_calib, 'primary'),
                                  ('ROI 框', self.toggle_overlay, 'outline'),
-                                 ('恢复默认', self.reset_calib, 'danger'),
-                                 ('重新选窗口…', self.pick_window, 'ghost')):
+                                 ('恢复默认', self.reset_calib, 'danger')):
             self._btn(acts, text, cmd, style=style).pack(side='left', padx=3)
 
         self._set_calib_mode(True)
@@ -2546,7 +2542,6 @@ class MonitorApp:
         self._set_text('frames', self.lb_frames, '0')
         self._sync_rule()
         self._set_text('time', self.lb_time, '时间 00:00.00')
-        self._set_text('hint', self.lb_frames_hint, '满条 0 ｜ +0 帧')
 
     def toggle_manual_pause(self):
         """手动「暂停计数」：数字按住不动，方便对着游戏/录像逐段核对。
@@ -2644,25 +2639,6 @@ class MonitorApp:
             print('%s存盘失败：%s' % ('回费速率', exc), file=sys.stderr)
         self._reset_count('应用完成')      # 切档位 = 一次「应用」
 
-    def pick_window(self):
-        """「换窗口」：换实时链路读的那个窗口（不改帧来源）。
-
-        窗口模式下「换窗口」= 换一个目标重新校准 —— 那套 ROI 是跟着「进程名 + 客户区
-        尺寸」走的，把实时的分辨率表直接套到播放器窗口上必然读错。
-        """
-        if self._src_kind == 'window':
-            self.read_window()
-            return
-        self._window_dialog('换窗口', self._adopt_live_window,
-                            sub='实时链路改成读这个窗口', ok='换到这个窗口')
-
-    def _adopt_live_window(self, win):
-        self.monitor.exe, self.monitor.title, self.monitor.pid = win.exe, None, win.pid
-        self.monitor.window = win
-        self.monitor.set_layout(
-            layout_for(win.client[2], win.client[3], arknights_ui_scaler()), keep_elapsed=True)
-        self._apply_deltas()
-
     def recalibrate(self):
         """重新校准：把「从屏幕哪块读、当前相位对到哪一帧」重新对一遍。
 
@@ -2696,7 +2672,10 @@ class MonitorApp:
 
         切走时把「我们钉上去的置顶」还回去 —— 否则播放器会一直盖在所有窗口最上面。
         """
+        # 选窗口的对话框还开着时点了「PC端」：取消那个待切换状态，按钮立刻回 PC端。
+        self._src_pending = None
         if self._src_kind == 'live':
+            self._sync_ctrl_row()
             return
         try:
             self.monitor.stop()
@@ -2712,6 +2691,7 @@ class MonitorApp:
         self._window_win = None
         self.monitor = self.live_monitor
         self._src_kind = 'live'
+        self._sync_ctrl_row()
         self._load_calib()                        # 实时的 ROI 微调在 layout_calib.json 里
         self._apply_deltas()
         # 换来源 = 新计数（用户：「切换模式自动清零」）—— 切过去是**待命**态，
@@ -2729,7 +2709,7 @@ class MonitorApp:
     # 「框选费用条」手动圈）→ **点「开始计数」**才起采样线程。
 
     def _window_dialog(self, title: str, on_pick, sub: str = '',
-                       ok: str = '读这个窗口'):
+                       ok: str = '读这个窗口', on_cancel=None):
         """选窗口的对话框。只列客户区 >= 320x240 的（再小的就不是游戏画面了）。
 
         2026-10-13 重做（设计图 out/design/p53_ui_dialogs.png，用户：「都改成这一版吧」）。
@@ -2749,6 +2729,8 @@ class MonitorApp:
 
         def close():
             top.destroy()
+            if on_cancel is not None:
+                on_cancel()
 
         _dialog_header(top, title, close)
         hint = tk.Frame(top, bg=UI_BG)
@@ -2843,9 +2825,18 @@ class MonitorApp:
         """读一个窗口：选窗口 -> 后台校准 -> 等用户点「开始计数」。"""
         if self._window_busy:
             return
+        # 用户一选「窗口」这个模式，按钮就立刻写「校准：窗口▾」；校准失败或取消
+        # 选窗口时再恢复（用户 2026-10-19：「应该一切换模式就变成校准：窗口」）。
+        self._src_pending = 'window'
+        self._sync_ctrl_row()
         self._window_dialog('读取窗口', self.start_window_calib,
                             sub='选中哪个就读它 · 校准完点「开始」才起采样',
-                            ok='读这个窗口')
+                            ok='读这个窗口', on_cancel=self._cancel_source_switch)
+
+    def _cancel_source_switch(self):
+        """选窗口 / 校准没成：把按钮恢复成当前真正在用的输入源。"""
+        self._src_pending = None
+        self._sync_ctrl_row()
 
     def start_window_calib(self, win, box=None, force: bool = False, note: str = ''):
         """在后台线程里校准一个窗口。
@@ -2900,6 +2891,8 @@ class MonitorApp:
             self._window_busy = False
             if exc is not None:
                 self._release_pin()        # 校准没成：把刚钉上去的置顶还回去
+                self._src_pending = None   # 按钮回到真正在用的输入源
+                self._sync_ctrl_row()
                 print('读窗口失败：%s' % exc, file=sys.stderr)
             else:
                 self._adopt_window(src, win, note)
@@ -2963,6 +2956,7 @@ class MonitorApp:
             mon._t0 = old._t0
         self._window_src = src
         self._window_win = win
+        self._src_pending = None
         self._src_kind = 'window'
         self.monitor = mon
         # 窗口的 ROI 是跟着「进程名 + 客户区尺寸」走的一份独立校准表（window_calib.json），
@@ -3724,19 +3718,6 @@ class MonitorApp:
             counter = self.monitor.counter
             per = float(counter.frames_per_cost) if counter is not None else LOGICAL_FPS
             into = int(round(res.phase * per))
-            # 面板上的绝对帧号现在由「上一个条空位置 + 本费余量 x」组成。
-            # x 直接用累计帧号减去 bar_fill_frames（条空那一刻的累计帧号），
-            # 条空时它一定回到 0 —— 不再假设每一费都是 30 帧：负费的周期是 60，
-            # 正费中途切负费的周期是 30+n/2，乘 n 会把它们硬改成 30。
-            n_fill = int(res.bar_fill_count)
-            x_fill = res.elapsed_f - int(res.bar_fill_frames)
-            if res.bar_state in FULL_COST_STATES:
-                x_text = ('+%.1f' if x_fill >= 0 else '%.1f') % x_fill
-            else:
-                x_int = int(round(x_fill))
-                x_text = ('+%d' if x_int >= 0 else '%d') % x_int
-            hint = '满条 %d ｜ %s 帧' % (n_fill, x_text)
-            self._set_text('hint', self.lb_frames_hint, hint)
             self._set_text(
                 'bar', self.lb_bar,
                 '费用条 fill=%d/%d  %s  通道=%s ｜ 本费 %d/%d 帧'

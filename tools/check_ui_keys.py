@@ -599,6 +599,18 @@ def t_window_row(app):
           req()[1] == live_h, '%d vs %d' % (req()[1], live_h))
     check('并进控制行之后宽度仍然落进基准宽 470（没把面板顶宽）',
           req()[0] <= app.COLLAPSED_W, req()[0])
+    app._src_kind = 'live'
+    app._sync_ctrl_row()
+    app._src_pending = 'window'
+    app._sync_ctrl_row()
+    check('刚选「窗口」、校准还没完：按钮已经写「校准：窗口▾」',
+          app.btn_src.cget('text') == '校准：窗口▾', app.btn_src.cget('text'))
+    app._src_pending = None
+    app._sync_ctrl_row()
+    check('取消选窗口后按钮恢复当前输入源（PC端）',
+          app.btn_src.cget('text') == '校准：PC端▾', app.btn_src.cget('text'))
+    app._src_kind = 'window'
+    app._sync_ctrl_row()
 
     # ---- 默认置顶：选完窗口就该顺手 SetWindowPos(TOPMOST) + 把面板抢回来 ----
     calls = []
@@ -1109,14 +1121,14 @@ def t_picker_pan(app):
         pk.guide = None
         pk.redraw()
         iz, jz = zsize()
-        jy = jz * 3 // 4            # 避开两条蓝线（取样条带）占的那两行
         el, er, et, eb = zm.edge_lines(pk.box, ui_mod.BoxPicker.ZOOM_PANEL, pk.pan,
                                        pk.zoom, pk._frame_size())
-        check('费用条目标的放大图：左红 / 右绿压在画布左右两边（条槽宽正好铺满面板）',
+        jy = (et + eb) // 2         # 左右边只画在框的高度范围内，别拿框外的行量
+        check('费用条目标的放大图：左右两条红边压在画布左右两边（条槽宽正好铺满面板）',
               px(0, jy) == zm.EDGE_LEFT and px(iz - 1, jy) == zm.EDGE_RIGHT
               and el == 0 and er >= iz - 2,
               '%s %s el=%d er=%d iz=%d' % (px(0, jy), px(iz - 1, jy), el, er, iz))
-        check('费用条目标的放大图：上下两条品红画在框的顶边 / 底边上（不在画布边上）',
+        check('费用条目标的放大图：上下两条红边画在框的顶边 / 底边上（不在画布边上）',
               px(iz // 2, et) == zm.EDGE_TOP and px(iz // 2, eb) == zm.EDGE_BOTTOM
               and 0 < et < eb < jz - 1,
               '%s %s et=%d eb=%d jz=%d' % (px(iz // 2, et), px(iz // 2, eb), et, eb, jz))
@@ -1157,9 +1169,9 @@ def t_picker_pan(app):
         pk.redraw()
         # 平移（右移 9px）之后：绿线不再贴在画布最右列，而是跟着框挪到 (w-9)*kx-1 列。
         iz2, jz2 = zsize()
-        jy2 = jz2 * 3 // 4
-        er3 = zm.edge_lines(pk.box, ui_mod.BoxPicker.ZOOM_PANEL, pk.pan, pk.zoom,
-                            pk._frame_size())[1]
+        _el3, er3, et3, eb3 = zm.edge_lines(pk.box, ui_mod.BoxPicker.ZOOM_PANEL, pk.pan,
+                                            pk.zoom, pk._frame_size())
+        jy2 = (et3 + eb3) // 2
         check('平移后四条边跟着框走（右边从画布最右列挪到第 %d 列）' % er3,
               px(er3, jy2) == zm.EDGE_RIGHT and px(iz2 - 1, jy2) != zm.EDGE_RIGHT
               and er3 < iz2 - 1,
@@ -1731,7 +1743,9 @@ def t_dialog_shell(app):
             t = str(b.cget('text'))
             if t in ('保存校准', 'ROI 框', '恢复默认', '重新选窗口…'):
                 acts[t] = b
-        check('手动校准：四个动作键都在', len(acts) == 4, sorted(acts))
+        check('手动校准：三个动作键都在（PC端的「重新选窗口…」已删）',
+              len(acts) == 3 and '重新选窗口…' not in acts, sorted(acts))
+        check('PC端手动校准不再挂「重新选窗口」入口', not hasattr(app, 'pick_window'))
         check('手动校准：保存校准 = 主键（白底深字）',
               acts['保存校准'].cget('bg') == ui_mod.PRIMARY
               and acts['保存校准'].cget('fg') == ui_mod.UI_BG,
@@ -1741,10 +1755,6 @@ def t_dialog_shell(app):
         check('手动校准：ROI 框 = 次键（底色同背景 + 1px 描边）',
               acts['ROI 框'].cget('bg') == ui_mod.UI_BG
               and int(acts['ROI 框'].cget('highlightthickness')) == 1)
-        check('手动校准：重新选窗口 = 幽灵键（纯文字）',
-              acts['重新选窗口…'].cget('bg') == ui_mod.UI_BG
-              and acts['重新选窗口…'].cget('fg') == ui_mod.UI_DIM
-              and int(acts['重新选窗口…'].cget('highlightthickness')) == 0)
         check('手动校准：header 上有 ×', _hdr_btn(top, '×') is not None)
         check('手动校准：窗口夹在工作区里（下缘不钻到任务栏底下）',
               top.winfo_y() + top.winfo_reqheight() <= ui_mod.work_area()[1]
