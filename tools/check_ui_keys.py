@@ -524,6 +524,8 @@ def t_layout_top(app):
           '顺序=%d vs %d' % (order.index(app.fr_more_top), order.index(app.fr_nums)))
     check('展开：打轴器在标题栏 / 分隔线之后（没压在最上面）',
           order.index(app.fr_more_top) >= 2, order.index(app.fr_more_top))
+    check('展开态标题栏按钮显示向下三角', app.btn_more.cget('text') == '▾',
+          app.btn_more.cget('text'))
     check('展开：fr_more（曾装「手动校准…」那一行）不再铺出来',
           app.fr_more.winfo_manager() == '', app.fr_more.winfo_manager())
     check('两块是两个独立的 Frame（打轴器才插得了队）',
@@ -534,6 +536,8 @@ def t_layout_top(app):
     check('收起：两块一起收回去',
           app.fr_more_top.winfo_manager() == '' and app.fr_more.winfo_manager() == '',
           '%r / %r' % (app.fr_more_top.winfo_manager(), app.fr_more.winfo_manager()))
+    check('收起态展开键显示正三角 ▲', app.btn_more.cget('text') == '▲',
+          app.btn_more.cget('text'))
     order2 = list(root.pack_slaves())
     check('收起：常驻区没被展开区带走',
           app.fr_nums in order2 and app.fr_ctrl in order2 and app.fr_note in order2)
@@ -894,7 +898,7 @@ def t_rate_switch_clears(app):
                                  app.lb_frames.cget('text'),
                                  app.btn_start.cget('text')))
     check('切档位刷成新档 + 底下说「应用完成」',
-          app.rate_var.get() == '25%'
+          app.rate_var.get() == '25% 三级减费'
           and app.lb_note.cget('text') == '应用完成',
           '%r / %r' % (app.rate_var.get(), app.lb_note.cget('text')))
     app.apply_cost_rate(30.0)          # 复位成默认档，别影响后面几组
@@ -2015,7 +2019,8 @@ def t_panel_skin(app):
 
     # 追加：回费效率那一行：「自定义」那一截按需铺，且不动面板尺寸
     check('回费效率预设档位显示为百分比',
-          list(app._rate_labels) == ['100%', '77%', '67%', '50%', '33%', '25%'],
+          list(app._rate_labels) == ['100% 正常回费', '75% 一级减费',
+                                     '50% 二级减费', '25% 三级减费'],
           list(app._rate_labels))
     row = app.fr_rate_custom.master
     check('回费行右边「自定义」那一截默认收着',
@@ -2048,7 +2053,7 @@ def t_panel_skin(app):
     root.update_idletasks()
     check('切回预设档（50%）就把那一截收起来',
           app.fr_rate_custom.winfo_manager() == ''
-          and app.rate_var.get() == '50%', app.rate_var.get())
+          and app.rate_var.get() == '50% 二级减费', app.rate_var.get())
     check('回费行的行高固定（RATE_ROW_H），不跟内容跑',
           row.winfo_height() == ui_mod.RATE_ROW_H, row.winfo_height())
     app._show_rate_custom(False)

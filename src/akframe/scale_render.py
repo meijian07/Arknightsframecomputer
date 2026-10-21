@@ -83,11 +83,11 @@ def _clip_px(dr, text: str, font, room: float) -> str:
     return keep + ell if keep else ''
 
 
-def render(lay, theme: Theme = None, scale: float = 1, flash: bool = False) -> Image.Image:
+def render(lay, theme: Theme = None, scale: float = 1) -> Image.Image:
     """把一个 Layout 画成 PIL 图像。
 
     scale 是放大倍数，只给离屏出图用（界面恒为 1）。
-    flash = True 时把「下一条」那一行整行反色（打轴器到帧瞬间的反馈）。
+    「下一条」用灰色整行预告；距离执行还有 3 帧时由 layout 标成 current，白底反色。
     """
     g = lay.geom
     th = theme or Theme()
@@ -131,14 +131,16 @@ def render(lay, theme: Theme = None, scale: float = 1, flash: bool = False) -> I
         if m.spread:      # 标签被推开了，用细线连回真实刻度
             dr.line([S(g.ruler_w) - 2, S(min(m.tick_y, m.label_y)),
                      S(g.ruler_w) - 2, S(max(m.tick_y, m.label_y))], fill=th.connector)
-        hit = flash and m.state == 'next'
+        hit = m.active
         top = S(m.label_y - g.label_h / 2.0)
-        if m.state == 'next':
+        if hit:
             dr.rectangle([S(g.ruler_w) + 1, top, W - 1, top + S(g.label_h) - 1],
-                         fill=th.accent if hit else th.next_fill)
-            if not hit:
-                dr.rectangle([S(g.ruler_w) + 1, top, S(g.ruler_w) + 2,
-                              top + S(g.label_h) - 1], fill=th.accent)
+                         fill=th.accent)
+        elif m.state == 'next':
+            dr.rectangle([S(g.ruler_w) + 1, top, W - 1, top + S(g.label_h) - 1],
+                         fill=th.next_fill)
+            dr.rectangle([S(g.ruler_w) + 1, top, S(g.ruler_w) + 2,
+                          top + S(g.label_h) - 1], fill=th.mark_next)
         # 说明按第一个空格切成「动作 + 内容」两段，动作上色，扫起来更快；
         # 没空格的（比如「开银灰技能」）就整条当动作，也不出错。
         head, _, rest = one_line(m.cue.text).partition(' ')

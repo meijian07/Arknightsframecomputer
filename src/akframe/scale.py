@@ -13,7 +13,9 @@ frame 往上涨 -> 同一个 f 的 y 变小 -> 整条刻度**向上滚**（提�
 「现在」那条线（pointer）钉在刻度区**正中**（pointer_ratio = 0.5）不动，于是：
 
     线的**上方** = 已经过去的轴（越往上越久远，颜色越暗）
-    线的**下方** = 还没到的轴（紧贴着线的那一条就是「下一条」，也是唯一高亮的那条）
+    线的**下方** = 还没到的轴（紧贴着线的那一条是「下一条」，灰色高亮）
+
+即将执行的那一条会在执行前的 3 个逻辑帧内变成白色高亮；执行后变回普通 past。
 
 2026-10-11 之前是反的（pointer 在 70% 处、刻度往下滚）—— 用户在看板批注里指出：
 「后一个操作高亮不是前一个；现在针一直居中，操作向上滚动」。
@@ -30,6 +32,7 @@ from .timeline import Cue
 TICK_CANDIDATES = (1, 2, 5, 10, 15, 30)
 MIN_TICK_PX = 4.0      # 相邻小刻度至少隔这么多像素，否则糊成一片
 COST_FRAMES = 30       # 大刻度间隔：30 帧 = 1 费 = 1 秒
+ACTIVE_MARK_FRAMES = 3 # 即将执行的操作在提前 3 个逻辑帧内保持白色高亮
 
 
 @dataclass
@@ -37,8 +40,8 @@ class Theme:
     """刻度表的配色。要换风格只动这里，画的地方不用改。
 
     这一套是照游戏内 HUD 抄的：**只有白和灰两档**，靠线的粗细和明暗分层，不引入第二种
-    强调色。「现在」线和青柱（现在 -> 下一条）用纯白；「下一条」整行**反色**
-    （白底深字）—— 就是游戏里到帧那一下 flash 的做法，靠反色而不是靠颜色抓眼睛。
+    强调色。「下一条」整行用灰色底色预告；距离执行还有 3 帧时切换成白色反色，
+    执行后恢复成普通 past。
     """
 
     bg: str = '#0b0b0e'
@@ -52,7 +55,7 @@ class Theme:
     text: str = '#ffffff'
     dim: str = '#b9b9c0'
     faint: str = '#8f8f95'         # 已经过去的轴
-    mark_next: str = '#ffffff'
+    mark_next: str = '#b9b9c0'
     mark_future: str = '#b9b9c0'
     mark_past: str = '#8f8f95'
     next_fill: str = '#2a2a2d'     # 「下一条」那行的底色（还没走到时）
@@ -110,6 +113,11 @@ class Mark:
     tick_y: float
     label_y: float
     state: str            # 'past' | 'next' | 'future'
+
+    @property
+    def active(self) -> bool:
+        """下一条是否已经进入执行前的 3 帧白色预告窗口。"""
+        return self.state == 'next' and 0.0 < self.delta <= ACTIVE_MARK_FRAMES
 
     @property
     def spread(self) -> bool:
@@ -190,7 +198,6 @@ def build(frame, cues, done, geom: ScaleGeom = None,
 
     n = len(cues)
     done_i = max(0, min(int(done), n))
-
     # ---- 刻度 ----
     minor, major = _tick_steps(g.px_per_frame)
     # 线的上面是过去（帧号更小），下面是未来（帧号更大）—— 见模块开头那张坐标图

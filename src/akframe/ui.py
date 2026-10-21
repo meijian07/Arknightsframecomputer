@@ -18,7 +18,7 @@ Tab / 方向键 / Shift+方向键 / S / R / K。
     开始 / 暂停 / 继续 = 主按钮三态        暂停计数        清零 + 停
     手动校准（二级窗口里：目标 / ←↑↓→ / 步长 / ROI 框 / 保存校准 / 恢复默认）
     打轴器（导入轴… / 重载）
-    展开 / 收起 = 标题栏那个 ▸ / ▾        重新校准 = 「校准」那行的键        退出 = 右上角 ×
+    展开 / 收起 = 标题栏那个 ▲ / ▾        重新校准 = 「校准」那行的键        退出 = 右上角 ×
 
 回费效率（减费 tag）：默认 30 帧/费（1 秒 1 费）。点了「回费速度 -50% / -75%」的 tag
 时，在**收起态**面板「回费效率」那一行选 60 / 120，或直接填数字后点「应用」——
@@ -1227,7 +1227,6 @@ class MonitorApp:
         self.prompter = Teleprompter()
         self._timeline_path = None      # 当前轴来自哪个 md 文件；None = 来自面板输入框
         self._rate_custom_open = False  # 「自定义」那一截现在是铺着还是收着（见 53 节）
-        self._prom_flash_until = 0.0
         # 采样线程的存活看门狗（见 _tick_body）：盯 stats.ticks 这个心跳。
         self._last_ticks = -1
         self._stall_since = 0.0
@@ -1389,7 +1388,7 @@ class MonitorApp:
         else:
             self.fr_more_top.pack_forget()
             self.fr_more.pack_forget()
-        self.btn_more.configure(text='▾' if self._more else '▸')
+        self.btn_more.configure(text='▾' if self._more else '▲')
         self._refit()
 
     def _pack_more(self):
@@ -1908,7 +1907,9 @@ class MonitorApp:
         # 展开键只留一个正三角（看板批注「右上方有展开，x，-键」「展开图标变为正三角」）：
         # 原来写「▸ 打轴器 / 设置」，比另外两个键加起来还宽 —— 标题栏因此成了整块面板
         # 最宽的一行（525px），收起态缩不下去。
-        self.btn_more = self._btn(self.head, '▸', self.toggle_more, padx=9, pady=0, bd=0)
+        # 三角字形比 × / − 显眼，字号单独降一档，免得和另外两个键不协调。
+        self.btn_more = self._btn(self.head, '▲', self.toggle_more, padx=9, pady=0, bd=0,
+                                  font=(FONT_UI, 7))
         self.btn_more.pack(side='right', padx=2)
         self.head.bind('<Button-1>', self._drag_start)
         self.head.bind('<B1-Motion>', self._drag_move)
@@ -2155,7 +2156,7 @@ class MonitorApp:
         if self._more:                       # 默认收起：展开区先不 pack
             self._pack_more()
 
-    def _redraw_scale(self, flash: bool = False):
+    def _redraw_scale(self):
         """重画刻度表（换轴 / 换条都走这里）。"""
         if self._prom_state is None:
             return
@@ -2166,13 +2167,13 @@ class MonitorApp:
         # —— 暂停 / 待命 / 费用条停住那些拍帧号压根不动，重画的都是同一张图。
         # 轴用「逐条内容」当指纹（Cue 是普通 dataclass，不可哈希）：几十条轴做一次
         # 元组比较只花几十微秒，比重画的 6 ms 便宜两个数量级。
-        key = (float(frame_f), int(done), bool(flash),
+        key = (float(frame_f), int(done),
                id(self.scale_geom),
                tuple((c.frame, c.text) for c in cues))
         if key == self._scale_key:
             return
         self._scale_key = key
-        self._draw_scale(build_scale(frame_f, cues, done, self.scale_geom), flash)
+        self._draw_scale(build_scale(frame_f, cues, done, self.scale_geom))
 
     def _set_calib_mode(self, on: bool) -> None:
         """进出「微调 ROI」状态：进去就把屏幕上的 ROI 框亮出来，窗口一关就还原。
@@ -3534,7 +3535,7 @@ class MonitorApp:
         cv.create_text(g.width / 2, g.height / 2, text=text, width=g.width - 30,
                        font=(FONT_UI, 10), fill=self.scale_theme.faint)
 
-    def _draw_scale(self, lay, flash=False):
+    def _draw_scale(self, lay):
         """把一张 Layout 贴到 Canvas 上：整张图用 PIL 画好，只留**一个**图元。
 
         为什么不用 Canvas 的基本图元一格格画（刻度线 / 数字 / 标签 / 高亮约 95 个）：
@@ -3550,7 +3551,7 @@ class MonitorApp:
         「预览图」就是这里真正画出来的东西。
         """
         self._scale_photo = ImageTk.PhotoImage(
-            render_scale(lay, self.scale_theme, flash=flash))
+            render_scale(lay, self.scale_theme))
         cv = self.cv_scale
         if self._scale_item is None:
             cv.delete('all')
@@ -3564,15 +3565,11 @@ class MonitorApp:
         tl = self.prompter.timeline
         self.lb_prom_title.configure(text=self._prom_title(p.done, p.total))
 
-        if p.newly:
-            self._prom_flash_until = time.time() + 1.4
-        flash = time.time() < self._prom_flash_until
-
         # 刻度用带小数的帧号：满费走挂钟时那才是精确值，刻度也能一格一格地滑，而不是
         # 整帧整帧地跳。轴逻辑那边照旧用整数（和离线 CSV 里的绝对帧号是同一个）。
         frame_f = res.elapsed_f if res.mode.startswith('clock') else float(res.elapsed)
         self._prom_state = (frame_f, tl.cues, p.done)
-        self._redraw_scale(flash)
+        self._redraw_scale()
 
         # （「下一条 … 还差 N 帧（≈ x 秒）」那一行 2026-10-11 按用户要求删了 ——
         #   「状态描述全部删掉」。这点信息刻度表上本来就画着：指针下面紧挨着的那条

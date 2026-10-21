@@ -69,10 +69,10 @@ def main():
           g.pointer_y < a[1198].tick_y < g.pointer_y + 30.0,
           'pointer=%.1f next=%.1f' % (g.pointer_y, a[1198].tick_y))
 
-    print('2) 状态划分：done 之前是 past，第 done 条是 next，之后是 future')
+    print('2) 状态划分：之前是 past，第 done 条是 next，之后是 future')
     past = [m.cue.text for m in lay(1186.2).marks if m.state == 'past']
     check('1186.2 时只有 1168 是 past', past == ['部署 银灰'], str(past))
-    check('1198 是 next', a[1198].state == 'next')
+    check('1186.2 时 1198 是 next', a[1198].state == 'next')
     check('1210 / 1252 是 future',
           a[1210].state == 'future' and a[1252].state == 'future')
 
@@ -81,8 +81,21 @@ def main():
     nb = [m.cue.text for m in lay(1198.0).marks if m.state == 'next']
     check('到帧前 next = 部署 山', na == ['部署 山'], str(na))
     check('到帧后 next = 技能 史尔特尔', nb == ['技能 史尔特尔'], str(nb))
-    check('到帧后 部署 山 变 past',
-          any(m.cue.text == '部署 山' and m.state == 'past' for m in lay(1198.0).marks))
+
+    def state_of(frame, text):
+        return [m.state for m in lay(frame).marks if m.cue.text == text][0]
+
+    def mark_of(frame, text):
+        return [m for m in lay(frame).marks if m.cue.text == text][0]
+
+    check('执行前 3 帧：部署 山 保持 next + active（白色预告）',
+          all(mark_of(f, '部署 山').state == 'next' and mark_of(f, '部署 山').active
+              for f in (1195.0, 1196.0, 1197.0)))
+    check('离执行还有 3.1 帧：还是普通灰色 next',
+          mark_of(1194.9, '部署 山').state == 'next'
+          and not mark_of(1194.9, '部署 山').active)
+    check('到帧执行后：部署 山 变回普通 past',
+          state_of(1198.0, '部署 山') == 'past')
 
     print('4) 向上滚：frame 变大，同一个轴点往上走')
     def y_at(frame, text):
@@ -185,8 +198,24 @@ def main():
     bg = scale_render.Theme().bg
     check('确实画了东西（不全是底色）',
           any(px != bg for px in img.getdata()))
-    check('flash 会改画面（到帧瞬间反色）',
-          list(img.getdata()) != list(scale_render.render(l11, flash=True).getdata()))
+    l_active = lay(1197.0)
+    img_active = scale_render.render(l_active)
+    th = scale_render.Theme()
+    cur = [m for m in l_active.marks if m.cue.frame == 1198][0]
+    l_next = lay(1190.0)
+    nxt = [m for m in l_next.marks if m.cue.frame == 1198][0]
+    sample_x = int(l_active.geom.ruler_w + 5)
+
+    def theme_rgb(color):
+        return tuple(int(color[i:i + 2], 16) for i in (1, 3, 5))
+
+    check('操作执行前 3 帧：整行白色高亮',
+          img_active.getpixel((sample_x, int(cur.label_y))) == theme_rgb(th.accent),
+          str(img_active.getpixel((sample_x, int(cur.label_y)))))
+    check('下一条：整行灰色高亮（不是白色）',
+          scale_render.render(l_next).getpixel((sample_x, int(nxt.label_y))) ==
+          theme_rgb(th.next_fill),
+          str(scale_render.render(l_next).getpixel((sample_x, int(nxt.label_y)))))
 
     # 把 render 里每一次 text() 都记下来：PIL 不像 Tk 会自动换字体，汉字喂给
     # 只含拉丁字母的 Bahnschrift 会画成空豆腐块（界面上「现在」就中过这一枪）。
@@ -200,7 +229,7 @@ def main():
 
     ImageDraw.ImageDraw.text = spy
     try:
-        scale_render.render(l11, flash=True)
+        scale_render.render(l11)
     finally:
         ImageDraw.ImageDraw.text = orig_text
 

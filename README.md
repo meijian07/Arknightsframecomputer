@@ -1,53 +1,135 @@
-# 明日方舟 全局逻辑帧计数器（Arknights Frame Counter）
+<div align="center">
 
-把游戏里「现在是第几个逻辑帧」**实时读出来**，并配一个随帧数滚动的打轴提词器。
+# 明日方舟全局逻辑帧计数器
 
-明日方舟用**逻辑帧**当时钟：1 倍速下 30 逻辑帧 = 1 秒（33.33ms 一帧）。帧设置里的
-60 / 120 帧只影响画面，不影响逻辑帧。这个程序不去注入游戏、也不读内存，只用抓屏
-读画面里的三个 UI 来数帧：
+一个基于画面识别工作的明日方舟全局帧数计数与打轴工具。
 
-| 画面里的东西 | 用来干什么 |
+不读取游戏内存，不修改游戏文件，只截取游戏窗口里的费用条和右上角 UI，实时显示当前逻辑帧。
+
+[![Platform: Windows](https://img.shields.io/badge/Platform-Windows-blue.svg)](https://www.microsoft.com/windows)
+[![Python: 3.9+](https://img.shields.io/badge/Python-3.9%2B-3776AB.svg)](https://www.python.org/)
+[![GitHub Release](https://img.shields.io/github/v/release/meijian07/arknights-computer-)](https://github.com/meijian07/arknights-computer-/releases)
+[![GitHub Downloads](https://img.shields.io/github/downloads/meijian07/arknights-computer-/total)](https://github.com/meijian07/arknights-computer-/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+</div>
+
+## 目录
+
+- [下载及启动](#下载及启动)
+- [主要功能](#主要功能)
+- [使用说明](#使用说明)
+- [使用前注意](#使用前注意)
+- [精度与已知限制](#精度与已知限制)
+- [开发与自检](#开发与自检)
+- [项目结构](#项目结构)
+- [项目逻辑](#项目逻辑)
+- [声明](#声明)
+- [鸣谢](#鸣谢)
+
+## 下载及启动
+
+1. 打开 [GitHub Releases](https://github.com/meijian07/arknights-computer-/releases/latest) 下载最新的 Windows 压缩包。
+2. 解压后双击 `ArknightsFrameCounter.exe`，不需要安装。
+3. 先进入游戏关卡，让画面里出现费用条、暂停键和倍速键。
+4. 在面板上选择 `PC端` 或 `窗口` 模式。
+5. 完成校准后点击「开始」。
+
+实时计数使用 Windows 抓屏，不需要 ffmpeg；只有离线录像分析才需要 ffmpeg。
+
+## 主要功能
+
+**全局逻辑帧计数。** 程序通过费用条的像素增长计算当前逻辑帧，费用条满时改用挂钟继续计数，并用暂停键、倍速键和 HUD 判断游戏状态。支持 100% 正常回费、75% 一级减费、50% 二级减费和 25% 三级减费，也支持自定义百分比。
+
+**多种输入源。** 既能直接读取 PC 端游戏窗口，也能读取播放器、模拟器或其他可见窗口中的游戏画面，方便分析录像和不同窗口环境。
+
+**打轴器。** 可以导入或创建 Markdown 轴文件，在计数器到达对应帧号时显示操作提示，并根据当前帧自动滚动提词器。
+
+### 回费效率对照
+
+| 显示 | 内部含义 |
 | --- | --- |
-| **费用条**（里面一段段像素在长） | 条在动的时候，按像素涨了多少反推过了几帧 |
-| **暂停键**（右上角的 ▶ / ❚❚） | 判断游戏是暂停还是运行 |
-| **倍速键**（右上角的 1X / 2X / 》》》） | 1 / 2 倍速，以及子弹时间（`》》》`，恒 6 帧/秒） |
+| `100% 正常回费` | 30 帧 / 费 |
+| `75% 一级减费` | 40 帧 / 费 |
+| `50% 二级减费` | 60 帧 / 费 |
+| `25% 三级减费` | 120 帧 / 费 |
 
-费用条停了（满费）之后没有像素可量，这时改走 UI + 挂钟通道继续数 —— 这就是
-「费用条动的时候看费用条，不动的时候看 UI」。
+## 使用说明
 
-## 下载
+### 主面板
 
-Windows 免安装版放在 **GitHub Releases**，仓库源码里不再提交压缩包：
+| 按键 | 说明 |
+| --- | --- |
+| 开始 / 暂停 / 继续 | 控制采样和计数 |
+| 清零 | 停止计数并把帧号、时间归零 |
+| 校准：PC端 / 窗口 | 切换输入来源 |
+| 手动校准 | 调整费用条、暂停键、倍速键的位置与大小 |
+| ▲ / ▾ | 展开或收起打轴器 |
 
-**https://github.com/meijian07/arknights-computer-/releases/latest**
+程序不注册键盘快捷键，避免和游戏内按键冲突。
 
-下载 `ArknightsFrameCounter-v*-win64.zip`，解压后双击 `ArknightsFrameCounter.exe`。
-推送 `v*` 标签时，GitHub Actions 会自动打包并把 zip 上传到对应 Release。
+### 两种输入模式
 
-## 现在能做什么
+- **PC 端**：直接读取游戏窗口。程序会根据客户区尺寸和游戏 UI 缩放推算 ROI。
+- **窗口**：读取任意可见窗口，例如播放器里的录屏。画面可能被缩放，因此通常需要手动校准。
 
-- **全局帧数计数**：读游戏窗口（PC 端）实时数帧，绝对帧号 + 时间，可清零
-- **满费锚点**：每次费用条满（MAX）把累计帧号对齐到整数个回费周期，抑制长时间累计漂移
-- **回费周期计数**：记录条满 -> 条空次数 n；面板的「本费余量 x」按上一个条空位置算，条空时归零。只有全程同速（正费或负费）的周期才把帧号钉回整数周期；正费中途切负费的混合周期按实际长度记，不硬掰成 30
-- **打轴器（提词器）**：导入一份轴文件，走到对应帧号时滚动 + 放大显示该干什么
-- **窗口模式**：不认游戏也行 —— 把一段录屏用播放器打开、置顶，对播放器窗口校准后照样计数
-- **手动校准**：费用条 / 暂停键 / 倍速键三个 ROI 都能手动框选，带取景器局部放大 + 微调
-- **回费效率档位**：按百分比选，`100%`（正常）、`50%`（战前减 50%）、`25%`（减 75%），也能自定义百分比
-- **局内负费**：费用条上出现减号时自动按一半速度累计（一直在判，不用配）
-- **子弹时间**：认倍速键上的三个三角，恒 6 帧/秒
+切换模式会自动清零。窗口模式会尽量把目标窗口保持置顶，避免被其他窗口遮挡。
 
-## 还没做的 / 已知限制
+### 手动校准
 
-- 回费效率**要手选**，不自动认（认错档会让绝对帧号整段漂移）
-- 减费档位下**开头几帧（< 5 帧）不计**，宁缺勿错
-- 第 15 章某些敌方单位会让费用条**提前停止**涨（不是满费），目前这条还没处理
-- 轴文件里的帧号按 1 倍速逻辑帧算，换倍速时不会自动折算
+1. 点击「手动校准」打开取景器。
+2. 先选择「费用条」，让框左右两端贴住条槽，高度只需覆盖费用条。
+3. 再选择「暂停键」和「倍速键」，让虚影覆盖右上角按钮。
+4. 在右侧放大图中检查边缘，必要时用下方按钮按 1 像素微调。
+5. 点击「用这些框」应用校准。
 
-## 快速开始
+手动框是红色实线，自动推算框是白色虚线。费用条对准后，负号扫描框会根据费用条位置自动推算，不需要单独框选。
 
-### A. 源码跑（开发 / 想改代码）
+### 回费效率
 
-需要 64 位 Windows + 带 tkinter 的 Python 3.9 以上。
+在面板的「回费效率」下拉框中选择百分比。切换到非预设百分比时，可以输入自定义数值并点击「应用」。自定义输入支持 `50` 或 `50%` 两种写法。
+
+### 打轴器
+
+轴文件是一份 Markdown 文本，例如：
+
+```text
+## 120 帧
+部署 银灰 在 A2
+
+- 350 开银灰技能
+- 1:05 开能天使技能
+```
+
+帧号写在每行最前面，也可以使用 `1:23` 这样的时间写法。展开面板后点击「导入轴…」加载文件，计数器走到对应帧时会自动滚动提词器。
+
+## 使用前注意
+
+- 游戏窗口必须保持可见，费用条和右上角按钮不能被其他窗口遮住。
+- 修改游戏内 UI 缩放、窗口大小或分辨率后，建议重新校准。
+- 窗口模式读取的是屏幕上的可见画面，播放器暂停、最小化或被遮挡时无法正确计数。
+- 游戏画面设置为 60 / 120 帧不会改变逻辑帧率，明日方舟的逻辑时钟固定为 30 FPS。
+- 鼠标划过费用条影响计数，操作时尽量不要划过费用条。
+- 萨卡兹术士结晶会锁定费用条，目前尚未单独处理这种状态。
+
+
+## 精度与已知限制
+
+- 正常回费下，一个费用周期按 30 逻辑帧计算。
+- 长期运行时使用费用条满锚点修正累计误差，目标是把误差控制在单个周期附近。
+- 25% / 50% 等减费环境开头几帧难以计数，会从3或4帧开始。
+- 回费效率需要手动选择。
+- 暂停键、倍速键和费用条被裁切、强压缩或 UI 缩放异常时，识别可能不稳定。
+- 局内负费依靠费用数字左侧的减号框判断。
+- 打轴器的帧号按 1 倍速逻辑帧计算，倍速只改变走到该帧的速度。
+- 目前主要面向 Windows 10 / 11 的 PC 端。
+- 模拟器可能因帧率不稳定、掉帧导致计数不准确，建议使用 PC 端。
+
+## 开发与自检
+
+### 环境
+
+需要 64 位 Windows 和带 tkinter 的 Python 3.9 以上。
 
 ```powershell
 python -m venv .venv
@@ -55,116 +137,120 @@ python -m venv .venv
 .venv\Scripts\python.exe run_monitor.py
 ```
 
-### B. 打包成 exe（发给别人）
+### 项目结构
+
+```text
+帧数计算器/
+├─ run_monitor.py                 # 图形界面入口
+├─ run_reader.py                  # 离线读录像入口（CLI）
+├─ build_app.ps1                  # 本地打包脚本
+├─ akframe.spec                   # PyInstaller 打包配置
+├─ requirements.txt               # Python 运行依赖
+├─ LICENSE
+├─ README.md
+│
+├─ src/
+│  └─ akframe/
+│     ├─ ui.py                    # 主面板、打轴器、二级窗口、校准取景器
+│     ├─ live.py                  # PC 端实时采样线程
+│     ├─ window.py                # 读取任意窗口（播放器 / 录屏）
+│     ├─ capture.py               # 输入源抽象与抓屏接口
+│     ├─ win32.py                 # Windows 抓屏、置顶、窗口 API
+│     ├─ geometry.py              # ROI 几何、分辨率表、布局与校准偏移
+│     ├─ features.py              # 费用条、暂停键、倍速键、减号特征
+│     ├─ state.py                 # 逻辑帧状态机与锚点修正
+│     ├─ fp24.py                  # 定点数与费用相位模型
+│     ├─ cost_rate.py             # 回费效率识别
+│     ├─ timeline.py              # 轴文件解析
+│     ├─ scale.py                 # 刻度表布局
+│     ├─ scale_render.py          # 刻度表绘制
+│     ├─ boxpick.py               # 手动框选与放大镜
+│     ├─ calib.py                 # 校准与自动对齐
+│     ├─ align.py                 # 费用条对齐工具
+│     ├─ video.py                 # 录像抽帧与缓存
+│     ├─ demo.py / synthesis.py   # 演示与合成测试数据
+│     ├─ settings.py              # 回费效率、负费与设置文件
+│     └─ resolutions_measured.json # 实测分辨率与 ROI 校准表
+│
+├─ templates/                     # 1X / 2X / 子弹时间模板
+├─ maps/                          # 示例轴文件
+├─ tools/                         # 自检、校准、预览与诊断脚本
+│  ├─ check_*.py
+│  ├─ calibrate.py
+│  └─ fixtures/
+├─ docs/                          # 开发记录与实测图片
+│  ├─ 费用条读取逻辑.md
+│  └─ images/
+└─ .github/
+   └─ workflows/
+      └─ release.yml              # v* 标签自动打包并发布 Release
+```
+
+### 项目逻辑
+
+```text
+每一拍采样
+└─ 计数器判断
+   ├─ 手动暂停计数？
+   │  └─ 是 → 本拍不增加帧数
+   │
+   ├─ 当前在关卡内吗？
+   │  ├─ 否 → 不计数
+   │  └─ 是
+   │     ├─ 游戏暂停？
+   │     │  └─ 是 → 本拍不增加帧数
+   │     │
+   │     ├─ 费用条未满、正常推进
+   │     │  ├─ 看费用条像素增长
+   │     │  ├─ 像素宽度 → 费用相位 → 逻辑帧数
+   │     │  ├─ 1X / 2X 不影响这条通道（像素天然反映逻辑时间）
+   │     │  ├─ 有负费减号 → 每逻辑帧只累计一半
+   │     │  └─ 跨过下一次回费边界 → 周期锚点校正
+   │     │
+   │     ├─ 费用条满费（MAX / MAX_FADE）
+   │     │  ├─ 挂钟直接计数
+   │     │  ├─ 1X / 2X：30 × 倍速 = 每秒逻辑帧
+   │     │  ├─ 子弹时间：固定每秒 6 帧
+   │     │  └─ 出现 MAX 上升沿 → 满费锚点对齐全周期
+   │     │
+   │     └─ 费用条为空或读不到
+   │        ├─ 刚跨过回费边界 → 新周期第 1 帧 +1
+   │        └─ 其他情况 → 冻结
+   │
+   └─ 汇总本拍增量
+      ├─ 绝对帧号 += 本拍逻辑帧
+      ├─ 更新时间、刻度表和打轴器
+      └─ 等待下一拍采样
+```
+
+核心规则只有一条：**费用条未满时看费用条，费用条满时直接按挂钟计数**。暂停键和 HUD 负责判断当前是不是在关卡内、游戏有没有暂停，避免在主菜单或其他界面错误计数。
+
+### 自检
+
+```powershell
+$env:PYTHONIOENCODING='utf-8'
+.venv\Scripts\python.exe tools\check_boxpick.py
+.venv\Scripts\python.exe tools\check_ui_keys.py
+.venv\Scripts\python.exe tools\check_ui_state.py
+.venv\Scripts\python.exe tools\check_ui_window.py
+```
+
+### 打包
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File build_app.ps1
 ```
 
-产物在 `dist\ArknightsFrameCounter\`，整个目录压成 zip 发出去，对方解压双击 exe 即可。
-实时计数走 Windows 抓屏，**不需要 ffmpeg**（只有离线读录像才要）。
+产物位于 `dist\ArknightsFrameCounter\`。正式发布包通过 GitHub Releases 分发，不提交进源码仓库。
 
-### 用法（图形界面）
+## 声明
 
-1. 先开游戏**进关卡**（画面里要能看到费用条），再启动程序 —— 它会自己找窗口并自动校准
-2. 面板上点 **开始**（同一个键再点 = 暂停，再点 = 继续）；**清零** 会把帧号和相位一起归零
-3. 标题栏 **▸ / ▾** 是展开 / 收起（向上展开，宽度不变），展开后有打轴器、回费效率、诊断行
-4. **校准：PC端 ▾** 下拉选「读哪儿」：
-   - **PC端（实时游戏窗口）** = 默认，读游戏窗口本身
-   - **窗口（读一个窗口…）** = 读任意窗口（录屏播放器 / 别人的录像）—— 会弹出可见窗口
-     列表，选中哪个就读它；画面被缩放过，所以校准这一步更重要（配合「手动校准」框条槽）
-5. **手动校准** 打开取景器：左边原画面上拖框（像截图工具），右边是框内放大图，可以滚轮
-   缩放、拖拽移动、用方向键按钮按 1 像素微调；暂停键 / 倍速键都对着虚影对齐
-6. **×** 退出，**−** 最小化（任务栏里能点回来）
+- 本项目使用 [MIT License](LICENSE) 开源。
+- 本工具不修改游戏文件、不读取游戏内存。
 
-**没有任何键盘快捷键** —— 面板是常驻在游戏旁边的，空格之类的键会被游戏也收到，两边打架。
+## 鸣谢
 
-### 命令行（可选）
-
-```powershell
-.venv\Scripts\python.exe run_monitor.py --list                 # 先看看有哪些可见窗口
-.venv\Scripts\python.exe run_monitor.py --cost-rate 60         # 减费环境：一费 60 帧
-.venv\Scripts\python.exe run_monitor.py --csv out\run.csv --duration 30
-.venv\Scripts\python.exe run_monitor.py --demo-axis            # 演示模式：不开游戏也能看刻度表
-.venv\Scripts\python.exe run_reader.py "录像.mp4" --cost-rate 30   # 离线分析（需要 ffmpeg）
-```
-
-`run_reader.py` 需要 ffmpeg：把它放到程序旁边、或设 `AKFRAME_FFMPEG=<完整路径>`、
-或加进 PATH 三者任选。
-
-## 打轴器（提词器）
-
-轴文件就是一份 md（样例见 `maps/example.md`），格式故意写得很宽松：
-
-```
-## 120 帧
-部署 银灰 在 A2
-先下奶，再下输出
-- 350 开银灰技能
-- 1:05 开能天使技能
-```
-
-- 帧号写在最前面：`120 部署银灰`、`120帧 部署银灰`、`120f 部署银灰` 都认
-- `## 120 帧` 这种小标题也开一条轴，**下面接着的几行就是它的说明**（直到下一条轴 / 下一个标题）
-- 时间也能当帧号：`1:23 部署银灰`（按 1 倍速算，30 帧 = 1 秒），小数也认
-- 列表符号、粗体、表格竖线这些 markdown 装饰会自动剥掉
-- `<!-- ... -->` 和 `//` 开头的行是注释，整行跳过；认不出帧号的行会忽略并报一条 warning
-
-帧号的含义是 **1 倍速下的逻辑帧**，和面板上显示的数字是同一个东西（2 倍速 / 子弹时间只
-改变它多快被走到，数字本身不变）。
-
-展开区点 **导入轴…** 打开轴窗口（能拖 md 文件进去，也能直接写再点「应用到提词器」）；
-**重载** 是按当前文件重新读一遍。计数器走到对应帧号时，刻度表上那条会滚到红色指针位置。
-
-## 自检
-
-`tools/` 下每个 `check_*.py` 都是自包含的，直接跑：
-
-```powershell
-$env:PYTHONPATH='src'
-.venv\Scripts\python.exe tools\check_ui_keys.py     # 界面交互（三态按钮、缓存、取景器）
-.venv\Scripts\python.exe tools\check_state_synth.py # 状态机合成用例
-.venv\Scripts\python.exe tools\check_start_anchor.py # 点「开始」时的起锚相位
-.venv\Scripts\python.exe tools\check_ui_window.py   # 读窗口链路
-```
-
-其中 `check_bar_linearity.py` / `check_timeline.py` 要传帧序列参数、`check_live.py` 要一份
-本地取样日志 `out/fake_log.txt`，缺件时它们会以退出码 2 / 1 提示，不会假绿。
-
-`out/cache/` 是抽流缓存（把录像解码成 ROI 灰度流的中间产物），跑一轮自检能长到 1GB 上下，
-攒多了就清一次 —— 纯缓存，删了不丢数据，下次读录像自动重算：
-
-```powershell
-.venv\Scripts\python.exe tools\clean_cache.py          # 先看会删多少
-.venv\Scripts\python.exe tools\clean_cache.py --yes    # 真删
-```
-
-## 目录结构
-
-```
-run_monitor.py          实时监视入口（图形界面）
-run_reader.py           离线读录像入口（CLI）
-build_app.ps1           一键打包 exe
-akframe.spec            PyInstaller 打包配置
-src/akframe/            全部代码
-  ui.py                 面板 / 打轴器 / 取景器（界面那一层）
-  state.py              状态机：从「条 + 暂停键 + 倍速键」推帧号（核心）
-  live.py               实时采样线程
-  window.py             读任意窗口（含录屏播放器）那条链路
-  video.py              录像 / 缓存抽流
-  features.py           像素 -> 特征（费用条填充像素、按钮字形）
-  geometry.py           ROI 几何 + 分辨率实测表
-  cost_rate.py          回费效率识别（可选）
-  timeline.py           轴文件解析 + 提词器
-  scale.py / scale_render.py  刻度表布局与绘制
-  win32.py              Windows API（抓屏 / 置顶 / 鼠标穿透）
-templates/              倍速数字模板（.npy）
-maps/example.md         轴文件示例
-tools/                  自检脚本 + 校准 / 出图小工具
-docs/费用条读取逻辑.md    开发日志：每一步为什么这么改、当时量到的数
-```
-
-## 文档
-
-`docs/费用条读取逻辑.md` 是这个项目的「账本」：界面每次改动的原因、实测数据、被否掉的
-方案都记在里面（很长，按小节查）。里面的 `out/...` 图片是本地出图的证据，图不跟着仓库走。
+- [ArknightsCostBarRuler](https://github.com/ZeroAd-06/ArknightsCostBarRuler)：校准思路的重要参考。
+- [MaaAssistantArknights](https://github.com/MaaAssistantArknights/MaaAssistantArknights)：图像识别思路参考。
+- [arknights-frame-assistant](https://github.com/CloudTracey/arknights-frame-assistant)：不可或缺的测试工具。
+- DSv4f，她构建了本项目的主要代码，及所有参与测试、提供录像和反馈的人。
