@@ -894,7 +894,7 @@ def t_rate_switch_clears(app):
                                  app.lb_frames.cget('text'),
                                  app.btn_start.cget('text')))
     check('切档位刷成新档 + 底下说「应用完成」',
-          app.rate_var.get().startswith('120')
+          app.rate_var.get() == '25%'
           and app.lb_note.cget('text') == '应用完成',
           '%r / %r' % (app.rate_var.get(), app.lb_note.cget('text')))
     app.apply_cost_rate(30.0)          # 复位成默认档，别影响后面几组
@@ -2014,6 +2014,9 @@ def t_panel_skin(app):
           [(k, v.cget('bd'), v.cget('pady')) for k, v in cb.items()])
 
     # 追加：回费效率那一行：「自定义」那一截按需铺，且不动面板尺寸
+    check('回费效率预设档位显示为百分比',
+          list(app._rate_labels) == ['100%', '77%', '67%', '50%', '33%', '25%'],
+          list(app._rate_labels))
     row = app.fr_rate_custom.master
     check('回费行右边「自定义」那一截默认收着',
           app.fr_rate_custom.winfo_manager() == '' and app._rate_custom_open is False,
@@ -2025,7 +2028,10 @@ def t_panel_skin(app):
              for g2 in app.fr_rate_custom.pack_slaves()]
     check('选「自定义」才铺出输入框 / 应用',
           app.fr_rate_custom.winfo_manager() == 'pack'
-          and texts == ['自定义', '', '应用'], texts)
+          and texts == ['自定义 %', '', '应用'], texts)
+    check('自定义百分比换算成一费帧数（50% -> 60 帧/费）',
+          abs(ui_mod._percent_to_frames(50.0) - 60.0) < 1e-9
+          and abs(ui_mod._rate_percent(120.0) - 25.0) < 1e-9)
     check('铺出来也不动面板尺寸（那一行行高是定死的）',
           root.winfo_height() == h0 and root.winfo_width() == w0,
           '%dx%d vs %dx%d' % (root.winfo_width(), root.winfo_height(), w0, h0))
@@ -2040,9 +2046,9 @@ def t_panel_skin(app):
                         row.winfo_width()))
     app.apply_cost_rate(60.0)
     root.update_idletasks()
-    check('切回预设档（60）就把那一截收起来',
+    check('切回预设档（50%）就把那一截收起来',
           app.fr_rate_custom.winfo_manager() == ''
-          and app.rate_var.get().startswith('60'), app.rate_var.get())
+          and app.rate_var.get() == '50%', app.rate_var.get())
     check('回费行的行高固定（RATE_ROW_H），不跟内容跑',
           row.winfo_height() == ui_mod.RATE_ROW_H, row.winfo_height())
     app._show_rate_custom(False)

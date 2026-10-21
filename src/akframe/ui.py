@@ -254,12 +254,34 @@ AUTO_RATE_LABEL = '自动识别中…'
 
 
 def _rate_label(frames: float) -> str:
-    """档位 -> 下拉框里显示的文字。落在已知档位上就显示那个档，否则显示数字。"""
+    """档位 -> 下拉框里显示的文字（回费效率百分比）。
+
+    内部仍然用「一费多少逻辑帧」，只在界面这一层换算：100% = 30 帧/费，
+    50% = 60 帧/费，25% = 120 帧/费。
+    """
     f = clamp_frames_per_cost(frames)
     for v, desc in COST_RATE_PRESETS:
         if abs(v - f) < 1e-9:
-            return '%.0f  %s' % (v, desc)
-    return '%.0f  自定义' % f
+            return desc
+    return '%s  自定义' % _rate_percent_text(f)
+
+
+def _rate_percent(frames: float) -> float:
+    """一费多少帧 -> 回费效率百分比（30 帧/费 = 100%）。"""
+    return LOGICAL_FPS * 100.0 / clamp_frames_per_cost(frames)
+
+
+def _rate_percent_text(frames: float) -> str:
+    """百分比文案：整数就不带小数，其余保留一位。"""
+    p = _rate_percent(frames)
+    if abs(p - round(p)) < 0.05:
+        return '%.0f%%' % round(p)
+    return '%.1f%%' % p
+
+
+def _percent_to_frames(percent: float) -> float:
+    """回费效率百分比 -> 一费多少帧（50% -> 60 帧/费）。"""
+    return clamp_frames_per_cost(LOGICAL_FPS * 100.0 / float(percent))
 
 
 def _is_preset_rate(frames: float) -> bool:
@@ -1945,7 +1967,7 @@ class MonitorApp:
         self.rate_var = tk.StringVar(value=_rate_label(self._current_rate()))
         self._rate_labels = {}
         for v, desc in COST_RATE_PRESETS:
-            self._rate_labels['%.0f  %s' % (v, desc)] = v
+            self._rate_labels[desc] = v
         items = list(self._rate_labels) + [RATE_CUSTOM_LABEL]
         self.rate_menu = tk.OptionMenu(rate_row, self.rate_var, *items,
                                        command=self._on_rate_pick)
@@ -1966,7 +1988,7 @@ class MonitorApp:
         # 一直写在外面，选择自定义再显示输入框」。收在一个子 Frame 里按需 pack / forget，
         # 见 _show_rate_custom —— 整行高度是定死的（RATE_ROW_H），铺不铺都不动面板尺寸。
         self.fr_rate_custom = tk.Frame(rate_row, bg=UI_BG)
-        self._label(self.fr_rate_custom, '自定义', 9, UI_DIM).pack(side='left')
+        self._label(self.fr_rate_custom, '自定义 %', 9, UI_DIM).pack(side='left')
         # width=5 而不是 4：三个数字（120）放得下还剩一点余量，整行也还落进基准宽 470。
         # 1px 描边（highlightthickness）是 2026-10-13 加的：输入框的底 (SUNKEN) 和面板底
         # 只差 1.1:1，不描边看不出那是一个可以点进去的槽。
@@ -2607,15 +2629,17 @@ class MonitorApp:
             self.rate_var.set(want)
 
     def apply_rate_entry(self):
-        """「应用」按钮 / 输入框回车：把输入框里的数当成一费逻辑帧数切档。"""
+        """「应用」按钮：把输入框里的数当成**回费效率百分比**切档。"""
         text = self.en_rate.get().strip()
+        if text.endswith('%'):
+            text = text[:-1].strip()
         try:
-            v = float(text)
+            percent = float(text)
         except ValueError:
             return                      # 填的不是数：不切档（底部那行只留七个词）
-        if not (v > 0):
+        if not (percent > 0):
             return                      # 0 / 负数同样不切档
-        self.apply_cost_rate(v)
+        self.apply_cost_rate(_percent_to_frames(percent))
 
     def apply_cost_rate(self, value):
         """切到某个回费速率：立刻生效 + **清零** + 写回设置文件。
@@ -2629,8 +2653,8 @@ class MonitorApp:
         v = clamp_frames_per_cost(value)
         self.monitor.set_cost_rate(v)
         self.rate_var.set(_rate_label(v))
-        # 切到已知档位就把那一截收起来；要是填的数不在档位上（下拉自己会
-        # 显示成「39  自定义」）就留着，方便接着微调。
+        # 切到已知档位就把那一截收起来；要是填的百分比不在预设档位上（下拉自己会
+        # 显示成「76.9%  自定义」）就留着，方便接着微调。
         self._show_rate_custom(not _is_preset_rate(v))
         self.en_rate.delete(0, 'end')
         try:
@@ -3822,10 +3846,10 @@ class MonitorApp:
             self.rate_var.set(_rate_label(per))
             self._show_rate_custom(not _is_preset_rate(per))
         if counter is not None and abs(per - LOGICAL_FPS) > 1e-9:
-            parts.append('回费速率 %.0f 帧/费（%s）'
-                         % (per, '自动认定' if auto_ok else '设置档'))
+            parts.append('回费效率 %s（%s）'
+                         % (_rate_percent_text(per), '自动认定' if auto_ok else '设置档'))
         elif auto_ok:
-            parts.append('回费速率 %.0f 帧/费（自动认定）' % est.frames_per_cost)
+            parts.append('回费效率 %s（自动认定）' % _rate_percent_text(est.frames_per_cost))
         n_cyc, med, lo, hi = counter.cycle_stats() if counter is not None else (0, 0, 0, 0)
         if n_cyc:
             parts.append('一费 %d 帧（中位）' % med)
