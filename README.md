@@ -71,14 +71,14 @@
 ### 两种输入模式
 
 - **PC 端**：直接读取游戏窗口。程序会根据客户区尺寸和游戏 UI 缩放推算 ROI。
-- **窗口**：读取任意可见窗口，例如播放器里的录屏。画面可能被缩放，因此通常需要手动校准。
+- **窗口**：读取任意可见窗口，例如模拟器游戏画面和播放器里的录屏。画面可能被缩放和截取，因此通常需要手动校准。
 
 切换模式会自动清零。窗口模式会尽量把目标窗口保持置顶，避免被其他窗口遮挡。
 
 ### 手动校准
 
 1. 点击「手动校准」打开取景器。
-2. 先选择「费用条」，让框左右两端贴住条槽，高度只需覆盖费用条。
+2. 先选择「费用条」，让框左右两端贴住条槽，高度贴合费用条。
 3. 再选择「暂停键」和「倍速键」，让虚影覆盖右上角按钮。
 4. 在右侧放大图中检查边缘，必要时用下方按钮按 1 像素微调。
 5. 点击「用这些框」应用校准。
@@ -253,4 +253,4 @@ powershell -ExecutionPolicy Bypass -File build_app.ps1
 - [ArknightsCostBarRuler](https://github.com/ZeroAd-06/ArknightsCostBarRuler)：校准思路的重要参考。
 - [MaaAssistantArknights](https://github.com/MaaAssistantArknights/MaaAssistantArknights)：图像识别思路参考。
 - [arknights-frame-assistant](https://github.com/CloudTracey/arknights-frame-assistant)：不可或缺的测试工具。
-- DSv4f，她构建了本项目的主要代码，及所有参与测试、提供录像和反馈的人。
+- DSv4f，她构建了本项目的主要代码，及所有参与测试和提供反馈的人。
