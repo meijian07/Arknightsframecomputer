@@ -18,7 +18,7 @@ Tab / 方向键 / Shift+方向键 / S / R / K。
     开始 / 暂停 / 继续 = 主按钮三态        暂停计数        清零 + 停
     手动校准（二级窗口里：目标 / ←↑↓→ / 步长 / ROI 框 / 保存校准 / 恢复默认）
     打轴器（导入轴… / 重载）
-    展开 / 收起 = 标题栏那个 ▲ / ▾        重新校准 = 「校准」那行的键        退出 = 右上角 ×
+    展开 / 收起 = 标题栏那个 ▴ / ▾        重新校准 = 「校准」那行的键        退出 = 右上角 ×
 
 回费效率（减费 tag）：默认 30 帧/费（1 秒 1 费）。点了「回费速度 -50% / -75%」的 tag
 时，在**收起态**面板「回费效率」那一行选 60 / 120，或直接填数字后点「应用」——
@@ -61,6 +61,7 @@ from .geometry import (BAR_BAND_BOTTOM, BAR_BAND_TOP, PAUSE_SHAPE_BAND, Rect,
                        SPEED_DIGIT_BAND, SPEED_DIGIT_COLS, apply_deltas,
                        layout_for, layout_from_bar_box, load_calibration)
 from .live import LiveMonitor
+from .paths import app_dir
 from .settings import (COST_RATE_PRESETS, DEFAULT_FRAMES_PER_COST,
                        clamp_frames_per_cost, parse_negative, save_cost_rate)
 from .scale import ScaleGeom, Theme, build as build_scale
@@ -1157,6 +1158,10 @@ class MonitorApp:
     # 470 是照看板批注从 560 收下来的：要「尽量和游戏里显示费用的
     # 那个框差不多大」。
     COLLAPSED_W = 470
+    # 右侧拖拽缩放的范围。320 是实测下限：大数字行要约 291px、控制行约 282px，
+    # 320 再留一点呼吸空间，帧号和「开始 / 暂停」都不会被裁掉。
+    MIN_PANEL_W = 320
+    MAX_PANEL_W = 640
 
     def __init__(self, monitor: LiveMonitor, *, calib_path: str = 'layout_calib.json',
                  settings_path: str = 'cost_rate.json', poll_ms: int = 8,
@@ -1227,6 +1232,7 @@ class MonitorApp:
         self.prompter = Teleprompter()
         self._timeline_path = None      # 当前轴来自哪个 md 文件；None = 来自面板输入框
         self._rate_custom_open = False  # 「自定义」那一截现在是铺着还是收着（见 53 节）
+        self._panel_w = self.COLLAPSED_W  # 用户拖右边缘后的当前面板宽度
         # 采样线程的存活看门狗（见 _tick_body）：盯 stats.ticks 这个心跳。
         self._last_ticks = -1
         self._stall_since = 0.0
@@ -1239,7 +1245,7 @@ class MonitorApp:
         # 离面板右缘只剩 42px 的那条「副产物」。改成 COLLAPSED_W - 20（两侧 padx 10）
         # 之后刻度区正好铺满 —— 不能再跟着 _refit 算出来的 w 走，那会自激
         # （w -> 画布 -> reqw -> w，实测顶到 609，见 _refit）。
-        self.scale_geom = ScaleGeom(width=self.COLLAPSED_W - 20, height=SCALE_HEIGHT,
+        self.scale_geom = ScaleGeom(width=self._panel_w - 20, height=SCALE_HEIGHT,
                                     ruler_w=84,
                                     px_per_frame=SCALE_HEIGHT / SCALE_SPAN_FRAMES)
         self.scale_theme = Theme()
@@ -1264,7 +1270,17 @@ class MonitorApp:
         # 两态尺寸缓存：key -> (宽, 高)。见 _refit 上面的说明。
         self._fit_cache = {}
         self.root = make_root()
-        self.root.title('明日方舟 全局帧数计数器')
+        self.root.title('AFC')
+        # 任务栏 / Alt+Tab 用 AFC 自己的图标；打包后从 exe 旁边的 assets 里取，
+        # 开发时从仓库根目录取。取不到就退回 Tk 默认图标，不影响功能。
+        try:
+            icon = os.path.join(app_dir(), 'assets', 'logo', 'afc', 'afc.ico')
+            if not os.path.exists(icon):
+                icon = os.path.join(getattr(sys, '_MEIPASS', ''), 'assets', 'logo', 'afc', 'afc.ico')
+            if os.path.exists(icon):
+                self.root.iconbitmap(default=icon)
+        except Exception:
+            pass
         self.root.configure(bg=UI_BG)
         # 去掉系统标题栏（2026-10-16 用户：「面板上方的『明日方舟 全局帧数计数器』那行
         # 白色的能不能删掉」）。窗内那一条 ▼ / − / × 本来就替代了它的三个键；拖动接在
@@ -1285,6 +1301,10 @@ class MonitorApp:
         self._more = False
         self._calib = False         # ROI 校准模式：进去才吃 Tab / 方向键 / S / R / K
         self._dragging = False      # 正在拖窗口（拖动期间 _tick_body 跳过重活）
+        self._resizing = False      # 正在拖右边缘改宽度（同样跳过重活）
+        self._panel_w = self.COLLAPSED_W
+        self._resize_at = None
+        self._resize_start_w = self.COLLAPSED_W
         # 手动校准的二级窗口 + 它自己的状态（见 open_calib_dialog）
         self._calib_win = None
         self.calib_step = 1         # 微调步长（px）
@@ -1307,7 +1327,7 @@ class MonitorApp:
         # 上一次 geometry 请求的位置（见 _sync_pos）：拿它和窗口**真实**位置比，
         # 差出来那一段就是「窗口被别人挪走了」的那一段位移。
         self._asked_pos = None
-        self.root.geometry('%dx%d+%d+%d' % (self.COLLAPSED_W, 150,
+        self.root.geometry('%dx%d+%d+%d' % (self._panel_w, 150,
                                             self._user_pos[0], self._user_pos[1]))
         self.root.protocol('WM_DELETE_WINDOW', self.quit)
 
@@ -1316,7 +1336,7 @@ class MonitorApp:
         # 需求夹一次：窄了右边按钮会被裁（换窗口 / 退出），矮了最下面几行会被裁
         # （回费速率 / 提示 / 帮助）。写死 724 的那版在 150% 缩放的屏幕上就是裁着的 ——
         # tk 的点数会跟着系统 DPI 放大，同样的字号在物理像素上要宽 1.5 倍。
-        self._win_w, self._win_h = self.COLLAPSED_W, 150
+        self._win_w, self._win_h = self._panel_w, 150
         self._refit()
         self._fit_at = 0.0
         # timeline_text 是直接把轴喂进面板输入框（演示模式用：轴不来自文件，
@@ -1388,7 +1408,7 @@ class MonitorApp:
         else:
             self.fr_more_top.pack_forget()
             self.fr_more.pack_forget()
-        self.btn_more.configure(text='▾' if self._more else '▲')
+        self.btn_more.configure(text='▾' if self._more else '▴')
         self._refit()
 
     def _pack_more(self):
@@ -1452,6 +1472,40 @@ class MonitorApp:
             return
         self._dragging = False
         self._refit()
+
+    def _resize_start(self, event):
+        self._resize_at = event.x_root
+        self._resize_start_w = self._win_w
+        self._resizing = True
+
+    def _resize_move(self, event):
+        if self._resize_at is None:
+            return
+        want = self._resize_start_w + (event.x_root - self._resize_at)
+        self._set_panel_width(want, live=True)
+
+    def _resize_end(self, event=None):
+        if not self._resizing:
+            return
+        self._resizing = False
+        self._resize_at = None
+        self._fit_cache.clear()
+        self._refit()
+
+    def _set_panel_width(self, width, live=False):
+        width = int(round(width))
+        width = max(self.MIN_PANEL_W, min(self.MAX_PANEL_W, width))
+        if width == self._panel_w:
+            return
+        self._panel_w = width
+        self._set_scale_width(width)
+        self._set_wraps(max(360, width - 30))
+        if live:
+            self._win_w = width
+            self._place(width, self._win_h)
+        else:
+            self._fit_cache.clear()
+            self._refit()
 
     @contextlib.contextmanager
     def _relayout(self):
@@ -1534,7 +1588,7 @@ class MonitorApp:
         现量，得用 _relayout 把中间那一拍遮掉）—— 用户看到的就是面板**整块消失**一瞬。
         实测：这一条修掉之后，展开 / 收起在任何时候都命中缓存。
         """
-        return (bool(self._more), self.COLLAPSED_W,
+        return (bool(self._more), self._panel_w,
                 self.fr_rate_custom.winfo_manager() != '')
 
     def _apply_wraps(self, w: int) -> None:
@@ -1543,10 +1597,21 @@ class MonitorApp:
         先按基准宽铺一次、再按量出来的宽铺一次：只铺后者的话，上一态留下的窄 wrap
         会让一行长提示把宽度顶开（_refit_now 上面那段注释踩过同样的坑）。
         """
-        base = self.COLLAPSED_W
+        base = self._panel_w
+        self._set_scale_width(base)
         self._set_wraps(max(360, base - 30))
         self._fit_preview_canvas(base)
         self._set_wraps(max(360, w - 30))
+
+    def _set_scale_width(self, win_w: int) -> None:
+        """刻度画布跟着面板宽度走；宽度来自用户拖拽的固定值，不跟着测量结果自激。"""
+        inner = max(220, int(win_w) - 20)
+        if self.scale_geom.width != inner:
+            self.scale_geom.width = inner
+            self._scale_key = None
+        cv = getattr(self, 'cv_scale', None)
+        if cv is not None and int(cv.cget('width')) != inner:
+            cv.configure(width=inner)
 
     def _refit_now(self):
         """按当前展开状态把窗口尺寸重新夹一次（收起 = 小的，展开 = 大的）。
@@ -1556,12 +1621,13 @@ class MonitorApp:
         基准，高度按**内容实际需要**算。
         """
         # 展开也是一样的宽度（只长高）—— 展开区里宽的东西都得先收进 base。
-        base = self.COLLAPSED_W
+        base = self._panel_w
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
         # 顺序很重要：**先**把会换行的那些行按基准宽度限住，再量内容要多宽。
         # 反过来的话，上一拍留下的宽 wraplength 会让一行长提示（「采样正常，这一拍
         # 没读到画面（未开始）」这种）把收起态从 470px 顶到 800px（实测踩过）。
         wrap = max(360, base - 30)
+        self._set_scale_width(base)
         self._set_wraps(wrap)
         try:
             self.root.update_idletasks()
@@ -1659,6 +1725,11 @@ class MonitorApp:
         y = min(max(8, y), max(8, bottom - h - off - 8))
         self.root.geometry('%dx%d+%d+%d' % (w, h, x, y))
         self._asked_pos = (x, y)
+        grip = getattr(self, 'resize_grip', None)
+        if grip is not None:
+            grip.place(x=max(0, int(w) - 6), y=HEAD_H, width=6,
+                       height=max(1, int(h) - HEAD_H))
+            grip.lift()
         self._keep_taskbar_button()
         # 圆角也顺手核一次（窗口级、跟尺寸无关的属性，不重设本来也不会掉 ——
         # 留着是给「换尺寸这一拍正好赶上重新映射」兜底）。
@@ -1904,12 +1975,11 @@ class MonitorApp:
         self.btn_close.pack(side='right', padx=(2, 9))
         self.btn_min = self._btn(self.head, '−', self._minimize, padx=10, pady=0, bd=0)
         self.btn_min.pack(side='right', padx=2)
-        # 展开键只留一个正三角（看板批注「右上方有展开，x，-键」「展开图标变为正三角」）：
+        # 展开键只留一个小号正三角（看板批注「右上方有展开，x，-键」「展开图标变为正三角」）：
         # 原来写「▸ 打轴器 / 设置」，比另外两个键加起来还宽 —— 标题栏因此成了整块面板
         # 最宽的一行（525px），收起态缩不下去。
-        # 三角字形比 × / − 显眼，字号单独降一档，免得和另外两个键不协调。
-        self.btn_more = self._btn(self.head, '▲', self.toggle_more, padx=9, pady=0, bd=0,
-                                  font=(FONT_UI, 7))
+        # 用 U+25B4/U+25BE 的小三角，和 × / − 放在一起不会显得过重。
+        self.btn_more = self._btn(self.head, '▴', self.toggle_more, padx=9, pady=0, bd=0)
         self.btn_more.pack(side='right', padx=2)
         self.head.bind('<Button-1>', self._drag_start)
         self.head.bind('<B1-Motion>', self._drag_move)
@@ -1966,25 +2036,29 @@ class MonitorApp:
         self._label(rate_row, '回费效率', 10).pack(side='left')
         # 初值取 _current_rate()（= 真正在用的那一档），不是「默认 30」—— 见它的说明。
         self.rate_var = tk.StringVar(value=_rate_label(self._current_rate()))
+        self.rate_display_var = tk.StringVar()
         self._rate_labels = {}
         for v, desc in COST_RATE_PRESETS:
             self._rate_labels[desc] = v
         items = list(self._rate_labels) + [RATE_CUSTOM_LABEL]
-        self.rate_menu = tk.OptionMenu(rate_row, self.rate_var, *items,
-                                       command=self._on_rate_pick)
-        # width 必须**显式给**：不给（=0）时按钮宽度会跟着**当前值那串字**走
-        # —— 实测值写「自定义（在右边输入）」时控件 244px、切成「30  正常」掉到 132px，
-        # 也就是每切一档整块面板跟着左右一跳。给了之后宽度是个常数，切档不再跳。
-        # 9 个字符 = 151px；最长的那条档位文案 '120  回费-75%' 只要 125px，留 26px 余量
-        # 给别的机器上字号 / 字体略有出入的情况。
-        self.rate_menu.config(bg=CARD_HI, fg=UI_FG, activebackground=CARD_HI,
-                              activeforeground=UI_FG, relief='flat', highlightthickness=0,
-                              font=(FONT_UI, 9), width=9, anchor='w', padx=4, pady=1)
-        # 下拉里的高亮 = 白底深字（同上：游戏 HUD 的选中一律反色）
-        self.rate_menu['menu'].config(bg=CARD, fg=UI_FG, activebackground=RULE,
-                                      activeforeground=UI_BG, relief='flat',
-                                      font=(FONT_UI, 9))
-        self.rate_menu.pack(side='left', padx=(6, 6))
+        # 不用 OptionMenu：原生指示器是一块方块，既不好看也会挤掉最后一个字。
+        # 改成无指示器的 Menubutton，把倒三角直接写进显示文本里。
+        self.rate_btn = tk.Menubutton(rate_row, textvariable=self.rate_display_var,
+                                      indicatoron=False, bg=CARD_HI, fg=UI_FG,
+                                      activebackground=CARD_HI, activeforeground=UI_FG,
+                                      relief='flat', highlightthickness=0, bd=0,
+                                      font=(FONT_UI, 9), width=13, anchor='w',
+                                      padx=4, pady=1, cursor='hand2')
+        self.rate_menu = tk.Menu(self.rate_btn, tearoff=0, bg=CARD, fg=UI_FG,
+                                 activebackground=RULE, activeforeground=UI_BG,
+                                 relief='flat', font=(FONT_UI, 9))
+        for item in items:
+            self.rate_menu.add_command(label=item,
+                                       command=lambda v=item: self._on_rate_pick(v))
+        self.rate_btn.configure(menu=self.rate_menu)
+        self.rate_btn.pack(side='left', padx=(6, 6))
+        self.rate_var.trace_add('write', lambda *_a: self._refresh_rate_display())
+        self._refresh_rate_display()
         # 「自定义」那一截（说明 + 输入框 + 应用）**平时不铺**：2026-10-13 用户「自定义不要
         # 一直写在外面，选择自定义再显示输入框」。收在一个子 Frame 里按需 pack / forget，
         # 见 _show_rate_custom —— 整行高度是定死的（RATE_ROW_H），铺不铺都不动面板尺寸。
@@ -2149,6 +2223,13 @@ class MonitorApp:
         self.lb_perf.grid(row=3, column=0, sticky='w', pady=(4, 0))
         self.lb_source = self._label(diag, '', 9, UI_DIM, anchor='w', justify='left')
         self.lb_source.grid(row=4, column=0, sticky='w', pady=(2, 0))
+
+        # 右边缘缩放热区：不可见，鼠标移上去变左右箭头。位置在 _place 里跟随窗口尺寸。
+        self.resize_grip = tk.Frame(self.root, bg=UI_BG, width=6,
+                                    cursor='sb_h_double_arrow')
+        self.resize_grip.bind('<Button-1>', self._resize_start)
+        self.resize_grip.bind('<B1-Motion>', self._resize_move)
+        self.resize_grip.bind('<ButtonRelease-1>', self._resize_end)
 
         # （2026-10-11 先删了「帮助行」那两行快捷键提示，2026-10-12 把键本身也删了 ——
         #   用户：「把快捷键删掉！！！游戏里有快捷键会冲突」。见 ui 顶部注释。）
@@ -2628,6 +2709,10 @@ class MonitorApp:
         want = _rate_label(self._current_rate())
         if self.rate_var.get() != want:
             self.rate_var.set(want)
+
+    def _refresh_rate_display(self) -> None:
+        """Menubutton 的显示文字 = 当前档位 + 和校准键一致的倒三角。"""
+        self.rate_display_var.set('%s ▾' % self.rate_var.get())
 
     def apply_rate_entry(self):
         """「应用」按钮：把输入框里的数当成**回费效率百分比**切档。"""
@@ -3655,7 +3740,7 @@ class MonitorApp:
         # 16ms —— 其中刻度表的 PIL 重画 6.3ms、预览 1ms、十几次 Tk configure 约 10ms。
         # 不跳过的话事件循环被它塞满，鼠标移动消息只能排队，拖起来就是一顿一顿的
         # （用户报的「窗口拖拽卡顿」）。松手时 _drag_end 会补一次 _refit。
-        dragging = self._dragging
+        dragging = self._dragging or self._resizing
         if not dragging:
             self._fit_window(now)
         self._sync_ctrl_row()

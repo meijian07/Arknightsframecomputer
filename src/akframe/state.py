@@ -417,6 +417,11 @@ class Counter:
             running = pause.running if self._run_prev is None else self._run_prev
         self._run_prev = running
         paused = not running
+        # 暂停期间不累计“等待补帧”的时间，也不保留误判残留：
+        # 否则暂停遮罩让条读数抖一下，恢复后会按这段挂钟时间一次补回来。
+        if paused:
+            self._since_accept = 0.0
+            self._reject_s = 0.0
         empty = bar.state == 'EMPTY'
         # 条这一拍读成「空」有两种完全不同的情况，必须分开处理，判据只有一条：
         # **上一拍认下来的相位是不是贴在 1.0 上（也就是上一拍条是画满的）**。
@@ -497,7 +502,14 @@ class Counter:
             px_speed = speed_for_cost_state(neg)
             k = self._start(bar.fill, speed=px_speed)
             visible = bar.fill > EMPTY_MAX_FILL      # 条真画出来了（TRACK 读数）
-            mode, delta, warn = self._anchor_result(k, px_speed, visible)
+            if paused and self._no_catchup:
+                # 暂停中点「开始」：只把相位对齐，不把开始前的本费进度补进来。
+                # 用户录像里首拍 running=0，却从 0 直接跳到 2，就是这里漏判暂停。
+                mode, delta, warn = 'pause', 0, ''
+                self._no_catchup = False
+                self._zero_phase = None
+            else:
+                mode, delta, warn = self._anchor_result(k, px_speed, visible)
             self._started = True
         elif bar.state in ('MAX', 'MAX_FADE'):
             # 满费：整条换成灰底，相位被游戏钉在 0 —— 像素里一点时间信息都没有。
@@ -1277,7 +1289,17 @@ class Counter:
             elif crossed >= 1 and period > 0:
                 expected = self._cycle_ref + crossed * period
                 diff = expected - end
-                if not mixed and abs(diff) <= CYCLE_ANCHOR_TOL * crossed:
+                # 除了几帧的小漂移，也要识别「整整多算 / 少算 n 个周期」：
+                # 同一回费边界之间实际只有一个完整周期；如果相位模型把这段
+                # 数成了 58 帧（应为 30），diff 会是 -28，旧判据 |diff|<=4
+                # 会放弃校正，之后整段永久多 28 帧。
+                n_periods = int(round(diff / period)) if period > 0 else 0
+                residual = diff - n_periods * period
+                whole_cycle = (0 < abs(n_periods) <= 2
+                               and abs(residual) <= CYCLE_ANCHOR_TOL * crossed)
+                small_drift = (n_periods == 0
+                               and abs(diff) <= CYCLE_ANCHOR_TOL * crossed)
+                if not mixed and (small_drift or whole_cycle):
                     # 把「这一周期多算/少算的几帧」从这里拨回去。像素通道的余量
                     # 不用动：diff 是整数帧，直接改累计像素帧数即可；elapsed /
                     # elapsed_f 会在 step 末尾按 pixel_frames + clock_frames 重算。

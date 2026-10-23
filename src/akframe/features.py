@@ -77,6 +77,13 @@ GRAY_TOL = 20        # 灰度校验：R/G/B 两两之差超过它就不算灰度
 # 正常画面下留了 3px 余量，见 docs 第 31 节。
 SIGN_MIN_RUN_UNIT = 21.0
 SIGN_MIN_ROWS = 1
+# 高分辨率下减号本身有 4~5 行厚，而费用数字（如单字「8」的横腰）也可能在
+# 减号框里凑出 1 行同样长的横杠。2026-10-23 实测：2560x1600、手动校准把条
+# 整体右移 10px 后，单字「8」连续 30 帧被判成负费，一费从 30 帧变成 60 帧，
+# 正好多出一个周期。scale >= 1.2 时要求至少 2 行，既挡掉数字横腰，又保留真减号
+# （真负费录像 `Desktop 2026.10.09 - 22.36.10.14.mp4` 全程 rows=4）。
+SIGN_MIN_ROWS_SCALE = 1.2
+SIGN_MIN_ROWS_WIDE = 2
 # 减号「纯白芯」的**亮度**门限。正常画面直接用 WHITE_MIN(250)，但有损采集会把峰值磨下去：
 # 减号是个细横杠（2560x1600 上只有 4~5px 高），h264 的去块/变换把它的峰值从 255 压到
 # 240~243，而同一帧里费用数字的笔画还有 250~251。按 250 判的后果不是「少一帧」，是
@@ -511,7 +518,10 @@ def read_sign(roi: np.ndarray, layout: Layout) -> SignReading:
             best_run = longest
         if longest >= thr:
             rows += 1
-    return SignReading(negative=rows >= SIGN_MIN_ROWS, run=int(best_run), rows=rows,
+    min_rows = (SIGN_MIN_ROWS_WIDE
+                if float(getattr(layout, 'scale', 1.0) or 1.0) >= SIGN_MIN_ROWS_SCALE
+                else SIGN_MIN_ROWS)
+    return SignReading(negative=rows >= min_rows, run=int(best_run), rows=rows,
                        thr=thr)
 
 

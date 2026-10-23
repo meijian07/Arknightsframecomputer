@@ -444,6 +444,43 @@ def pause_missing_bar(run=45, gap=240, fps=60.0):
     return c.elapsed - before
 
 
+def pause_bar_jitter_no_catchup(run=45, pause=60, resume_jump=8, fps=60.0):
+    """暂停期间条读数被遮罩干扰时，暂停时长不能变成恢复后的追补窗口。
+
+    对应实测 Desktop 2026.10.22 的 150 -> 199 跳变：暂停期间读数被拒，
+    旧逻辑把暂停时长留进 ``_since_accept``；恢复后第一拍看到条跳了 8 帧，
+    就一次性按 8 帧补进计数。现在暂停会把追补窗口清零，这一拍应拒绝。
+    """
+    c = Counter(BAR_W, fps=fps)
+    dt = 1.0 / fps
+    t = 0.0
+    phase = 0
+    idx = 0
+    for _ in range(run):
+        idx += 1
+        t += dt
+        phase += 1
+        fill = synthesized_width(BAR_W, float(BAR_W), phase_frac(phase))
+        c.step(idx, t, bar(fill, 'TRACK'), RUN, SPEED)
+    before = c.elapsed
+
+    for _ in range(pause):
+        idx += 1
+        t += dt
+        # 暂停遮罩让条读数变成和相位模型完全对不上的值；真实相位没有前进。
+        c.step(idx, t, bar(115, 'TRACK'), PAUSED, SPEED)
+    pause_added = c.elapsed - before
+    since_after_pause = c._since_accept
+
+    # 恢复后的第一拍：画面里的条比暂停前跳了 8 帧，但真实只过了 1/60 秒。
+    idx += 1
+    t += dt
+    phase += resume_jump
+    fill = synthesized_width(BAR_W, float(BAR_W), phase_frac(phase))
+    r = c.step(idx, t, bar(fill, 'TRACK'), RUN, SPEED)
+    return pause_added, r.delta, since_after_pause
+
+
 def fast_frame_step_at_max(fps=60.0):
     """满费 + 快速帧操：暂停 -> 只跑 2 拍 -> 再暂停。每一下的零点几帧都必须留住。
 
@@ -1002,6 +1039,15 @@ def main():
     print('结论：%s' % ('✅ 通过（一帧都没多记）' if added == 0 else '❌ 暂停期间凭空多记'))
     ok4 = added == 0
 
+    pause_added, resume_delta, since_after_pause = pause_bar_jitter_no_catchup()
+    print()
+    print('暂停读数被遮罩干扰（暂停 60 拍，恢复首拍条跳 8 帧）：')
+    print('  暂停期间多记 %d 帧，恢复首拍 delta=%d，追补窗口 %.2fs'
+          % (pause_added, resume_delta, since_after_pause))
+    ok17 = pause_added == 0 and resume_delta == 0 and since_after_pause == 0.0
+    print('结论：%s' % ('✅ 通过（暂停时长不进入追补窗口）'
+                       if ok17 else '❌ 暂停时长被追补进了计数'))
+
     bad_fast = fast_frame_step_at_max()
     print()
     print('满费 + 快速帧操（暂停 30 拍 -> 只跑 2 拍，重复 12 轮）：')
@@ -1093,7 +1139,7 @@ def main():
 
     return 0 if (ok and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 and ok8
                  and ok9 and ok10 and ok11 and ok12 and ok13 and ok14 and ok15
-                 and ok16) else 1
+                 and ok16 and ok17) else 1
 
 
 if __name__ == '__main__':

@@ -53,8 +53,8 @@ def phase_frac(n, per):
     return (n % per) / float(per)
 
 
-def run_case(per, neg=False, cycles=40, start_phase=1, drift_at=0, fps=60.0):
-    """逐拍喂合成条；返回 (counter, 真值帧数)。drift_at>0 时在该次回卷后注入 +3。"""
+def run_case(per, neg=False, cycles=40, start_phase=1, drift_at=0, drift_frames=3, fps=60.0):
+    """逐拍喂合成条；返回 (counter, 真值帧数)。drift_at>0 时在该次回卷后注入漂移。"""
     period = int(per * (2 if neg else 1))
     c = Counter(BAR_W, fps=fps, frames_per_cost=per)
     sign = SignReading(negative=neg, run=40 if neg else 18,
@@ -73,10 +73,10 @@ def run_case(per, neg=False, cycles=40, start_phase=1, drift_at=0, fps=60.0):
         c.step(i, t, bar(fill, 'TRACK' if fill > EMPTY_MAX_FILL else 'EMPTY'),
                RUN, SPEED, sign)
         if drift_at and not injected and c.bar_fill_count >= drift_at:
-            # 模拟累计余量让面板多走了 3 帧；相位模型不动。
-            c.pixel_frames += 3
-            c.elapsed += 3
-            c.elapsed_f += 3
+            # 模拟累计余量让面板多走 / 少走若干帧；相位模型不动。
+            c.pixel_frames += int(drift_frames)
+            c.elapsed += int(drift_frames)
+            c.elapsed_f += int(drift_frames)
             injected = True
     return c, truth
 
@@ -169,6 +169,15 @@ def main():
     if abs(c.elapsed - truth) > 1:
         bad.append(('注入 +3 帧', '没有拨回', c.elapsed, truth))
 
+    # 整周期级错误：实时 2 倍速下曾出现一费数成 58 帧。必须在下一次
+    # 条空时拨回 30，而不是因为 |diff|>4 就永久保留。
+    for drift in (29, -29):
+        c, truth = run_case(30.0, False, cycles=40, drift_at=10,
+                            drift_frames=drift)
+        if abs(c.elapsed - truth) > 1 or sorted(set(c.cycle_lengths)) != [30]:
+            bad.append(('注入 %+d 帧' % drift, '整周期偏差没有拨回',
+                        c.elapsed, truth, c.cycle_lengths[:8]))
+
     # 半路起锚：第一次条空是「从起点到条空」的不足一个周期，不能凭空补成 30；
     # 之后记录的完整周期仍必须严格 30。（cycle_lengths 从第二次条空才开始记。）
     c2, _ = run_case(30.0, False, cycles=10, start_phase=10)
@@ -209,7 +218,7 @@ def main():
         for item in bad:
             print('  ❌ ' + '：'.join(str(x) for x in item))
     else:
-        print('  ✅ 通过（30/60/120/240 周期逐周期严格相等；注入 +3 帧后下一次条空拨回；'
+        print('  ✅ 通过（30/60/120/240 周期逐周期严格相等；注入 ±3 / ±29 帧后下一次条空拨回；'
               '满条次数 n 与回卷次数一致；第 2 帧清零首费补平到 30、第 10 帧清零不硬补；'
               '正费中途切负费的混合周期不被硬掰回 30）')
     return 0 if not bad else 1

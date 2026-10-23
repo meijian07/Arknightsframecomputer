@@ -3,7 +3,7 @@ r"""PyInstaller 打包配置（onedir）。
 
     .venv\Scripts\python.exe -m PyInstaller --noconfirm --clean akframe.spec
 
-产物：dist/ArknightsFrameCounter/ 整个目录（exe + _internal/）。
+产物：dist/AFC/ 整个目录（AFC.exe + _internal/）。
 分发给别人的时候把整个目录压成 zip 就行。
 
 为什么是 onedir 而不是 onefile：
@@ -36,7 +36,8 @@ a = Analysis(
     # 漏掉校准表的后果实测过：exe 里读不到表，条槽 ROI 退回推算值（x2318 w240），
     # 比实测值右移 9px —— 计数器能用，但「条空到第一个像素」那段会数不准。
     datas=[(os.path.join(ROOT, 'templates'), 'templates'),
-           (os.path.join(ROOT, 'src', 'akframe', 'resolutions_measured.json'), 'akframe')],
+           (os.path.join(ROOT, 'src', 'akframe', 'resolutions_measured.json'), 'akframe'),
+           (os.path.join(ROOT, 'assets', 'logo', 'afc', 'afc.ico'), 'assets/logo/afc')],
     # akframe.ui 是在 main() 里才 import 的，静态分析看不到，必须显式收集
     hiddenimports=collect_submodules('akframe'),
     hookspath=[],
@@ -68,7 +69,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='ArknightsFrameCounter',
+    name='AFC',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -79,7 +80,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,
+    icon=os.path.join(ROOT, 'assets', 'logo', 'afc', 'afc.ico'),
 )
 
 coll = COLLECT(
@@ -89,5 +90,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name='ArknightsFrameCounter',
+    name='AFC',
 )

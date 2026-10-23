@@ -172,6 +172,31 @@ def main() -> int:
     dy = moved.sign.y - base.sign.y
     check('条挪框跟着挪', abs(dx + 30) <= 1 and abs(dy + 25) <= 1,
           '条 -30,-25 -> 框 %+d,%+d' % (dx, dy))
+
+    # 7) 2026-10-23 2X 多算一个周期的回归：
+    #    2560x1600 + 人工校准把条右移 10px 后，减号框压到单字「8」的横腰上，
+    #    数字横腰在 55x14 的框里只有 **1 行** 够长，旧判据 SIGN_MIN_ROWS=1
+    #    会连续 30 帧判负费 -> 一费按 60 帧推 -> 正好多一个周期。
+    #    高分辨率（scale>=1.2）要求至少 2 行；真减号实测 rows=4，不受影响。
+    _tag, lay = real[0]
+    waist = np.full((lay.sign.h, lay.sign.w), 40, np.uint8)
+    waist[6, 10:10 + 29] = 255          # 「8」的横腰：只有 1 行
+    r = read_sign(waist, lay)
+    check('高分辨率：数字横腰 1 行不再判负费', not r.negative,
+          'run=%d rows=%d 阈值=%d 判=%s' % (r.run, r.rows, thr_of(lay), r.negative))
+    minus = np.full((lay.sign.h, lay.sign.w), 40, np.uint8)
+    for y in range(5, 9):               # 真减号：4 行
+        minus[y, 5:5 + 41] = 255
+    r = read_sign(minus, lay)
+    check('高分辨率：4 行真减号仍然判负费', r.negative,
+          'run=%d rows=%d 阈值=%d 判=%s' % (r.run, r.rows, thr_of(lay), r.negative))
+    low = replace(lay, scale=0.667)     # 720p：减号纯白芯本来就只有 1 行
+    thin = np.full((low.sign.h, low.sign.w), 40, np.uint8)
+    thin[6, 5:5 + 14] = 255
+    r = read_sign(thin, low)
+    check('低分辨率：1 行减号仍按老规则认', r.negative,
+          'scale=%.3f run=%d rows=%d 阈值=%d 判=%s'
+          % (low.scale, r.run, r.rows, thr_of(low), r.negative))
     print()
     if FAIL:
         print('失败项：%s' % '、'.join(FAIL))

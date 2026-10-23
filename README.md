@@ -1,6 +1,10 @@
 <div align="center">
 
-# 明日方舟全局逻辑帧计数器
+<img src="assets/logo/afc/afc-icon.svg" width="104" alt="AFC logo">
+
+# AFC
+
+**Arknights Frame Counter · 明日方舟全局逻辑帧计数器**
 
 一个基于画面识别工作的明日方舟全局帧数计数与打轴工具。
 
@@ -30,7 +34,7 @@
 ## 下载及启动
 
 1. 打开 [GitHub Releases](https://github.com/meijian07/arknights-computer-/releases/latest) 下载最新的 Windows 压缩包。
-2. 解压后双击 `ArknightsFrameCounter.exe`，不需要安装。
+2. 解压后双击 `AFC.exe`，不需要安装。
 3. 先进入游戏关卡，让画面里出现费用条、暂停键和倍速键。
 4. 在面板上选择 `PC端` 或 `窗口` 模式。
 5. 完成校准后点击「开始」。
@@ -64,7 +68,7 @@
 | 清零 | 停止计数并把帧号、时间归零 |
 | 校准：PC端 / 窗口 | 切换输入来源 |
 | 手动校准 | 调整费用条、暂停键、倍速键的位置与大小 |
-| ▲ / ▾ | 展开或收起打轴器 |
+| ▴ / ▾ | 展开或收起打轴器 |
 
 程序不注册键盘快捷键，避免和游戏内按键冲突。
 
@@ -140,12 +144,13 @@ python -m venv .venv
 ### 项目结构
 
 ```text
-帧数计算器/
+AFC/
 ├─ run_monitor.py                 # 图形界面入口
 ├─ run_reader.py                  # 离线读录像入口（CLI）
 ├─ build_app.ps1                  # 本地打包脚本
 ├─ akframe.spec                   # PyInstaller 打包配置
 ├─ requirements.txt               # Python 运行依赖
+├─ assets/logo/afc/               # AFC 标志、图标与使用说明
 ├─ LICENSE
 ├─ README.md
 │
@@ -241,7 +246,22 @@ $env:PYTHONIOENCODING='utf-8'
 powershell -ExecutionPolicy Bypass -File build_app.ps1
 ```
 
-产物位于 `dist\ArknightsFrameCounter\`。正式发布包通过 GitHub Releases 分发，不提交进源码仓库。
+产物位于 `dist\AFC\`。正式发布包通过 GitHub Releases 分发，不提交进源码仓库。
+
+## Logo
+
+主标 **Frame A**：白色字母 A 同时是画面里的“当前帧”，四角取景框代表画面识别，橙色播放头和底部 30 格刻度对应 30 逻辑帧。
+
+<p align="center">
+  <img src="assets/logo/afc/preview/afc-lockup-horizontal-dark.png" width="720" alt="AFC horizontal lockup">
+</p>
+
+- `assets/logo/afc/afc-icon.svg`：主图标（深色底，适合 exe / 任务栏 / 头像）
+- `assets/logo/afc/afc-lockup-horizontal.svg`：横向组合标
+- `assets/logo/afc/afc-lockup-vertical.svg`：纵向组合标
+- `assets/logo/afc/afc-wordmark.svg`：纯字标 + 30 帧刻度
+- `assets/logo/afc/afc.ico`：Windows 多尺寸图标（16–256px）
+- 备选方案 B（30 帧表盘）与 C（Timecode 横幅）见 `assets/logo/afc/`
 
 ## 声明
 

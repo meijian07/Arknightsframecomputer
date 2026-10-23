@@ -10,8 +10,8 @@
     3. 调 PyInstaller 按 akframe.spec 打包
     4. 告诉你 exe 在哪
 
-产物：dist\ArknightsFrameCounter\ArknightsFrameCounter.exe
-分发：把 dist\ArknightsFrameCounter 整个目录压成 zip 发出去，对方解压后双击 exe。
+产物：dist\AFC\AFC.exe
+分发：把 dist\AFC 整个目录压成 zip 发出去，对方解压后双击 exe。
 
 注意：实时计数用的是 Windows 抓屏（BitBlt），不需要 ffmpeg；只有离线读录像
 （run_reader.py）才需要它，所以这个包里没有 ffmpeg。
@@ -123,8 +123,8 @@ if ($LASTEXITCODE -ne 0) {
 if ($LASTEXITCODE -ne 0) { throw 'PyInstaller 打包失败，看上面的报错' }
 
 # ---- 4. 报结果 ---------------------------------------------------------------
-$outdir = Join-Path $PSScriptRoot 'dist\ArknightsFrameCounter'
-$exe = Join-Path $outdir 'ArknightsFrameCounter.exe'
+$outdir = Join-Path $PSScriptRoot 'dist\AFC'
+$exe = Join-Path $outdir 'AFC.exe'
 if (-not (Test-Path -LiteralPath $exe)) { throw "打包结束了但没找到 exe：$exe" }
 $bytes = (Get-ChildItem -LiteralPath $outdir -Recurse -File | Measure-Object -Property Length -Sum).Sum
 Write-Host ''
@@ -132,4 +132,4 @@ Write-Host '打包完成 ✅' -ForegroundColor Green
 Write-Host "  exe     : $exe"
 Write-Host "  整个目录: $outdir  （共 $([math]::Round($bytes / 1MB, 1)) MB）"
 Write-Host '  用法    : 先开游戏（进关卡），再双击 exe'
-Write-Host "  分发    : 把 dist\ArknightsFrameCounter 整个目录压成 zip 发出去"
+Write-Host "  分发    : 把 dist\AFC 整个目录压成 zip 发出去"

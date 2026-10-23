@@ -1,5 +1,7 @@
 #!/usr/bin/env python
-"""akframe 实时监视入口：在游戏窗口上跑全局帧数计数器，并打开简易测试前端。
+"""AFC（Arknights Frame Counter）实时监视入口。
+
+在游戏窗口上跑全局帧数计数器，并打开常驻面板。
 
 用法：
     python run_monitor.py                  # 自动找 Arknights.exe 的窗口
@@ -41,8 +43,8 @@ from akframe.win32 import (arknights_ui_scaler, enable_dpi_awareness,  # noqa: E
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog='run_monitor.py',
-                                description='明日方舟全局逻辑帧计数器 —— 实时监视（PC 窗口）')
+    p = argparse.ArgumentParser(prog='AFC',
+                                description='AFC（Arknights Frame Counter）—— 明日方舟全局逻辑帧计数器')
     p.add_argument('--exe', default='Arknights.exe', help='游戏进程名（默认 Arknights.exe）')
     p.add_argument('--title', default=None, help='窗口标题里的关键字（可选，比进程名更精确）')
     p.add_argument('--pid', type=int, default=None, help='直接指定进程号')

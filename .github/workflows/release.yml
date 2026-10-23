@@ -34,8 +34,8 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
-          $asset = "ArknightsFrameCounter-$tag-win64.zip"
-          Compress-Archive -Path "dist\ArknightsFrameCounter\*" -DestinationPath $asset -CompressionLevel Optimal
+          $asset = "AFC-$tag-win64.zip"
+          Compress-Archive -Path "dist\AFC\*" -DestinationPath $asset -CompressionLevel Optimal
           "ASSET=$asset" >> $env:GITHUB_ENV
 
       - name: Publish GitHub Release
@@ -44,5 +44,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "${{ github.ref_name }}"
-          $notes = "Windows 免安装版：下载 zip，解压后双击 ArknightsFrameCounter.exe。实时计数不需要 ffmpeg。"
-          gh release create "$tag" "$env:ASSET" --title "明日方舟全局帧数计数器 $tag" --notes $notes
+          $notes = "Windows 免安装版：下载 zip，解压后双击 AFC.exe。实时计数不需要 ffmpeg。"
+          gh release create "$tag" "$env:ASSET" --title "AFC $tag" --notes $notes

@@ -37,6 +37,7 @@ from akframe.synthesis import synthesized_width                          # noqa:
 BAR_W = 120
 PER = 30
 RUN = PauseReading(ratio=0.30, running=True)
+PAUSED = PauseReading(ratio=0.05, running=False)
 SPEED = SpeedReading(digit_ratio=0.30, corr_2x=1.0, has_digit=True, m=1.0,
                      bullet=False, conf='ok')
 
@@ -105,6 +106,18 @@ def main():
     r4 = feed(c, 2, 2 * dt, 3)
     if r4.delta != 1 or c.elapsed != 1:
         bad.append(('第 2 帧启动，下一拍', (r4.delta, c.elapsed), (1, 1)))
+
+    # 2b. 游戏暂停时点开始：首拍只能对齐相位，绝不能补开始前的 2 帧。
+    #     用户 2026-10-23 录像：首拍 running=0，面板却从 0 跳到 2。
+    c = started_at(width(2))
+    fill2 = width(2)
+    rp = c.step(1, dt, bar(fill2, 'TRACK'), PAUSED, SPEED)
+    if rp.delta != 0 or c.elapsed != 0:
+        bad.append(('暂停中启动，首拍不补', (rp.delta, c.elapsed), (0, 0)))
+    fill3 = width(3)
+    rp2 = c.step(2, 2 * dt, bar(fill3, 'TRACK'), RUN, SPEED)
+    if rp2.delta != 1 or c.elapsed != 1:
+        bad.append(('暂停中启动，恢复后 +1', (rp2.delta, c.elapsed), (1, 1)))
 
     # 3. 第 10 帧启动：第一个条空只记 20 帧（不是硬补成 30），
     #    第二个条空起恢复完整 30 帧。

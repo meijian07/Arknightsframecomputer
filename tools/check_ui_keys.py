@@ -536,7 +536,7 @@ def t_layout_top(app):
     check('收起：两块一起收回去',
           app.fr_more_top.winfo_manager() == '' and app.fr_more.winfo_manager() == '',
           '%r / %r' % (app.fr_more_top.winfo_manager(), app.fr_more.winfo_manager()))
-    check('收起态展开键显示正三角 ▲', app.btn_more.cget('text') == '▲',
+    check('收起态展开键显示小号正三角 ▴', app.btn_more.cget('text') == '▴',
           app.btn_more.cget('text'))
     order2 = list(root.pack_slaves())
     check('收起：常驻区没被展开区带走',
@@ -2022,6 +2022,10 @@ def t_panel_skin(app):
           list(app._rate_labels) == ['100% 正常回费', '75% 一级减费',
                                      '50% 二级减费', '25% 三级减费'],
           list(app._rate_labels))
+    check('回费下拉去掉原生方块，改用倒三角指示器',
+          not bool(app.rate_btn.cget('indicatoron'))
+          and app.rate_display_var.get().endswith(' ▾'),
+          '%r / %r' % (app.rate_btn.cget('indicatoron'), app.rate_display_var.get()))
     row = app.fr_rate_custom.master
     check('回费行右边「自定义」那一截默认收着',
           app.fr_rate_custom.winfo_manager() == '' and app._rate_custom_open is False,
@@ -2057,6 +2061,28 @@ def t_panel_skin(app):
     check('回费行的行高固定（RATE_ROW_H），不跟内容跑',
           row.winfo_height() == ui_mod.RATE_ROW_H, row.winfo_height())
     app._show_rate_custom(False)
+
+    # ---- 右侧拖拽缩放：320 下限仍保住大数字和开始 / 暂停 ----
+    app._set_panel_width(app.MIN_PANEL_W, live=False)
+    root.update_idletasks()
+    check('面板可缩到最小宽度 320，帧号行和控制行都不收起',
+          app._panel_w == app.MIN_PANEL_W and app._win_w >= app.MIN_PANEL_W
+          and app.lb_frames.winfo_manager() != '' and app.btn_start.winfo_manager() != ''
+          and app.fr_nums.winfo_reqwidth() <= app._win_w - 20
+          and app.fr_ctrl.winfo_reqwidth() <= app._win_w - 20,
+          'panel=%s win=%s nums=%s ctrl=%s'
+          % (app._panel_w, app._win_w, app.fr_nums.winfo_reqwidth(),
+             app.fr_ctrl.winfo_reqwidth()))
+    check('缩到最小时刻度画布同步缩窄，右边缘热区跟着走',
+          app.scale_geom.width == app._win_w - 20
+          and int(app.resize_grip.place_info().get('x', -1)) == app._win_w - 6,
+          'scale=%s grip=%s' % (app.scale_geom.width, app.resize_grip.place_info()))
+    app._set_panel_width(9999, live=False)
+    root.update_idletasks()
+    check('宽度上限夹在 640，不会无限拉宽', app._panel_w == app.MAX_PANEL_W,
+          str(app._panel_w))
+    app._set_panel_width(app.COLLAPSED_W, live=False)
+    root.update_idletasks()
 
     # 追加 2（2026-10-13）：图上没编号的那两条 —— 刻度画布铺满内宽、提示行钉 22px
     check('刻度画布铺满面板内宽（COLLAPSED_W - 两侧 padx 10）',

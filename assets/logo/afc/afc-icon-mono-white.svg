@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-labelledby="title desc">
+  <title id="title">AFC icon</title>
+  <desc id="desc">A white letter A inside frame brackets, with a white playhead.</desc>
+  <defs>
+  <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#1B1D21"/><stop offset="1" stop-color="#0B0C0F"/>
+  </linearGradient>
+  <clipPath id="clip"><rect x="24" y="24" width="464" height="464" rx="104"/></clipPath>
+</defs>
+
+  <g fill="none" stroke="#F7F8FA" stroke-width="10" stroke-linecap="square" opacity="0.92">
+    <path d="M96 166 V96 H166"/><path d="M346 96 H416 V166"/>
+    <path d="M416 346 V416 H346"/><path d="M166 416 H96 V346"/>
+  </g>
+  <g>
+    <line x1="256" y1="96" x2="256" y2="416" stroke="#F7F8FA" stroke-width="12" stroke-linecap="round"/>
+    <path d="M256 84 l-18 28 h36 z" fill="#F7F8FA"/>
+    <line x1="256" y1="416" x2="256" y2="450" stroke="#F7F8FA" stroke-width="4" stroke-linecap="round"/>
+    <circle cx="256" cy="428" r="7" fill="#F7F8FA"/>
+  </g>
+  <path fill="#F7F8FA" fill-rule="evenodd" d="M256 128 L360 392 H306 L288 328 H224 L206 392 H152 Z M238 292 H274 L256 236 Z"/>
+
+</svg>

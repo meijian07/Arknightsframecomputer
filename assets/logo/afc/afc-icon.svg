@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-labelledby="title desc">
+  <title id="title">AFC icon</title>
+  <desc id="desc">A white letter A inside frame brackets, with an orange playhead and a 30-frame ruler.</desc>
+  <defs>
+  <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#1B1D21"/><stop offset="1" stop-color="#0B0C0F"/>
+  </linearGradient>
+  <clipPath id="clip"><rect x="24" y="24" width="464" height="464" rx="104"/></clipPath>
+</defs>
+  <rect x="24" y="24" width="464" height="464" rx="104" fill="url(#bg)" stroke="#2B2F36" stroke-width="2"/><g clip-path="url(#clip)">
+  <g fill="none" stroke="#F7F8FA" stroke-width="10" stroke-linecap="square" opacity="0.92">
+    <path d="M96 166 V96 H166"/><path d="M346 96 H416 V166"/>
+    <path d="M416 346 V416 H346"/><path d="M166 416 H96 V346"/>
+  </g>
+  <g>
+    <line x1="256" y1="96" x2="256" y2="416" stroke="#FF9F1C" stroke-width="12" stroke-linecap="round"/>
+    <path d="M256 84 l-18 28 h36 z" fill="#FF9F1C"/>
+    <line x1="256" y1="416" x2="256" y2="450" stroke="#FF9F1C" stroke-width="4" stroke-linecap="round"/>
+    <circle cx="256" cy="428" r="7" fill="#FF9F1C"/>
+  </g>
+  <path fill="#F7F8FA" fill-rule="evenodd" d="M256 128 L360 392 H306 L288 328 H224 L206 392 H152 Z M238 292 H274 L256 236 Z"/>
+  <g><line x1="140" y1="426" x2="140" y2="448" stroke="#8B919B" stroke-width="3" stroke-linecap="round"/><line x1="148" y1="432" x2="148" y2="448" stroke="#8B919B" stroke-width="2" stroke-linecap="round"/><line x1="156" y1="432" x2="156" y2="448" stroke="#8B919B" stroke-width="2" stroke-linecap="round"/><line x1="164" y1="432" x2="164" y2="448" stroke="#8B919B" stroke-width="2" stroke-linecap="round"/><line x1="172" y1="432" x2="172" y2="448" stroke="#8B919B" stroke-width="2" stroke-linecap="round"/><line x1="180" y1="426" x2="180" y2="448" stroke="#8B919B" stroke-width="3" stroke-linecap="round"/><line x1="188" y1="432" x2="188" y2="448" stroke="#8B919B" stroke-width="2" stroke-linecap="round"/><line x1="196" y1="432" x2="196" y2="448" stroke="#8B919B" stroke-width="2" stroke-linecap="round"/><line x1="204" y1="432" x2="204" y2="448" stroke="#8B919B" stroke-width="2" stroke-linecap="round"/><line x1="212" y1="432" x2="212" y2="448" stroke="#8B919B" stroke-width="2" stroke-linecap="round"/><line x1="220" y1="426" x2="220" y2="448" stroke="#8B919B" stroke-width="3" stroke-linecap="round"/><line x1="228" y1="432" x2="228" y2="448" stroke="#8B919B" stroke-width="2" stroke-linecap="round"/><line x1="236" y1="432" x2="236" y2="448" stroke="#8B919B" stroke-width="2" stroke-linecap="round"/><line x1="244" y1="432" x2="244" y2="448" stroke="#8B919B" stroke-width="2" stroke-linecap="round"/><line x1="252" y1="432" x2="252" y2="448" stroke="#FF9F1C" stroke-width="2" stroke-linecap="round"/><line x1="260" y1="426" x2="260" y2="448" stroke="#FF9F1C" stroke-width="3" stroke-linecap="round"/><line x1="268" y1="432" x2="268" y2="448" stroke="#8B919B" stroke-width="2" stroke-linecap="round"/><line x1="276" y1="432" x2="276" y2="448" stroke="#8B919B" stroke-width="2" stroke-linecap="round"/><line x1="284" y1="432" x2="284" y2="448" stroke="#8B919B" stroke-width="2" stroke-linecap="round"/><line x1="292" y1="432" x2="292" y2="448" stroke="#8B919B" stroke-width="2" stroke-linecap="round"/><line x1="300" y1="426" x2="300" y2="448" stroke="#8B919B" stroke-width="3" stroke-linecap="round"/><line x1="308" y1="432" x2="308" y2="448" stroke="#8B919B" stroke-width="2" stroke-linecap="round"/><line x1="316" y1="432" x2="316" y2="448" stroke="#8B919B" stroke-width="2" stroke-linecap="round"/><line x1="324" y1="432" x2="324" y2="448" stroke="#8B919B" stroke-width="2" stroke-linecap="round"/><line x1="332" y1="432" x2="332" y2="448" stroke="#8B919B" stroke-width="2" stroke-linecap="round"/><line x1="340" y1="426" x2="340" y2="448" stroke="#8B919B" stroke-width="3" stroke-linecap="round"/><line x1="348" y1="432" x2="348" y2="448" stroke="#8B919B" stroke-width="2" stroke-linecap="round"/><line x1="356" y1="432" x2="356" y2="448" stroke="#8B919B" stroke-width="2" stroke-linecap="round"/><line x1="364" y1="432" x2="364" y2="448" stroke="#8B919B" stroke-width="2" stroke-linecap="round"/><line x1="372" y1="432" x2="372" y2="448" stroke="#8B919B" stroke-width="2" stroke-linecap="round"/></g></g>
+</svg>
