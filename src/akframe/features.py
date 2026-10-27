@@ -26,6 +26,10 @@ MASKED_WHITE_MAX = 165
 GREY_MAX = 146       # 满费底色（不透明，实测精确等于 146）
 GREY_FADE = 88       # 满费退出过渡底色，持续约 14 帧
 GREY_TOL = 10
+# 满费 / 遮罩判定用的「核心灰」容差。不能用 ±10：HUD 压暗后的正常白条实测
+# 是 154，也落在 146±10 里，会把「暗态正常条」误判成满费。核心灰只认
+# 143..149（真满费实测 145~146），154 的白条自然被排除。
+GREY_CORE_TOL = 3
 # 条宽不超过这么多像素就一律算空条（EMPTY）。**必须和 synthesis.MIN_DETECTABLE_WIDTH
 # 对齐**：synthesis 那条相位-宽度曲线说「宽度小于 2px 就等于没画出来」，所以只有 0/1
 # 才算空条。把这条线抬到 4 就等于人为丢掉 2~4px 的那几帧 —— 而一费开头本来就只有这么
@@ -38,6 +42,10 @@ EMPTY_MAX_FILL = MIN_DETECTABLE_WIDTH - 1
 # **必须是占条宽的比例，不能是绝对像素数**：离线验证时条宽 240，150 = 62.5%；
 # 换到 120 宽的窗口上，如果还用 150 就永远判不出满费（实时链路实测踩到了这个坑）。
 BAR_MIN_FRAC = 0.625
+# 「条被遮罩压成灰底」的下限：只要左端还有一段白条、右侧有 >=5% 的 146 灰，
+# 就说明灰是盖上去的（部署网格 / 拖拽遮罩），不是真满费。真满费左端没有白条，
+# 仍走 BAR_MIN_FRAC 的满费判据。正常推进时 grey146 实测是 0，5% 留足了余量。
+MAX_COVER_MIN_FRAC = 0.05
 REL_THR = 0.35       # 相对阈值：median + REL_THR * (max - median)
 
 # ---- 亮度自适应（HDR / 整体压暗）----
@@ -104,8 +112,9 @@ class BarReading:
     fill: int        # 条槽左端起、到最右侧白像素的宽度，0..bar_w
     grey146: int     # 落在 146±10 的像素数
     grey88: int      # 落在 88±10 的像素数
-    state: str       # TRACK / MAX / MAX_FADE / EMPTY
+    state: str       # TRACK / MAX / MAX_FADE / MAX_COVER / EMPTY
     row: np.ndarray  # 逐列中位数（调试用）
+    grey146_core: int = 0  # 落在 146±3 的像素数（判满费 / 遮罩用；154 不算）
     masked: bool = False   # 是不是按「整体压暗」那一遍扫出来的
     gray_ok: bool = True   # 彩色输入时的灰度校验有没有通过
     dim: bool = False      # 是不是靠「亮度自适应」那一遍读出来的（HDR / 压暗画面）
@@ -156,15 +165,67 @@ class SpeedReading:
     glyph: float = float('nan')
 
 
-def rel_threshold(roi: np.ndarray) -> float:
+def rel_threshold(roi: np.ndarray, robust: bool = False) -> float:
     """相对阈值：对亮度不敏感的「什么是亮点」判据。
 
     按钮有亮/暗两种渲染（暗态半透明、能透出场景），绝对值阈值会失效；
     用 median/max 归一化后，两种渲染下判据一致。
     """
     med = float(np.median(roi))
-    mx = float(roi.max())
+    if robust:
+        # 暂停键专用：部署遮罩把整个 HUD 压暗时，双竖条本体只有 ~80，
+        # 而 ROI 里某一个反光点仍有 190+。用 max 会把阈值抬到 86，
+        # 双竖条（运行中）整块被当成「没画出来」，状态机于是把正在跑的
+        # 拖拽段冻结。99 分位既保留「真的画了实心字形」这条判据，又不让
+        # 单个噪点决定阈值。
+        # **不要**给倍速键用：实测会让「有数字」多认 165 帧，把三角压掉。
+        mx = float(np.percentile(roi, 99))
+    else:
+        mx = float(roi.max())
     return med + REL_THR * (mx - med)
+
+
+def _left_white_run(row: np.ndarray, gap: int = 2) -> int:
+    """从条槽左端起步，数连续白填充的宽度。
+
+    和 _scan_fill 的「最右白像素」不同：这里只认**贴着左端**的那一段。
+    部署网格 / 拖拽遮罩会把条槽右半段压成 146 灰，左半段的白条还在；
+    真满费则是整条灰底、左端没有白条。两者都命中 grey146，只能靠
+    「左端有没有白段」分开（见 read_bar 的 MAX_COVER）。
+
+    白电平跟着这一行自己走（SDR 255 / 压暗白 154 / HDR ~122），
+    条内部允许 2px 暗缝；隔 3px 以上的虚影不算（平台补帧）。
+    """
+    n = int(row.size)
+    if n <= 0:
+        return 0
+    hi = float(row.max())
+    if hi >= MASKED_WHITE_MIN:
+        # 纯白 255 和「HUD 被压暗后的白」154 都算白段。
+        # 必须同时认这两档：条 ROI 里只要别处有一块纯白，max 就会是 255；
+        # 如果这时只按 >250 扫，部署段 154 的白条会被整段漏掉。
+        # 灰色满费底是 146，故意卡在 150 起，不把灰底算成白条。
+        ok = ((row >= WHITE_MIN)
+              | ((row >= MASKED_WHITE_MIN) & (row <= MASKED_WHITE_MAX)))
+    elif hi >= 80.0:
+        # HDR / PQ 采集的白只有 ~122，按这一行自己的白电平取 96.5%。
+        ok = row >= hi * 0.965
+    else:
+        return 0
+    end = 0
+    gap_run = 0
+    for i in range(n):
+        if ok[i]:
+            end = i + 1
+            gap_run = 0
+        else:
+            gap_run += 1
+            # 条槽最左 1px 常是暗抗锯齿（实测 124，紧接着才是白条 154），
+            # 所以开头允许最多 gap 个暗像素；真满费的灰底是**连续** 146，
+            # 第 3 个暗像素就会把循环停掉，left 仍然是 0。
+            if gap_run > gap:
+                break
+    return end
 
 
 def erode3(mask: np.ndarray) -> np.ndarray:
@@ -419,8 +480,11 @@ def read_bar(roi: np.ndarray, layout: Layout) -> BarReading:
 
     grey146 = int((np.abs(row - GREY_MAX) <= GREY_TOL).sum())
     grey88 = int((np.abs(row - GREY_FADE) <= GREY_TOL).sum())
+    grey146_core = int((np.abs(row - GREY_MAX) <= GREY_CORE_TOL).sum())
 
     min_count = max(8, int(round(BAR_MIN_FRAC * row.size)))
+    cover_min = max(8, int(round(MAX_COVER_MIN_FRAC * row.size)))
+    left_fill = _left_white_run(row)
     dim = False
     if gray_ok and _dim_anchor(row) is not None:
         # 整幅画面被压暗（HDR / PQ 采集）时 146 / 88 这些绝对阈值没有意义：
@@ -457,15 +521,29 @@ def read_bar(roi: np.ndarray, layout: Layout) -> BarReading:
     # 从右往左扫会把这个数字当成填充（实测读到 145px，而参考值是 0）。
     # 反过来，正常推进时条槽里只有白填充 + 暗轨道（实测 55..68），不会有灰底，
     # 所以「灰底占多数」只可能是满费/满费退出。
-    if grey146 >= min_count:
+    # 灰底 + 左端还有白条 = **遮罩**，不是满费：
+    #   部署 / 拖拽时游戏把整条槽盖上一层 146 灰，白条只露出左半段。
+    #   这时相位信息并没有消失（白条宽度就是本费进度），只是右端被盖住。
+    #   如果按 MAX 处理，状态机会走满费挂钟 / 冻结；遮罩消失后条从 146
+    #   直接跳到 176，又会被当成 pixel-jump 丢掉 —— 用户看到的「部署干员
+    #   计数停止」就是这条链。真满费左端是灰的（没有白条），仍走 MAX。
+    # 整行都是白（压暗白 154）不是遮罩：left_fill 会铺满条槽，按 TRACK 读。
+    # 用 core（146±3）而不是 broad（146±10）判灰底：压暗白条 154 只是
+    # 「暗态正常条」，必须继续走像素通道，否则显示会冻结到遮罩结束。
+    if left_fill > EMPTY_MAX_FILL and grey146_core >= cover_min:
+        state, fill = 'MAX_COVER', left_fill
+    elif grey146_core >= min_count:
         state, fill = 'MAX', 0
+    elif left_fill > EMPTY_MAX_FILL and grey88 >= cover_min:
+        state, fill = 'MAX_COVER', left_fill
     elif grey88 >= min_count:
         state, fill = 'MAX_FADE', 0
     elif fill <= EMPTY_MAX_FILL:
         state = 'EMPTY'
     else:
         state = 'TRACK'
-    return BarReading(fill=fill, grey146=grey146, grey88=grey88, state=state, row=row,
+    return BarReading(fill=fill, grey146=grey146, grey88=grey88, state=state,
+                      row=row, grey146_core=grey146_core,
                       masked=masked, gray_ok=gray_ok, dim=dim)
 
 
@@ -542,7 +620,7 @@ def read_pause(roi: np.ndarray, layout: Layout) -> PauseReading:
         return PauseReading(ratio=1.0, running=True)
     r0, r1 = layout.pause.band_rows(*PAUSE_SHAPE_BAND)
     band = roi[r0:r1 + 1, :]
-    thr = rel_threshold(roi)
+    thr = rel_threshold(roi, robust=True)
     mask = band > thr
     ratio = float(mask.sum()) / float(mask.size)
     solid = solid_frac(mask, 1)

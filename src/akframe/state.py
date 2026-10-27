@@ -162,16 +162,18 @@ def speed_for_cost_state(neg: bool) -> int:
 #     TRACK     正常推进
 #     MAX       满费（整条换成灰底）
 #     MAX_FADE  满费退出的过渡
+#     MAX_COVER 条槽右半段被部署 / 拖拽遮罩压成灰，左端白条还在（不是满费）
 # EMPTY 不算证据 —— 主菜单 / 仓库 / 编队 / 结算 / 切场景都会读成 EMPTY，
 # 旧逻辑在这些帧上走挂钟通道，于是「不在关卡里也在一秒 30 帧地涨」。
 # 关卡内真正的「条读不到」（被遮挡、满费刚结束）用滞回兜住：只要 BATTLE_HOLD_FRAMES
 # 之内见过一次费用条，就还按关卡内处理。
-BAR_PRESENT_STATES = ('TRACK', 'MAX', 'MAX_FADE')
+BAR_PRESENT_STATES = ('TRACK', 'MAX', 'MAX_FADE', 'MAX_COVER')
 # 走**像素通道**的通道名：只有这些拍才在「按条计数」。
 # 「距上次采纳读数过去了多久」这个物理上限只在像素通道内部才有意义 —— 一旦这一拍
 # 不在这个集合里（关卡外 / 起锚 / 满费挂钟 / 条读不到被冻结），计时就必须清零，
 # 否则它会把「整段没在看条的时间」算进上限（见 _pixel 里那段说明）。
-PIXEL_TRACK_MODES = ('pixel', 'pixel-jump', 'bar-reject', 'wrap', 'wrap-missed')
+PIXEL_TRACK_MODES = ('pixel', 'pixel-jump', 'bar-reject', 'wrap', 'wrap-missed',
+                     'max-cover')
 BATTLE_HOLD_FRAMES = 120     # 1..2 秒 @60Hz 采样：足够覆盖关卡内的短暂读不到
 
 # ---- 关卡判定的第二道闸：游戏 HUD 还在不在 ----
@@ -286,6 +288,11 @@ class Counter:
         self._crossed = False      # 这一拍的 k 帧里是不是跨过了回费边界
         self._run_prev = None      # 上一拍的运行/暂停判定（滞回用）
         self._clock_frac = 0.0     # 满费挂钟通道余量（单位：逻辑帧，跨暂停接着攒）
+        # 部署 / 拖拽遮罩期间：条被盖住，但游戏按 1/5 速继续走（恒 6 逻辑帧/秒）。
+        # 这里单独攒不足 1 帧的余量，按模型把相位往前推 —— 面板数字在遮罩期间
+        # 就能一帧一帧地涨，而不是等遮罩消失再一次性跳过去。
+        self._cover_frac = 0.0
+        self._cover_active = False
         # 上一拍是不是「满费」（MAX / MAX_FADE）那一档。满费那段条被游戏钉住、
         # 像素里没有任何位置信息，帧数只能靠挂钟通道数；条重新画出来时必须
         # **只把相位对上去、一帧都不再补**，否则那段帧会被数两遍 —— 见 _max_reanchor。
@@ -417,12 +424,36 @@ class Counter:
             running = pause.running if self._run_prev is None else self._run_prev
         self._run_prev = running
         paused = not running
+        # 条槽被部署 / 拖拽网格压成灰底、但左端白条还在：这不是真满费。
+        # 遮罩期间条仍然在按逻辑帧前进，只是右半段看不见；必须把
+        # _since_accept 留着，遮罩消失那一拍才能按真实位移一次补回
+        # （见下面 MAX_COVER 分支和 _pixel 的物理上限）。
+        covered = bar.state == 'MAX_COVER'
+        if not covered:
+            self._cover_active = False
+            self._cover_frac = 0.0
         # 暂停期间不累计“等待补帧”的时间，也不保留误判残留：
         # 否则暂停遮罩让条读数抖一下，恢复后会按这段挂钟时间一次补回来。
-        if paused:
+        # 唯一例外：遮罩把暂停键也压没了（drawn=False），这时既不能
+        # 断言游戏在跑、也不能断言暂停；保留窗口给条位移自己说话。
+        # 能明确读到「已暂停」（drawn=True）时仍按暂停清窗口，
+        # 防止暂停界面的 HUD 淡入位移被当成补帧一次吃进来。
+        pause_unreadable = covered and not pause.drawn
+        if paused and not pause_unreadable:
             self._since_accept = 0.0
             self._reject_s = 0.0
         empty = bar.state == 'EMPTY'
+        # 拖干员 / 部署时游戏进入子弹时间，右上角暂停键同时被压暗
+        # （read_pause 给 drawn=False），费用槽还会被部署网格压成 146 灰 ——
+        # 看起来和真满费一模一样。条其实没满，这时绝不能走满费挂钟通道。
+        # 注意用 pause.running（原始读数），不是上面那个带滞回的 running。
+        # 拖干员时暂停键被压暗，ratio 会掉到 0~0.1；带滞回的 running 还可能
+        # 沿用上一拍的 True，于是 MAX 分支会继续走挂钟。原始读数不明确是
+        # 运行中，就不许挂钟。
+        drag_max = bool(self._bullet and not pause.running)
+        if drag_max:
+            # 拖拽期间即使上一拍是真满费，也不要把满费挂钟锚点带进这一拍。
+            self._after_max = False
         # 条这一拍读成「空」有两种完全不同的情况，必须分开处理，判据只有一条：
         # **上一拍认下来的相位是不是贴在 1.0 上（也就是上一拍条是画满的）**。
         #   (a) 贴在 1.0 上 -> 刚过回费。游戏把条收起来一拍做回费动画，这一帧就是
@@ -517,8 +548,15 @@ class Counter:
             # 速率怎么取（优先级、以及每一步为什么不能换）都在 _clock_rate 里；
             # 读得到就**一拍都不放过**：满费期间的帧操很短（17~67ms），不足 1 个
             # 逻辑帧，靠 _clock() 里的余量接着攒（见 _clock 的说明）。
-            if paused:
+            if drag_max or not pause.running:
+                # 暂停键不是明确「运行中」：假满费 / 拖拽 / 过渡帧，只冻结。
+                # 不锚满费、不进挂钟，避免部署网格把条压成 146 灰时凭空涨帧。
+                mode, delta = 'bar-reject', 0
+                warn = 'drag-max-ignore' if drag_max else ''
+                self._after_max = False
+            elif paused:
                 mode, delta = 'pause', 0
+                self._after_max = True
             else:
                 rate, rw = self._clock_rate(m_now, speed.has_digit)
                 if rate > 0:
@@ -528,9 +566,43 @@ class Counter:
                     # 从没读到过倍速数字（刚进关卡、或一直在别的界面）：不知道速率，冻结不猜。
                     mode, delta = 'bar-reject', 0
                 warn = rw
-            # 满费这一档的帧数是**挂钟**数出来的（条上没有任何位置信息）。
-            # 条重新画出来的那一拍要按它重新对相位、并且不再补帧 —— 见 _max_reanchor。
-            self._after_max = True
+                # 满费这一档的帧数是**挂钟**数出来的（条上没有任何位置信息）。
+                # 条重新画出来的那一拍要按它重新对相位、并且不再补帧 —— 见 _max_reanchor。
+                self._after_max = True
+        elif covered:
+            # 部署 / 拖拽遮罩：条槽右半段被压成 146 灰，左端白条还在。
+            # 相位信息没丢，但右半段看不见；拖拽期间游戏固定 1/5 速
+            # （6 逻辑帧/秒），所以按这个速率把**相位模型**往前推，
+            # 读数用模型合成 —— 面板数字在遮罩期间就能连续上涨。
+            # 遮罩消失后，真实条读数会和模型差 0~1 帧，_pixel 自己会拨平，
+            # 不会再把整段位移重算一遍。
+            if not self._cover_active:
+                self._cover_active = True
+                self._cover_frac = 0.0
+            if not pause.running:
+                # 暂停键明确不是运行中：可能真的暂停了，冻结。
+                mode, delta = 'max-cover', 0
+                warn = 'max-cover'
+            else:
+                acc = BULLET_FPS * dt + self._cover_frac
+                n = int(acc + CLOCK_ROUND_EPS)
+                if n <= 0 or self.timing is None:
+                    self._cover_frac = acc
+                    mode, delta = 'max-cover', 0
+                    warn = 'max-cover'
+                else:
+                    self._cover_frac = acc - n
+                    px_speed = speed_for_cost_state(neg)
+                    trial = self.timing.copy()
+                    for _ in range(n):
+                        trial.advance_one_frame(px_speed)
+                    observed = self._width(trial.phase())
+                    self._after_max = False
+                    mode, delta, warn = self._pixel(observed, dt, False, neg)
+                    if mode in ('bar-reject', 'pixel-jump'):
+                        # 这一拍没被采纳（模型对不上）：把帧还回去，下一拍再试。
+                        self._cover_frac += n
+                        mode, delta, warn = 'max-cover', 0, 'max-cover'
         elif empty and not wrap_pending:
             # (b)：条这一拍压根没画出来。冻结，等条重新出现时相位重同步自己接上。
             # 这里**不再**要求「运行中」连续确认（原来那道理由上面 wrap_pending 接管了）：
@@ -608,7 +680,7 @@ class Counter:
 
         if speed.conf == 'low' and not warn:
             warn = 'speed-low-conf'
-        if bar.grey146 > 40 and bar.state == 'TRACK' and not warn:
+        if bar.grey146_core > 40 and bar.state == 'TRACK' and not warn:
             warn = 'grey-in-track'
         if not bar.gray_ok and not warn:
             warn = 'bar-not-gray'
@@ -746,6 +818,8 @@ class Counter:
         self.pixel_frames = other.pixel_frames
         self.clock_frames = other.clock_frames
         self._clock_frac = other._clock_frac
+        self._cover_frac = other._cover_frac
+        self._cover_active = other._cover_active
         self.elapsed = self.pixel_frames + self.clock_frames
         self.elapsed_f = self.elapsed + self._clock_frac
         self.cycle_lengths = list(other.cycle_lengths)
@@ -779,6 +853,8 @@ class Counter:
         self.last_k = 0
         self._crossed = False
         self._clock_frac = 0.0
+        self._cover_frac = 0.0
+        self._cover_active = False
         self._after_max = False
         self._max_rate = 0.0
         # 重新起锚 = 中间有一段没读到，周期基准也作废（否则会记出一个超长的假周期）
@@ -1273,8 +1349,12 @@ class Counter:
                 # 以前 b 也被算成「满条 1 次」，面板就出现 `满条 1 ｜ -2`，看起来
                 # 像第一费只有 28 帧。只有起锚确实补过头、或清零后离整周期只差
                 # 几帧时才认第一费；差得远就只把它当周期基准，n 保持 0。
+                # 首费补平窗口跟着周期走：30 帧仍用 ±4，60 帧 ±7，120 帧 ±15。
+                # 25% 回费从本费第 11 帧启动时，首费真值 109；用户要的是
+                # 「一费 120」，所以在周期 1/8 以内的起步都拨到整周期。
+                first_tol = max(CYCLE_ANCHOR_TOL, period // 8)
                 near_full = (period > 0
-                             and abs(period - end) <= CYCLE_ANCHOR_TOL)
+                             and abs(period - end) <= first_tol)
                 if near_full and (self._cycle_origin_clean
                                   or self._snap_first_cycle):
                     if self._snap_first_cycle and not mixed:

@@ -246,6 +246,17 @@ def main():
     check('轴点右边印的是**绝对帧号**（不再有 +40 这种带符号帧差）',
           '1198' in nums and not any(t.startswith('+') for f, t in drawn),
           '画到的数字：%r' % nums[:10])
+
+    # 2026-10-27：没有空格的操作必须能用满整行，不能被 42% 的旧上限截成
+    # 「部署…」；有空格时才把动作 / 内容分开。
+    dr_split = ImageDraw.Draw(img)
+    f_split = scale_render._font(scale_render.FONT_CJK_BD, 22)
+    head, rest = scale_render.split_action(dr_split, '部署银灰', f_split, f_split, 260)
+    check('无空格「部署银灰」完整显示（不截成「部署…」）',
+          head == '部署银灰' and rest == '', (head, rest))
+    head, rest = scale_render.split_action(dr_split, '部署 银灰', f_split, f_split, 260)
+    check('有空格「部署 银灰」切成动作 + 内容且两段都完整',
+          head == '部署' and rest == '银灰', (head, rest))
     print('12) 刻度表：四边 1px 描边 / 「现在」读数给帧号那列让位（2026-10-13）')
     rgb = lambda hx: tuple(int(hx[i:i + 2], 16) for i in (1, 3, 5))   # noqa: E731
     th2 = scale_render.Theme()

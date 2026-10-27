@@ -79,6 +79,12 @@ def bar(fill, state):
                       state=state, row=np.zeros(BAR_W, np.int16))
 
 
+def cover_bar(fill):
+    """部署 / 拖拽遮罩：左端 fill 白条 + 右边全是 146 灰。"""
+    return BarReading(fill=fill, grey146=BAR_W - fill, grey88=0,
+                      state='MAX_COVER', row=np.zeros(BAR_W, np.int16))
+
+
 def simulate(segments, fps=60.0):
     """segments: [(采样数, 模式)]，模式为 run / max / pause。返回 (计数器, 真值)。"""
     c = Counter(BAR_W, fps=fps)
@@ -524,6 +530,93 @@ def fast_frame_step_at_max(fps=60.0):
         if c.clock_frames > c.elapsed_f + 1e-9:
             bad.append((name, 'clock_frames 超过 elapsed_f',
                         c.clock_frames, c.elapsed_f))
+    return bad
+
+
+def drag_false_max(fps=60.0):
+    """拖干员 / 部署：条槽被网格压成 MAX 灰，但游戏是子弹时间、暂停键没画。
+
+    用户 2026-10-25 录像：费用才 16，拖干员时条槽被压成 146 灰，旧逻辑
+    把它当 MAX，右上角暂停键又被压暗（drawn=False）—— 只要 running 读成
+    True，就会走满费挂钟，凭空按 6 帧/秒涨。这里必须冻结。
+    """
+    bad = []
+    sp = SpeedReading(digit_ratio=0.0, corr_2x=float('nan'), has_digit=False,
+                      m=float('nan'), bullet=True, conf='ok')
+    c = Counter(BAR_W, fps=fps)
+    # 先正常运行一拍，把带滞回的 _run_prev 置成 True。
+    c.step(1, 1.0 / fps, bar(0, 'MAX'), RUN, sp)
+    base_f, base_clock = c.elapsed_f, c.clock_frames
+    # 拖拽时暂停键被压暗：原始读数 running=False，但 ratio 落在滞回中间带，
+    # 上一拍又是运行中 —— 旧逻辑 paused=False，会继续走挂钟。
+    drag = PauseReading(ratio=0.10, running=False, drawn=True, solid=0.1)
+    for i in range(2, 62):
+        c.step(i, i / fps, bar(0, 'MAX'), drag, sp)
+    if c.elapsed_f != base_f or c.clock_frames != base_clock:
+        bad.append(('拖拽假 MAX', c.elapsed_f, base_f))
+    return bad
+
+
+def deploy_cover_recovery(fps=60.0, per=120):
+    """部署遮罩盖住条 2 秒：按拖拽固定 6 帧/秒**实时**推进 12 帧。
+
+    用户 2026-10-25 13.20.51：拖干员时网格把条右半段压成 146 灰，
+    旧逻辑当成 MAX 后冻结；遮罩消失时又跳 22 帧，表现为「部署时数字不动，
+    部署完突然跳到准确值」。真值：拖拽固定 6 帧/秒，2 秒 = 12 帧，
+    这 12 帧必须在遮罩期间就一帧一帧显示出来，遮罩消失时不再跳。
+    """
+    bad = []
+    c = Counter(BAR_W, fps=fps, frames_per_cost=per)
+    dt = 1.0 / fps
+    t = 0.0
+    for n in range(1, 21):
+        t += dt
+        fill = synthesized_width(BAR_W, float(BAR_W), phase_frac(n, per))
+        c.step(n, t, bar(fill, 'TRACK'), RUN, SPEED)
+    before = c.elapsed
+    clock_before = c.clock_frames
+    cover_fill = synthesized_width(BAR_W, float(BAR_W), phase_frac(20, per))
+    for k in range(1, 121):
+        # 拖拽时双竖条仍在（只是被压暗）；robust 阈值会把它读成运行中。
+        c.step(20 + k, t + k * dt, cover_bar(cover_fill), RUN, SPEED)
+    cover_gain = c.elapsed - before
+    if cover_gain not in (11, 12, 13):
+        bad.append(('遮罩期间应实时显示 12 帧', cover_gain, 12))
+    if c.clock_frames != clock_before:
+        bad.append(('遮罩期间走像素通道、不该进 clock', c.clock_frames, clock_before))
+    t += 120 * dt
+    fill = synthesized_width(BAR_W, float(BAR_W), phase_frac(32, per))
+    r = c.step(141, t + dt, bar(fill, 'TRACK'), RUN, SPEED)
+    if r.delta > 1:
+        bad.append(('遮罩消失后不该再跳', r.delta, '<=1'))
+    got = c.elapsed - before
+    if got not in (11, 12, 13):
+        bad.append(('遮罩 + 消失总计 12 帧', got, 12))
+    return bad
+
+
+def deploy_cover_true_pause(fps=60.0, per=120):
+    """暂停键明确读到「已暂停」时，遮罩消失后的假跳不许补帧。"""
+    bad = []
+    c = Counter(BAR_W, fps=fps, frames_per_cost=per)
+    dt = 1.0 / fps
+    t = 0.0
+    for n in range(1, 21):
+        t += dt
+        fill = synthesized_width(BAR_W, float(BAR_W), phase_frac(n, per))
+        c.step(n, t, bar(fill, 'TRACK'), RUN, SPEED)
+    before = c.elapsed
+    cover_fill = synthesized_width(BAR_W, float(BAR_W), phase_frac(20, per))
+    for k in range(1, 301):
+        c.step(20 + k, t + k * dt, cover_bar(cover_fill), PAUSED, SPEED)
+    # 暂停界面淡出：条被误读成前进了 20 帧（HUD 位移），游戏其实没走。
+    # 20 > 25% 档的合法窗口（60*dt + 开头 4 帧死区 + 3px 余量），必须拒绝。
+    t += 300 * dt
+    fake_fill = synthesized_width(BAR_W, float(BAR_W), phase_frac(40, per))
+    c.step(321, t + dt, bar(fake_fill, 'TRACK'), PAUSED, SPEED)
+    got = c.elapsed - before
+    if got != 0:
+        bad.append(('暂停中假跳不该补帧', got, 0))
     return bad
 
 
@@ -1059,6 +1152,36 @@ def main():
               '旧逻辑三种速率下每轮分别丢 1 / 1 / 0.2 帧）')
     ok11 = not bad_fast
 
+    bad_drag = drag_false_max()
+    print()
+    print('拖干员 / 部署：条槽假 MAX（暂停键没画 + 子弹时间）：')
+    if bad_drag:
+        for b in bad_drag:
+            print('  ❌ %s：实际 %s，期望 %s' % b)
+    else:
+        print('  ✅ 通过（假 MAX 只冻结，不进满费挂钟）')
+    ok18 = not bad_drag
+
+    bad_cover = deploy_cover_recovery()
+    print()
+    print('部署遮罩：按 6 帧/秒实时推进，消失时不重复补帧：')
+    if bad_cover:
+        for b in bad_cover:
+            print('  ❌ %s：实际 %s，期望 %s' % b)
+    else:
+        print('  ✅ 通过（2 秒遮罩 = 12 帧，遮罩期间 clock=0）')
+    ok19 = not bad_cover
+
+    bad_pause_cover = deploy_cover_true_pause()
+    print()
+    print('部署遮罩 + 明确暂停：假跳不补帧：')
+    if bad_pause_cover:
+        for b in bad_pause_cover:
+            print('  ❌ %s：实际 %s，期望 %s' % b)
+    else:
+        print('  ✅ 通过（读到「已暂停」时窗口照旧清零）')
+    ok20 = not bad_pause_cover
+
     bad_rate = reduced_cost_rate_cycles()
     print()
     print('减费环境逐周期长度（一费 60 / 120 逻辑帧）：')
@@ -1139,7 +1262,7 @@ def main():
 
     return 0 if (ok and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 and ok8
                  and ok9 and ok10 and ok11 and ok12 and ok13 and ok14 and ok15
-                 and ok16 and ok17) else 1
+                 and ok16 and ok17 and ok18 and ok19 and ok20) else 1
 
 
 if __name__ == '__main__':

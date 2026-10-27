@@ -12,8 +12,8 @@
 
 [![Platform: Windows](https://img.shields.io/badge/Platform-Windows-blue.svg)](https://www.microsoft.com/windows)
 [![Python: 3.9+](https://img.shields.io/badge/Python-3.9%2B-3776AB.svg)](https://www.python.org/)
-[![GitHub Release](https://img.shields.io/github/v/release/meijian07/arknights-computer-)](https://github.com/meijian07/arknights-computer-/releases)
-[![GitHub Downloads](https://img.shields.io/github/downloads/meijian07/arknights-computer-/total)](https://github.com/meijian07/arknights-computer-/releases)
+[![GitHub Release](https://img.shields.io/github/v/release/meijian07/Arknightsframecomputer)](https://github.com/meijian07/Arknightsframecomputer/releases)
+[![GitHub Downloads](https://img.shields.io/github/downloads/meijian07/Arknightsframecomputer/total)](https://github.com/meijian07/Arknightsframecomputer/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 </div>
@@ -33,7 +33,7 @@
 
 ## 下载及启动
 
-1. 打开 [GitHub Releases](https://github.com/meijian07/arknights-computer-/releases/latest) 下载最新的 Windows 压缩包。
+1. 打开 [GitHub Releases](https://github.com/meijian07/Arknightsframecomputer/releases/latest) 下载最新的 Windows 压缩包。
 2. 解压后双击 `AFC.exe`，不需要安装。
 3. 先进入游戏关卡，让画面里出现费用条、暂停键和倍速键。
 4. 在面板上选择 `PC端` 或 `窗口` 模式。

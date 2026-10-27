@@ -19,7 +19,8 @@
 | `afc-icon.svg` | 主图标，深色圆角方形底 |
 | `afc-icon-mono-white.svg` | 透明底白色单色版，用于深色背景 |
 | `afc-icon-mono-black.svg` | 透明底黑色单色版，用于浅色背景 |
-| `afc.ico` | Windows 多尺寸图标（16 / 24 / 32 / 48 / 64 / 128 / 256） |
+| `afc.ico` | Windows 多尺寸图标（16–48 简化标 + 64 / 128 / 256 完整标） |
+| `make_ico.py` | 重新生成 `afc.ico`（小尺寸简化标 + 大尺寸完整标） |
 | `afc-lockup-horizontal.svg` | 横向组合标（图标 + AFC + 英文全称） |
 | `afc-lockup-vertical.svg` | 纵向组合标 |
 | `afc-wordmark.svg` | 纯字标 + 30 帧刻度 |
@@ -53,6 +54,22 @@
 - 横向组合标：不小于 **240px** 宽
 - 纵向组合标：不小于 **160px** 宽
 
+## 小尺寸图标
+
+任务栏在 150% DPI 下取 24/32px。完整标志（取景框 + 30 刻度 + 播放头）
+直接缩到这么小会糊成一团，所以 `afc.ico` 里：
+
+- **16–48px**：像素级简化标，只保留深色圆角方块 + 粗 A + 橙色播放头
+- **64–256px**：完整标志（四角取景框 + 30 刻度）
+- ICO 包含 16 / 20 / 24 / 28 / 32 / 36 / 40 / 48 / 64 / 128 / 256 十一档，
+  避免 Windows 从邻近尺寸拉伸
+
+改完标志后运行：
+
+```bash
+python assets/logo/afc/make_ico.py
+```
+
 ## 留白
 
 组合标四周至少留出 **图标高度的 1/2** 作为空白；
@@ -74,6 +91,7 @@
 ## 预览
 
 - `preview/afc-icon-1024.png`
+- `preview/afc-icon-small-sizes.png`
 - `preview/afc-icon-size-test.png`
 - `preview/afc-lockup-horizontal-dark.png`
 - `preview/afc-lockup-vertical-dark.png`

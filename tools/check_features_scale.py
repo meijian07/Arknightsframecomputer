@@ -135,11 +135,87 @@ def part_b():
           mon._pause_memo._img is None and mon._speed_memo._img is None)
 
 
+def part_c():
+    """部署 / 拖拽遮罩：灰底 + 左端白条 = MAX_COVER，不是满费。"""
+    print()
+    print('C. 部署遮罩与暗态暂停键')
+    W = 120
+    lay = Layout(width=W, height=17, scale=1.0,
+                 bar=Rect(0, 0, W, 17), pause=Rect(0, 0, 199, 159),
+                 speed=Rect(0, 0, 199, 159), sign=Rect(0, 0, 10, 10),
+                 buttons_visible=True)
+
+    def read(row):
+        roi = np.tile(np.asarray(row, np.int16), (17, 1))
+        return F.read_bar(roi, lay)
+
+    # 实测 2026-10-25 13.20.51：部署网格把 80px 之后压成 146 灰，
+    # 左端白条是 154（HUD 被压暗后的白）。
+    row = np.full(W, 146, np.int16)
+    row[:80] = 154
+    r = read(row)
+    check('部署遮罩：左端白条 + 右侧 146 灰 -> MAX_COVER（fill=80）',
+          r.state == 'MAX_COVER' and r.fill == 80,
+          'state=%s fill=%d grey146=%d' % (r.state, r.fill, r.grey146))
+
+    # 条 ROI 里只要别处有一块纯白，max 就是 255；154 的白条仍要认出来。
+    row = np.full(W, 146, np.int16)
+    row[:80] = 154
+    row[100] = 255
+    r = read(row)
+    check('遮罩白条 154 + 别处纯白 255：仍能数出左端 80px',
+          r.state == 'MAX_COVER' and r.fill == 80,
+          'state=%s fill=%d grey146=%d' % (r.state, r.fill, r.grey146))
+
+    # 真满费：整条 146 灰，白色 MAX 字在中段，左端没有白条。
+    row = np.full(W, 146, np.int16)
+    row[50:70] = 255
+    r = read(row)
+    check('真满费：左端没有白条 -> MAX（不能被 MAX 字骗成遮罩）',
+          r.state == 'MAX' and r.fill == 0,
+          'state=%s fill=%d grey146=%d' % (r.state, r.fill, r.grey146))
+
+    row = np.full(W, 55, np.int16)
+    row[:80] = 255
+    r = read(row)
+    check('正常推进仍是 TRACK', r.state == 'TRACK' and r.fill == 80,
+          'state=%s fill=%d' % (r.state, r.fill))
+
+    # 压暗 HUD 的整条白（154）不能被 146±10 误判成满费。
+    row = np.full(W, 154, np.int16)
+    r = read(row)
+    check('整条压暗白仍是 TRACK（不是 MAX）',
+          r.state == 'TRACK' and r.fill == W,
+          'state=%s fill=%d' % (r.state, r.fill))
+
+    # 压暗白条 + 暗轨道（154 / 55）：这是正常的暗态进度，必须走像素通道，
+    # 不能判成遮罩后冻结（否则面板会等到恢复亮度才一次跳过去）。
+    row = np.full(W, 55, np.int16)
+    row[:80] = 154
+    r = read(row)
+    check('压暗白条 154 + 暗轨道仍是 TRACK（显示要连续走）',
+          r.state == 'TRACK' and r.fill == 80,
+          'state=%s fill=%d core=%d' % (r.state, r.fill, r.grey146_core))
+
+    # 暗态暂停键：双竖条本体只有 ~80，ROI 里一个反光点 193。
+    # 阈值必须跟着 99 分位走，不能被单个亮点抬到 86。
+    roi = np.full((159, 199), 29, np.uint8)
+    roi[40:100, 75:105] = 80
+    roi[40:100, 120:150] = 80
+    roi[20, 20] = 193
+    p = F.read_pause(roi, lay)
+    check('暗态暂停键：单个反光点不影响阈值，双竖条判运行中',
+          p.running and p.drawn and F.rel_threshold(roi, robust=True) < 80,
+          'ratio=%.3f solid=%.3f thr=%.1f' % (p.ratio, p.solid,
+                                              F.rel_threshold(roi, robust=True)))
+
+
 def main():
     tpls = load_templates(TEMPLATES)
     print('模板：%s' % [(v, n, a.shape) for v, n, a in tpls])
     part_a(tpls)
     part_b()
+    part_c()
     print()
     if FAILED:
         print('%d 项没过：%s' % (len(FAILED), FAILED))

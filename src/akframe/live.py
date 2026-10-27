@@ -638,8 +638,10 @@ class LiveMonitor:
                                            lay.bar.w, lay.bar.h)
             bar = read_bar(to_gray(bgra), lay)
             # EMPTY 也要把 fill 交出去：fill=0 是第 0 帧；fill=1 仍是早期帧（模型
-            # 反推会落到相位 0）。MAX / MAX_FADE 时条上没有相位信息，按 0 起算。
-            return int(bar.fill) if bar.state == 'TRACK' else 0
+            # 反推会落到相位 0）。MAX_COVER 是部署遮罩，左端白条仍在，fill 就是
+            # 本费已经走到的位置；MAX / MAX_FADE 时条上没有相位信息，按 0 起算。
+            return (int(bar.fill)
+                    if bar.state in ('TRACK', 'EMPTY', 'MAX_COVER') else 0)
         except Exception:                    # noqa: BLE001
             return None
 

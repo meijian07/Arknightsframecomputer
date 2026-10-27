@@ -51,8 +51,18 @@ def width(phase):
     return synthesized_width(BAR_W, float(BAR_W), (phase % PER) / float(PER))
 
 
+def width_per(phase, per):
+    return synthesized_width(BAR_W, float(BAR_W), (phase % per) / float(per))
+
+
 def feed(c, idx, t, phase):
     fill = width(phase)
+    state = 'TRACK' if fill > EMPTY_MAX_FILL else 'EMPTY'
+    return c.step(idx, t, bar(fill, state), RUN, SPEED)
+
+
+def feed_per(c, idx, t, phase, per):
+    fill = width_per(phase, per)
     state = 'TRACK' if fill > EMPTY_MAX_FILL else 'EMPTY'
     return c.step(idx, t, bar(fill, state), RUN, SPEED)
 
@@ -130,6 +140,30 @@ def main():
     if end2 - end1 != 30 or c.bar_fill_count != 1:
         bad.append(('第 10 帧启动，第二个条空',
                     (end2 - end1, c.bar_fill_count), (30, 1)))
+
+    # 3b. 25% 回费（120 帧/费）：从本费第 11 帧启动，首费补平到 120。
+    #     用户 2026-10-25 实测「三减费一费 109 帧」就是这里的首费残段。
+    per = 120
+    c = Counter(BAR_W, fps=60.0, frames_per_cost=per)
+    fake = types.SimpleNamespace(counter=c,
+                                 _probe_bar_fill=lambda: width_per(11, per))
+    LiveMonitor.begin_counting(fake)
+    idx = 0
+    t = 0.0
+    phase = 11
+    idx += 1
+    t += dt
+    feed_per(c, idx, t, phase, per)      # 起锚这一拍只对齐相位
+    while True:
+        idx += 1
+        t += dt
+        phase += 1
+        r = feed_per(c, idx, t, phase, per)
+        if r.mode == 'wrap':
+            break
+    if c.elapsed != 120 or c.bar_fill_count != 1:
+        bad.append(('25% 第 11 帧启动，首费补平',
+                    (c.elapsed, c.bar_fill_count), (120, 1)))
 
     # 4. begin_counting() 自动 probe：模拟界面没有显式传 bar_fill 的路径。
     c = Counter(BAR_W, fps=60.0, frames_per_cost=30.0)

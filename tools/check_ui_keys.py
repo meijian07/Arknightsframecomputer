@@ -1620,10 +1620,10 @@ def t_panel_titlebar_fonts(app):
     check('换完布局透明度一定回到 1（否则面板一直是半透明的）',
           float(root.attributes('-alpha')) == 1.0)
 
-    # 打轴器字号：26 = 150% 缩放下 Tk 13pt 的「时间」（一个汉字 26px）。
+    # 打轴器字号：2026-10-27 按用户要求从 26 调小一级到 22（操作 / 时间列）。
     sizes = scale_render.font_sizes()
-    check('刻度表的字放大到主面板「时间」那一号（26px）',
-          sizes == (26, 26, 26), sizes)
+    check('刻度表字号比主面板「时间」小一级（22px）',
+          sizes == (22, 22, 22), sizes)
     g = app.scale_geom
     dr = ImageDraw.Draw(Image.new('RGB', (8, 8)))
     num_w = dr.textlength('8888', font=ImageFont.truetype(scale_render.FONT_NUM, sizes[0]))
@@ -1632,6 +1632,33 @@ def t_panel_titlebar_fonts(app):
     check('行高 / 行距够放这一号字（上下两行叠不到一起）',
           g.label_gap >= g.label_h >= sizes[0], '%s / %s / %s'
           % (g.label_h, g.label_gap, sizes[0]))
+
+    # 2026-10-27：横向缩放时 Canvas 立刻变宽/变窄，但 PIL 图是上一拍画的。
+    # 只改 Canvas 就会在右侧露出一块画布底色（用户看到的「黑块」）。
+    # 每次拖动后，图宽必须和 Canvas / geom 一起走。
+    from akframe.timeline import Cue, Timeline, Teleprompter
+
+    cues = [Cue(frame=1168, text='部署 银灰', line=1, raw=''),
+            Cue(frame=1198, text='部署 山', line=2, raw='')]
+    app.prompter = Teleprompter(Timeline(cues=cues, source='resize'))
+    app._update_prompter(types.SimpleNamespace(
+        elapsed=1186, elapsed_f=1186.0, mode='pixel'))
+    app.root.update_idletasks()
+    for w in (app.MIN_PANEL_W, 380, app.COLLAPSED_W):
+        app._set_panel_width(w, live=True)
+        app.root.update_idletasks()
+        photo_w = int(app._scale_photo.width()) if app._scale_photo else 0
+        check('横向拖动到 %d：刻度图宽度跟上 Canvas' % w,
+              photo_w == int(app.cv_scale.cget('width')) == app.scale_geom.width,
+              'photo=%s canvas=%s geom=%s'
+              % (photo_w, app.cv_scale.cget('width'), app.scale_geom.width))
+    app._resize_end()
+    app.root.update_idletasks()
+    photo_w = int(app._scale_photo.width()) if app._scale_photo else 0
+    check('松手后刻度图仍然铺满 Canvas（不露黑块）',
+          photo_w == int(app.cv_scale.cget('width')) == app.scale_geom.width,
+          'photo=%s canvas=%s' % (photo_w, app.cv_scale.cget('width')))
+    app._set_panel_width(app.COLLAPSED_W, live=False)
 
 
 def t_toggle_flicker(app):

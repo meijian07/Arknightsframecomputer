@@ -1257,6 +1257,7 @@ class MonitorApp:
         # Canvas 上的那一个图元和那一份 PhotoImage —— 必须留引用，否则会被回收成空白。
         self._scale_item = None
         self._scale_photo = None
+        self._scale_drawn_w = None
         # 上一张图是「由什么状态算出来的」（见 _redraw_scale）—— 一样就不再重画。
         self._scale_key = None
         # 每个 Label 上一次写进去的 (文本, 颜色)。见 _set_text —— 面板每 8ms 刷一拍，
@@ -1491,6 +1492,13 @@ class MonitorApp:
         self._resize_at = None
         self._fit_cache.clear()
         self._refit()
+        # _refit 命中缓存时不会碰刻度图（宽度没变也一样）；这里明确对齐一次，
+        # 避免最后一次 1~7px 的节流差额留在画布上。
+        if getattr(self, 'cv_scale', None) is not None:
+            if self._prom_state is not None:
+                self._redraw_scale()
+            else:
+                self._draw_scale_hint()
 
     def _set_panel_width(self, width, live=False):
         width = int(round(width))
@@ -1612,6 +1620,18 @@ class MonitorApp:
         cv = getattr(self, 'cv_scale', None)
         if cv is not None and int(cv.cget('width')) != inner:
             cv.configure(width=inner)
+        # Canvas 宽度是立刻变的，但 PIL 图是上一拍画的：如果只改 Canvas，
+        # 右边会露出一条旧图没覆盖的画布底色（用户看到的「黑块」）。
+        # 拖动时按 8px 节流重画（22px 字号下一次约 1~2ms），松手后 _resize_end
+        # 会再强制对齐一次。没有导入轴时重画提示文字，别让提示停在旧中心。
+        drawn = getattr(self, '_scale_drawn_w', None)
+        if cv is not None and drawn != inner:
+            live = bool(getattr(self, '_resizing', False))
+            if (not live) or abs(int(inner) - int(drawn or 0)) >= 8:
+                if self._prom_state is not None:
+                    self._redraw_scale()
+                else:
+                    self._draw_scale_hint()
 
     def _refit_now(self):
         """按当前展开状态把窗口尺寸重新夹一次（收起 = 小的，展开 = 大的）。
@@ -2249,7 +2269,7 @@ class MonitorApp:
         # 轴用「逐条内容」当指纹（Cue 是普通 dataclass，不可哈希）：几十条轴做一次
         # 元组比较只花几十微秒，比重画的 6 ms 便宜两个数量级。
         key = (float(frame_f), int(done),
-               id(self.scale_geom),
+               id(self.scale_geom), int(round(self.scale_geom.width)),
                tuple((c.frame, c.text) for c in cues))
         if key == self._scale_key:
             return
@@ -3614,6 +3634,7 @@ class MonitorApp:
         # 往一个已经不存在的 id 上贴图会直接抛 TclError。
         self._scale_item = None
         self._scale_photo = None
+        self._scale_drawn_w = g.width
         # 图元没了，那张缓存的图也必须一起作废 —— 不然下次 _redraw_scale 会以为
         # 「还是同一张图」直接 return，画布上就永远空着了。
         self._scale_key = None
@@ -3637,6 +3658,7 @@ class MonitorApp:
         """
         self._scale_photo = ImageTk.PhotoImage(
             render_scale(lay, self.scale_theme))
+        self._scale_drawn_w = lay.geom.width
         cv = self.cv_scale
         if self._scale_item is None:
             cv.delete('all')

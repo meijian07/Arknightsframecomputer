@@ -49,17 +49,16 @@ def font_sizes(scale: float = 1.0) -> tuple:
     """三档字号（数字 / 轴动作 / 轴说明），随放大倍数走。
 
     2026-10-11 整体放大一档（9/11/12 -> 11/13/13）。
-    2026-10-16 再放大到**主面板「时间」那一号的字**（用户：『打轴器上的字体太小，
-    操作字体和帧号放大到主面板的时间大小』）。26 是量出来的，不是拍的：本机 150%
-    缩放、进程开着 DPI 感知时 `tkinter.font.Font(font=('Microsoft YaHei UI', 13))
-    .measure('时间')` = 52 —— 一个汉字 26px；PIL 的 truetype size 本身就是像素，
-    所以这里直接写 26。
+    2026-10-16 放大到主面板「时间」那一号的字（26px）。
+    2026-10-27 再按用户要求调小一级（26 -> 22）：「操作和时间」都小一档，
+    「部署银灰」这类操作要能完整显示，而不是被截成「部署…」。
 
-    刻度条宽 / 行高 / 间距跟着这一档走，见 scale.ScaleGeom（26px 的字配 78 / 34 / 34）。
+    22 是 PIL 的像素字号；刻度条宽 / 行高仍按 scale.ScaleGeom 的固定值走，
+    行高留得比字高一些，缩小后不会挤在一起。
     """
-    return (max(8, int(round(26 * scale))),
-            max(9, int(round(26 * scale))),
-            max(9, int(round(26 * scale))))
+    return (max(8, int(round(22 * scale))),
+            max(9, int(round(22 * scale))),
+            max(9, int(round(22 * scale))))
 
 
 def _clip_px(dr, text: str, font, room: float) -> str:
@@ -81,6 +80,22 @@ def _clip_px(dr, text: str, font, room: float) -> str:
             break
         keep += ch
     return keep + ell if keep else ''
+
+
+def split_action(dr, text: str, f_head, f_rest, room: float, gap: float = 6.0) -> tuple:
+    """把一条轴拆成「动作 / 内容」两段，并按可用宽度截断。
+
+    2026-10-27：以前动作段一律只给 42% 的宽度，没有空格的操作
+    （「部署银灰」「开银灰技能」）会被截成「部署…」。现在没有内容段时
+    动作段**用满整行**；有空格时才按 55% / 45% 分给动作和内容。
+    """
+    head, _, rest = one_line(text).partition(' ')
+    head_room = room if not rest else room * 0.55
+    head = _clip_px(dr, head, f_head, head_room)
+    if not rest:
+        return head, ''
+    rest_room = max(0.0, room - dr.textlength(head, font=f_head) - gap)
+    return head, _clip_px(dr, rest, f_rest, rest_room)
 
 
 def render(lay, theme: Theme = None, scale: float = 1) -> Image.Image:
@@ -143,16 +158,16 @@ def render(lay, theme: Theme = None, scale: float = 1) -> Image.Image:
                           top + S(g.label_h) - 1], fill=th.mark_next)
         # 说明按第一个空格切成「动作 + 内容」两段，动作上色，扫起来更快；
         # 没空格的（比如「开银灰技能」）就整条当动作，也不出错。
-        head, _, rest = one_line(m.cue.text).partition(' ')
         # 一行文字的右边界：左边先让给帧号那一列（最多四位数），再留 12px 间距。
         room_right = W - S(g.pad_right) - _num_w - S(12)
-        head = _clip_px(dr, head, f_act, max(0.0, (room_right - S(x_act)) * 0.42))
+        room_all = max(0.0, room_right - S(x_act))
+        head, rest = split_action(dr, m.cue.text, f_act, f_nm, room_all, S(6))
         txt = th.bg if hit else col
         dr.text((S(x_act), S(m.label_y)), head, font=f_act, fill=txt, anchor='lm')
         if rest and head:
             x_rest = S(x_act) + dr.textlength(head, font=f_act) + S(6)
             dr.text((x_rest, S(m.label_y)),
-                    _clip_px(dr, rest, f_nm, room_right - x_rest), font=f_nm, anchor='lm',
+                    rest, font=f_nm, anchor='lm',
                     fill=txt if hit else (th.faint if m.state == 'past'
                                           else (th.text if m.state == 'next' else th.dim)))
         # 右边印**绝对帧号**（2026-10-11 照用户看板批注：不再是「+40」这种带符号的
