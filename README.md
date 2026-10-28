@@ -248,20 +248,6 @@ powershell -ExecutionPolicy Bypass -File build_app.ps1
 
 产物位于 `dist\AFC\`。正式发布包通过 GitHub Releases 分发，不提交进源码仓库。
 
-## Logo
-
-主标 **Frame A**：白色字母 A 同时是画面里的“当前帧”，四角取景框代表画面识别，橙色播放头和底部 30 格刻度对应 30 逻辑帧。
-
-<p align="center">
-  <img src="assets/logo/afc/preview/afc-lockup-horizontal-dark.png" width="720" alt="AFC horizontal lockup">
-</p>
-
-- `assets/logo/afc/afc-icon.svg`：主图标（深色底，适合 exe / 任务栏 / 头像）
-- `assets/logo/afc/afc-lockup-horizontal.svg`：横向组合标
-- `assets/logo/afc/afc-lockup-vertical.svg`：纵向组合标
-- `assets/logo/afc/afc-wordmark.svg`：纯字标 + 30 帧刻度
-- `assets/logo/afc/afc.ico`：Windows 多尺寸图标（16–256px）
-- 备选方案 B（30 帧表盘）与 C（Timecode 横幅）见 `assets/logo/afc/`
 
 ## 声明
 
